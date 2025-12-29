@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AEGIS CHAT</title>
+
+  <link rel="icon" href="/ui/urlimg.png" type="image/png" />
+
+  <!-- Font Awesome -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"
+        crossorigin="anonymous" referrerpolicy="no-referrer" />
+
+  <!-- Fonts -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap">
+
+  <!-- Markdown & Sanitizer -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@2.4.0/dist/purify.min.js"></script>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+
+  <!-- Your CSS -->
+  <link rel="stylesheet" href="/ui/styles.css" />
+</head>
+
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="header-left">
+        <img src="/ui/6vXUM5S.png" alt="AEGIS logo" class="app-logo" />
+        <div class="app-title">
+          <h1>AEGIS CHAT</h1>
+          <p data-i18n="subtitle">Memoria • Búsqueda web • LLM local y remoto</p>
+        </div>
+      </div>
+
+      <div class="header-center">
+        <div class="mode-indicator" id="modeIndicator">Modo: Chat</div>
+        <div class="lang-controls">
+          <button id="langEs" class="lang-btn selected" aria-pressed="true">ES</button>
+          <button id="langEn" class="lang-btn" aria-pressed="false">EN</button>
+        </div>
+      </div>
+
+      <div class="header-right">
+        <div class="header-chip">
+          <span class="chip-label">ID</span>
+          <span class="chip-value" id="conv-id-chip">Local</span>
+        </div>
+
+        <div class="header-icons">
+          <button id="apiKeyBtn" class="icon-btn" title="Configurar API key">
+            <i class="fa-solid fa-key"></i>
+          </button>
+          <button id="treeBtn" class="icon-btn" title="Ver árbol de proyecto">
+            <i class="fa-solid fa-diagram-project"></i>
+          </button>
+          <button id="adminRefresh" class="icon-btn" title="Refrescar datos/modelos cripto (admin)">
+            <i class="fa-solid fa-bolt"></i>
+          </button>
+          <button id="sessionsBtn" class="icon-btn" title="Administrar conversaciones">
+            <i class="fa-solid fa-comments"></i>
+          </button>
+          <button id="helpBtn" class="icon-btn" title="Guía rápida / Quick guide">
+            <i class="fa-solid fa-circle-question"></i>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="app-main">
+      <!-- CHAT -->
+      <section class="chat-col">
+        <div class="chat-hint-trigger">
+          <button class="chat-hint-button" id="hintBtn" type="button" aria-describedby="chat-hint-tooltip" aria-expanded="false">
+            <i class="fa-solid fa-circle-info" aria-hidden="true"></i>
+          </button>
+          <div id="chat-hint-tooltip" class="chat-hint-tooltip" role="tooltip" hidden>
+            <p class="chat-hint-title" data-i18n="hint_title">Guía breve</p>
+            <ul>
+              <li data-i18n="hint_chat"><span class="hint-mode">Chat</span><span>Preguntas generales, debugging local o instrucciones paso a paso.</span></li>
+              <li data-i18n="hint_web"><span class="hint-mode">Web</span><span>Agrega <code>web:</code> cuando necesites fuentes recientes o enlaces citables.</span></li>
+              <li data-i18n="hint_url"><span class="hint-mode">URL</span><span>Usa <code>url:https://...</code> para que lea y resuma un enlace específico.</span></li>
+              <li data-i18n="hint_crypto"><span class="hint-mode">Cripto</span><span>Activa el panel para predicciones, trades simulados y métricas P&amp;L.</span></li>
+              <li data-i18n="hint_image"><span class="hint-mode">Imagen</span><span>Sube capturas y obtén OCR para explicar errores o textos.</span></li>
+            </ul>
+          </div>
+        </div>
+
+        <div id="chat" class="chat-messages"></div>
+
+        <div class="chat-controls">
+          <div class="controls-left">
+            <div class="icon-group">
+              <button id="webBtn" class="icon-btn" aria-pressed="false" title="Modo búsqueda web"><i class="fas fa-globe"></i></button>
+              <button id="urlBtn" class="icon-btn" aria-pressed="false" title="Modo leer URL"><i class="fas fa-link"></i></button>
+              <button id="cryptoBtn" class="icon-btn" aria-pressed="false" title="Modo cripto"><i class="fas fa-coins"></i></button>
+              <button id="imgBtn" class="icon-btn" aria-pressed="false" title="Analizar imagen"><i class="fas fa-image"></i></button>
+            </div>
+
+            <div id="cryptoInline" class="crypto-inline" aria-hidden="true">
+              <div class="crypto-inline-row">
+                <label for="cryptoModelSelect">Model</label>
+                <select id="cryptoModelSelect"></select>
+              </div>
+              <div class="crypto-inline-row">
+                <label for="cryptoHorizon">H</label>
+                <input id="cryptoHorizon" type="number" min="1" step="1" value="15" />
+              <label for="chatTradeQty">Qty</label>
+              <input id="chatTradeQty" type="number" min="0.0001" step="0.0001" value="0.001" />
+              <div class="trade-actions inline-actions">
+                <button id="buyBtn" class="btn-trade buy" type="button" data-i18n="trade_buy">Buy</button>
+                <button id="sellBtn" class="btn-trade sell" type="button" data-i18n="trade_sell">Sell</button>
+              </div>
+            </div>
+          </div>
+          </div>
+
+          <div class="controls-center">
+            <textarea id="msg" class="msg-input" placeholder="Escribe tu mensaje..." autocomplete="off" rows="1"></textarea>
+          </div>
+
+          <div class="controls-right">
+            <button id="cancelBtn" class="icon-btn danger" title="Cancelar solicitud" disabled><i class="fas fa-stop"></i></button>
+            <button id="sendBtn" class="send-btn" type="button" data-i18n="send_btn">Enviar</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- CHART -->
+      <section class="chart-panel" id="chartPanel">
+        <div class="chart-header">
+          <div class="chart-title"><i class="fa-solid fa-chart-line"></i><span id="chartTitle">BTCUSDT</span></div>
+          <div class="chart-controls">
+            <input id="chartSymbol" class="chart-input" type="text" value="BTCUSDT" aria-label="Símbolo cripto" />
+            <button id="chartRefresh" class="icon-btn small" title="Actualizar gráfico" type="button">⟳</button>
+            <button id="chartExpandBtn" class="icon-btn small" title="Expandir/contraer gráfico" type="button">⤢</button>
+            <label class="live-toggle"><input id="chartLive" type="checkbox" /><span data-i18n="live_label">Live</span></label>
+            <label class="live-toggle"><input id="newsMarkersToggle" type="checkbox" checked /><span data-i18n="news_label">News</span></label>
+          </div>
+        </div>
+
+        <div class="chart-canvas"><canvas id="priceChart"></canvas></div>
+        <div id="tradeStatus" class="trade-status" aria-live="polite"></div>
+
+        <div id="predictionCompare" class="prediction-compare" aria-live="polite">
+          <div class="prediction-compare-header">
+            <div class="prediction-compare-title">
+              <i class="fa-solid fa-scale-balanced"></i>
+              <span id="predictionCompareTitle" data-i18n="compare_title">Comparación post-horizonte</span>
+            </div>
+            <div class="prediction-compare-actions">
+              <button id="predictionCompareHelp" class="icon-btn small" title="¿Cómo leer esta sección?" aria-expanded="false" type="button">
+                <i class="fa-solid fa-circle-question" aria-hidden="true"></i>
+              </button>
+              <button id="predictionCompareRefresh" class="icon-btn small" title="Actualizar comparación" type="button">⟳</button>
+            </div>
+          </div>
+          <div id="predictionCompareTooltip" class="prediction-compare-tooltip" role="tooltip" hidden></div>
+          <div id="predictionCompareBody" class="prediction-compare-body"></div>
+        </div>
+
+        <div class="file-viewer">
+          <div class="file-viewer-header">
+            <div id="fileViewerTitle" class="file-viewer-title" data-i18n="file_viewer_placeholder">Selecciona un archivo en Archivos</div>
+            <div class="file-viewer-actions">
+              <button id="copyFileBtn" class="icon-btn small" title="Copiar contenido" type="button">
+                <i class="fa-solid fa-copy"></i>
+              </button>
+            </div>
+          </div>
+          <pre id="fileViewerBody" class="file-viewer-body"></pre>
+        </div>
+      </section>
+
+      <!-- SIDEBAR -->
+      <aside class="app-sidebar">
+        <div class="sidebar-tabs">
+          <button class="tab-btn active" data-tab="sources" type="button" data-i18n="tab_sources">Fuentes</button>
+          <button class="tab-btn" data-tab="files" type="button" data-i18n="tab_files">Archivos</button>
+          <button class="tab-btn" data-tab="session" type="button" data-i18n="tab_session">Sesión</button>
+        </div>
+
+        <div class="tab-panels">
+          <!-- SOURCES -->
+          <div id="tab-sources" class="tab-panel active">
+            <div class="sources-box" id="sources-box">
+              <div class="sources-toolbar">
+                <div class="sources-toolbar-top">
+                  <div class="sources-toolbar-top-left"><strong id="sources-title" data-i18n="sources_title">Fuentes</strong></div>
+                  <div class="sources-toolbar-actions">
+                    <label class="live-toggle"><input id="alertsToggle" type="checkbox" /><span data-i18n="alerts_label">Alerts</span></label>
+                    <label class="live-toggle"><input id="savePredToggle" type="checkbox" checked /><span data-i18n="save_label">Save</span></label>
+                    <label class="live-toggle"><input id="logsLiveToggle" type="checkbox" /><span data-i18n="logs_label">Logs</span></label>
+                    <button id="predsBtn" class="icon-btn small" title="Ver últimas predicciones" type="button">≣</button>
+                    <button id="pnlBtn" class="icon-btn small" title="P&L y trades" type="button">$</button>
+                    <button id="statsBtn" class="icon-btn small" title="Ver estadísticos de predicciones" type="button">Σ</button>
+                  </div>
+                </div>
+              </div>
+              <div id="sources-content" class="sources-content"></div>
+            </div>
+
+            <div class="sources-box">
+              <div class="sources-toolbar">
+                <div class="sources-toolbar-top">
+                  <div class="sources-toolbar-top-left">
+                    <strong>News</strong>
+                    <span id="newsMomentum" class="news-momentum">—</span>
+                  </div>
+                  <div class="sources-toolbar-actions">
+                    <button id="newsRefreshBtn" class="icon-btn small" title="Refrescar noticias" type="button">⟳</button>
+                  </div>
+                </div>
+              </div>
+              <div id="news-list" class="news-list"></div>
+            </div>
+          </div>
+
+          <!-- FILES -->
+          <div id="tab-files" class="tab-panel">
+            <div class="sources-box">
+              <div class="sources-toolbar">
+                <div class="sources-toolbar-top">
+                  <div class="sources-toolbar-top-left">
+                    <strong>Archivos</strong>
+                    <select id="projectSelect" class="project-select">
+                      <option value="app">app (backend)</option>
+                      <option value="ui">ui (frontend)</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="sources-toolbar-actions">
+                  <button id="refreshTreeBtn" class="icon-btn small" title="Recargar árbol" type="button">⟳</button>
+                  <button id="projectUploadBtn" class="icon-btn small" title="Subir proyecto ZIP" type="button"><i class="fas fa-upload"></i></button>
+                  <button id="projectCloneBtn" class="icon-btn small" title="Clonar repo" type="button"><i class="fas fa-code-branch"></i></button>
+                  <button id="projectDeleteBtn" class="icon-btn small danger" title="Eliminar proyecto" type="button"><i class="fas fa-trash"></i></button>
+                  <button id="ingestStatusBtn" class="status-btn" type="button" title="Estado de ingesta">
+                    <span class="status-dot" aria-hidden="true"></span>
+                    <span id="ingestStatusText">Listo</span>
+                  </button>
+                </div>
+              </div>
+              <div id="projectTree" class="project-tree resizable"></div>
+            </div>
+
+            <div class="sources-box">
+              <div class="sources-toolbar">
+                <div class="sources-toolbar-top">
+                  <div class="sources-toolbar-top-left"><strong>Trabajos</strong></div>
+                  <div class="sources-toolbar-actions">
+                    <button id="ingestJobsRefresh" class="icon-btn small" title="Actualizar lista" type="button">⟳</button>
+                  </div>
+                </div>
+              </div>
+              <ul id="ingestJobsList" class="jobs-list"></ul>
+            </div>
+          </div>
+
+          <!-- SESSION -->
+          <div id="tab-session" class="tab-panel">
+            <div class="sources-box" id="conv-info">
+              <strong>Info sesión</strong>
+              <div class="session-id">Id local: <span id="conv-id-display">—</span></div>
+              <div id="timeout-label" class="timeout-label">Tiempo de respuesta: —</div>
+            </div>
+            <div class="sources-box" id="conv-events">
+              <div class="sources-toolbar">
+                <div class="sources-toolbar-top">
+                  <div class="sources-toolbar-top-left"><strong>Log sesión</strong></div>
+                  <div class="sources-toolbar-actions">
+                    <button id="convEventsRefresh" class="icon-btn small" title="Actualizar log" type="button">⟳</button>
+                  </div>
+                </div>
+              </div>
+              <ul id="convEventsList" class="events-list"></ul>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <!-- HELP MODAL -->
+    <div id="helpModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3 id="helpTitle" data-i18n="help_title">Guía rápida de AEGIS</h3>
+          <button id="helpClose" class="icon-btn small" aria-label="Cerrar" type="button">✕</button>
+        </div>
+        <div class="modal-body">
+          <ul class="help-list">
+            <li><strong>Chat</strong>: conversación normal con memoria y modo código/cripto.</li>
+            <li><strong>Modo Web</strong>: activa el botón globo; usa /websearch y muestra fuentes a la derecha.</li>
+            <li><strong>Modo URL</strong>: pega una URL; /fetch_url la lee y aparece en Fuentes.</li>
+            <li><strong>Modo Cripto</strong>: símbolo + H (minutos). Buy/Sell son educativos/test.</li>
+            <li><strong>Imagen</strong>: sube una imagen; /analyze_image hace OCR local (ES/EN).</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- SESSIONS MODAL -->
+    <div id="sessionsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="sessionsTitle">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3 id="sessionsTitle">Conversaciones</h3>
+          <div class="sessions-header-actions">
+            <label class="sessions-toggle">
+              <input type="checkbox" id="sessionsIncludeArchived" />
+              <span>Mostrar archivadas</span>
+            </label>
+            <button id="sessionsClose" class="icon-btn small" aria-label="Cerrar" type="button">✕</button>
+          </div>
+        </div>
+        <div class="modal-body">
+          <ul id="sessionsList" class="sessions-list"></ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- hidden file input removed with import shortcut -->
+    <input id="imgInput" type="file" accept="image/*" class="visually-hidden" />
+    <input id="projectUploadInput" type="file" accept=".zip" class="visually-hidden" />
+  </div>
+
+  <script src="/ui/app.js" defer></script>
+</body>
+</html>

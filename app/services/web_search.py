@@ -1,0 +1,754 @@
+from __future__ import annotations
+
+"""
+Web search service for AEGIS.
+
+Public API:
+    web_search_structured(query: str, num_results: int = 3, lang: Optional[str] = None) -> list[WebSearchResult]
+"""
+
+import html as _html
+import logging
+import os
+import re
+import time
+from threading import RLock, Thread
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
+
+import requests
+from bs4 import BeautifulSoup
+
+from app.core.types import WebSearchResult
+from app.services import search_state
+from app.services.search_state import (
+    ProviderCooldownError,
+    ProviderLimitError,
+    ProxyUnavailableError,
+)
+
+try:
+    from app.services import proxy_pool
+except Exception:  # pragma: no cover
+    proxy_pool = None
+
+logger = logging.getLogger(__name__)
+
+try:  # pragma: no cover
+    from duckduckgo_search import DDGS  # type: ignore
+    _HAS_DDGS = True
+except Exception:  # noqa: BLE001
+    DDGS = None  # type: ignore[assignment]
+    _HAS_DDGS = False
+    logger.info("duckduckgo_search not installed; web search will use HTTP fallbacks.")
+
+DEFAULT_RESULTS = 8
+MAX_RESULTS = 10
+
+DDG_REGION = os.getenv("AEGIS_SEARCH_REGION", "us-en")
+DDG_SAFESRCH = os.getenv("AEGIS_SEARCH_SAFE", "off")
+DDG_LANG = (os.getenv("AEGIS_SEARCH_LANG", "en-us") or "en-us").lower()
+HTTP_TIMEOUT = float(os.getenv("AEGIS_SEARCH_TIMEOUT", "8.0") or "8.0")
+
+MAX_QUERY_CHARS = int(os.getenv("AEGIS_SEARCH_QUERY_MAX_CHARS", "220") or "220")
+
+CACHE_TTL_SECONDS = float(os.getenv("AEGIS_SEARCH_CACHE_TTL", "60") or "60")
+DISK_CACHE_TTL_SECONDS = float(os.getenv("AEGIS_SEARCH_CACHE_DISK_TTL", "300") or "300")
+PROVIDER_ORDER = [
+    p.strip()
+    for p in (
+        os.getenv("AEGIS_SEARCH_PROVIDERS")
+        or "ddgs,qwant_html,startpage_html,brave_html,ddg_html,ddg_json"
+    ).split(",")
+    if p.strip()
+]
+if not PROVIDER_ORDER:
+    PROVIDER_ORDER = ["ddgs", "ddg_html", "ddg_json"]
+
+WARMUP_ON_START = os.getenv("AEGIS_SEARCH_WARMUP_ON_START", "1").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+WARMUP_INTERVAL_SECONDS = float(os.getenv("AEGIS_SEARCH_WARMUP_INTERVAL", "0") or "0")
+WARMUP_QUERIES = [
+    q.strip()
+    for q in (os.getenv("AEGIS_SEARCH_WARMUP_QUERIES") or "test connection,python news").split(
+        ","
+    )
+    if q.strip()
+]
+
+_cache: dict[Tuple[str, int, str], Tuple[float, Tuple[WebSearchResult, ...]]] = {}
+_cache_lock = RLock()
+
+
+def _resolve_lang(lang: Optional[str]) -> str:
+    if not lang:
+        return DDG_LANG
+    raw = lang.strip().lower().replace("_", "-")
+    if raw in {"es", "es-es", "es-mx", "es-419", "spanish"}:
+        return "es-es"
+    if raw in {"en", "en-us", "en-gb", "english"}:
+        return "en-us"
+    if "-" not in raw and len(raw) == 2:
+        return f"{raw}-{raw}"
+    return raw
+
+
+def _accept_language_header(lang_code: str) -> str:
+    base = (lang_code or "en").split("-", 1)[0]
+    if base == "es":
+        return "es-ES,es;q=0.9,en;q=0.7"
+    if base == "en":
+        return "en-US,en;q=0.9,es;q=0.6"
+    return f"{lang_code},{base};q=0.9,en;q=0.7"
+
+
+def _startpage_lang(lang_code: str) -> str:
+    base = (lang_code or "en").split("-", 1)[0]
+    return "spanish" if base == "es" else "english"
+
+
+class ProviderConfig(Tuple):
+    name: str
+    func: Callable[[str, int, str], List[WebSearchResult]]
+    limits: Sequence[tuple[int, int]]
+    cooldown_seconds: int
+    error_cooldown_seconds: int
+
+
+def _limit_from_env(env_name: str, default: str) -> int:
+    raw = os.getenv(env_name)
+    if raw is None or raw == "":
+        return int(default)
+    try:
+        return int(raw)
+    except ValueError:
+        return int(default)
+
+
+_PROVIDERS: Dict[str, Dict[str, object]] = {
+    "ddgs": {
+        "func": lambda query, n, lang=None: _search_with_ddgs(query, n, lang),
+        "limits": [
+            (60, _limit_from_env("AEGIS_SEARCH_DDGS_PER_MIN", "40")),
+            (86400, _limit_from_env("AEGIS_SEARCH_DDGS_PER_DAY", "2000")),
+        ],
+        "cooldown_seconds": _limit_from_env("AEGIS_SEARCH_DDGS_COOLDOWN", "60"),
+        "error_cooldown_seconds": _limit_from_env("AEGIS_SEARCH_DDGS_ERROR_COOLDOWN", "30"),
+    },
+    "ddg_html": {
+        "func": lambda query, n, lang=None: _search_with_ddg_html(query, n, lang),
+        "limits": [
+            (60, _limit_from_env("AEGIS_SEARCH_DDGHTML_PER_MIN", "30")),
+            (86400, _limit_from_env("AEGIS_SEARCH_DDGHTML_PER_DAY", "1500")),
+        ],
+        "cooldown_seconds": _limit_from_env("AEGIS_SEARCH_DDGHTML_COOLDOWN", "90"),
+        "error_cooldown_seconds": _limit_from_env("AEGIS_SEARCH_DDGHTML_ERROR_COOLDOWN", "45"),
+    },
+    "ddg_json": {
+        "func": lambda query, n, lang=None: _search_with_ddg_json(query, n, lang),
+        "limits": [
+            (60, _limit_from_env("AEGIS_SEARCH_DDGJSON_PER_MIN", "20")),
+            (86400, _limit_from_env("AEGIS_SEARCH_DDGJSON_PER_DAY", "500")),
+        ],
+        "cooldown_seconds": _limit_from_env("AEGIS_SEARCH_DDGJSON_COOLDOWN", "120"),
+        "error_cooldown_seconds": _limit_from_env("AEGIS_SEARCH_DDGJSON_ERROR_COOLDOWN", "60"),
+    },
+    "qwant_html": {
+        "func": lambda query, n, lang=None: _search_with_qwant_html(query, n, lang),
+        "limits": [
+            (60, _limit_from_env("AEGIS_SEARCH_QWANT_PER_MIN", "20")),
+            (86400, _limit_from_env("AEGIS_SEARCH_QWANT_PER_DAY", "800")),
+        ],
+        "cooldown_seconds": _limit_from_env("AEGIS_SEARCH_QWANT_COOLDOWN", "90"),
+        "error_cooldown_seconds": _limit_from_env("AEGIS_SEARCH_QWANT_ERROR_COOLDOWN", "45"),
+    },
+    "startpage_html": {
+        "func": lambda query, n, lang=None: _search_with_startpage_html(query, n, lang),
+        "limits": [
+            (60, _limit_from_env("AEGIS_SEARCH_STARTPAGE_PER_MIN", "20")),
+            (86400, _limit_from_env("AEGIS_SEARCH_STARTPAGE_PER_DAY", "800")),
+        ],
+        "cooldown_seconds": _limit_from_env("AEGIS_SEARCH_STARTPAGE_COOLDOWN", "120"),
+        "error_cooldown_seconds": _limit_from_env("AEGIS_SEARCH_STARTPAGE_ERROR_COOLDOWN", "60"),
+    },
+    "brave_html": {
+        "func": lambda query, n, lang=None: _search_with_brave_html(query, n, lang),
+        "limits": [
+            (60, _limit_from_env("AEGIS_SEARCH_BRAVE_PER_MIN", "15")),
+            (86400, _limit_from_env("AEGIS_SEARCH_BRAVE_PER_DAY", "600")),
+        ],
+        "cooldown_seconds": _limit_from_env("AEGIS_SEARCH_BRAVE_COOLDOWN", "150"),
+        "error_cooldown_seconds": _limit_from_env("AEGIS_SEARCH_BRAVE_ERROR_COOLDOWN", "75"),
+    },
+}
+
+# DuckDuckGo HTML regex: grab <a class="result__a" href="...">Title</a>
+_DDG_A_RE = re.compile(
+    r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Some DDG pages may require JS; detect common block pages
+_BLOCK_MARKERS = ("enable javascript", "requires javascript", "unusual traffic", "robot")
+
+
+def _proxies_enabled() -> bool:
+    return bool(getattr(proxy_pool, "proxies_configured", lambda: False)())
+
+
+def _http_get(url: str, **kwargs) -> requests.Response:
+    if proxy_pool and _proxies_enabled():
+        try:
+            with proxy_pool.proxy_session() as (session, _):
+                return session.get(url, **kwargs)
+        except ProxyUnavailableError:
+            logger.debug("Proxy unavailable; falling back to direct request for %s", url)
+    return requests.get(url, **kwargs)
+
+
+def _clean_query(q: str) -> str:
+    q = " ".join((q or "").split())
+    if len(q) > MAX_QUERY_CHARS:
+        q = q[:MAX_QUERY_CHARS].rsplit(" ", 1)[0] or q[:MAX_QUERY_CHARS]
+    return q.strip()
+
+
+def _decode_ddg_href(href: str) -> str:
+    """
+    DDG HTML results often use redirect links like:
+      /l/?kh=-1&uddg=https%3A%2F%2Fexample.com
+    Decode to the real destination URL.
+    """
+    href = (href or "").strip()
+    if not href:
+        return ""
+
+    # Normalize scheme-less
+    if href.startswith("//"):
+        href = "https:" + href
+
+    # Make absolute if relative
+    if href.startswith("/"):
+        href = urljoin("https://duckduckgo.com", href)
+
+    try:
+        p = urlparse(href)
+        qs = parse_qs(p.query)
+        if "uddg" in qs and qs["uddg"]:
+            return unquote(qs["uddg"][0]).strip()
+    except Exception:
+        pass
+
+    return href.strip()
+
+
+def _normalize_result(title: str | None, snippet: str | None, link: str | None) -> Optional[WebSearchResult]:
+    link = (link or "").strip()
+    if not link:
+        return None
+    return WebSearchResult(
+        title=(title or "").strip(),
+        snippet=(snippet or "").strip(),
+        link=link,
+    )
+
+
+def _get_memory_cache(query: str, num_results: int, lang: str) -> Optional[Tuple[WebSearchResult, ...]]:
+    key = (query, num_results, lang)
+    with _cache_lock:
+        item = _cache.get(key)
+        if not item:
+            return None
+        ts, payload = item
+        if time.time() - ts > CACHE_TTL_SECONDS:
+            _cache.pop(key, None)
+            return None
+        return payload
+
+
+def _set_memory_cache(query: str, num_results: int, lang: str, results: Sequence[WebSearchResult]) -> None:
+    key = (query, num_results, lang)
+    with _cache_lock:
+        _cache[key] = (time.time(), tuple(results))
+
+
+def _fetch_cached_results(query: str, num_results: int, lang: str) -> Optional[List[WebSearchResult]]:
+    mem = _get_memory_cache(query, num_results, lang)
+    if mem:
+        return list(mem)
+
+    cached = search_state.get_cached_results(query, num_results, lang=lang)
+    if not cached:
+        return None
+    try:
+        parsed = [WebSearchResult(**item) for item in cached]
+    except Exception:
+        return None
+    _set_memory_cache(query, num_results, lang, parsed)
+    return parsed
+
+
+def _persist_cache(query: str, num_results: int, lang: str, provider: str, results: Sequence[WebSearchResult]) -> None:
+    _set_memory_cache(query, num_results, lang, results)
+    payload = [r.to_dict() for r in results]
+    search_state.set_cached_results(query, num_results, provider, payload, DISK_CACHE_TTL_SECONDS, lang=lang)
+
+
+def _search_with_ddgs(query: str, num_results: int, lang: Optional[str] = None) -> List[WebSearchResult]:
+    if not _HAS_DDGS:
+        return []
+
+    results: List[WebSearchResult] = []
+    lang_code = _resolve_lang(lang)
+    try:
+        deadline = time.monotonic() + HTTP_TIMEOUT
+        with DDGS(timeout=HTTP_TIMEOUT) as ddgs:  # type: ignore[operator]
+            # Try a couple backends; versions vary a lot in behavior.
+            backends = [None, "html", "lite"]
+
+            for backend in backends:
+                if time.monotonic() > deadline:
+                    logger.warning("DDGS search timed out before backend=%r for query=%r", backend, query)
+                    break
+                try:
+                    kwargs = dict(
+                        safesearch=DDG_SAFESRCH,
+                        region=DDG_REGION,
+                        timelimit="d",
+                    )
+                    kwargs["language"] = lang_code
+                    if backend:
+                        kwargs["backend"] = backend
+
+                    for item in ddgs.text(query, max_results=num_results, **kwargs):
+                        r = _normalize_result(
+                            item.get("title"),
+                            item.get("body"),
+                            item.get("href") or item.get("url"),
+                        )
+                        if r:
+                            results.append(r)
+                        if len(results) >= num_results or time.monotonic() > deadline:
+                            break
+
+                    if results:
+                        return results[:num_results]
+
+                except TypeError:
+                    # Minimal call if this installed version hates kwargs
+                    for item in ddgs.text(query, max_results=num_results):
+                        r = _normalize_result(
+                            item.get("title"),
+                            item.get("body"),
+                            item.get("href") or item.get("url"),
+                        )
+                        if r:
+                            results.append(r)
+                        if len(results) >= num_results or time.monotonic() > deadline:
+                            break
+                    if results:
+                        return results[:num_results]
+
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("DDGS backend=%r failed for query=%r: %s", backend, query, exc)
+                    results = []
+                    continue
+
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("DDGS search failed for query=%r: %s", query, exc)
+
+    return []
+
+
+def _search_with_ddg_html(query: str, num_results: int, lang: Optional[str] = None) -> List[WebSearchResult]:
+    """
+    Real web search fallback by fetching DuckDuckGo HTML results and parsing links.
+    This avoids the Instant Answer API limitation (often returns no URLs).
+    """
+    endpoints = (
+        "https://html.duckduckgo.com/html/",
+        "https://duckduckgo.com/html/",
+        "https://lite.duckduckgo.com/lite/",
+    )
+
+    lang_code = _resolve_lang(lang)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (AegisChat)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": _accept_language_header(lang_code),
+    }
+
+    for base in endpoints:
+        try:
+            resp = _http_get(
+                base,
+                params={"q": query, "kl": lang_code},
+                timeout=HTTP_TIMEOUT,
+                headers=headers,
+                allow_redirects=True,
+            )
+            if resp.status_code >= 400:
+                continue
+
+            text = resp.text or ""
+            low = text.lower()
+            if any(m in low for m in _BLOCK_MARKERS):
+                logger.warning("DDG HTML appears blocked (marker) for query=%r via %s", query, base)
+                continue
+
+            matches = list(_DDG_A_RE.finditer(text))
+            if not matches:
+                continue
+
+            out: List[WebSearchResult] = []
+            for m in matches:
+                href = _decode_ddg_href(m.group(1))
+                title_html = m.group(2) or ""
+                title = _html.unescape(re.sub(r"<.*?>", "", title_html)).strip()
+
+                r = _normalize_result(title, "", href)
+                if r:
+                    out.append(r)
+                if len(out) >= num_results:
+                    break
+
+            if out:
+                return out[:num_results]
+
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("DDG HTML fallback failed via %s for query=%r: %s", base, query, exc)
+            continue
+
+    return []
+
+
+def _search_with_ddg_json(query: str, num_results: int, lang: Optional[str] = None) -> List[WebSearchResult]:
+    """
+    DuckDuckGo Instant Answer API (NOT a real web search API).
+    Keep as last resort only.
+    """
+    url = "https://api.duckduckgo.com/"
+    lang_code = _resolve_lang(lang)
+    params = {
+        "q": query,
+        "format": "json",
+        "no_redirect": "1",
+        "no_html": "1",
+        "t": "aegis-chat",
+        "kl": lang_code,
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (AegisChat)",
+        "Accept": "application/json,text/plain,*/*",
+    }
+
+    try:
+        resp = _http_get(
+            url,
+            params=params,
+            timeout=HTTP_TIMEOUT,
+            headers=headers,
+            allow_redirects=True,
+        )
+        resp.raise_for_status()
+
+        if not resp.text or not resp.text.strip():
+            logger.warning("DDG JSON fallback returned empty body for query=%r", query)
+            return []
+
+        data = resp.json()
+
+    except Exception as exc:  # noqa: BLE001
+        snippet = ""
+        try:
+            snippet = (resp.text[:200] if "resp" in locals() and resp is not None and resp.text else "")
+        except Exception:
+            pass
+        logger.exception("DuckDuckGo JSON fallback failed for %r: %s | body=%r", query, exc, snippet)
+        return []
+
+    results: List[WebSearchResult] = []
+
+    abstract = (data.get("AbstractText") or "").strip()
+    abstract_url = (data.get("AbstractURL") or "").strip()
+    heading = (data.get("Heading") or "").strip()
+    r0 = _normalize_result(heading or query, abstract, abstract_url)
+    if r0:
+        results.append(r0)
+
+    related = data.get("RelatedTopics") or []
+    for item in related:
+        if len(results) >= num_results:
+            break
+
+        if "Topics" in item:
+            for st in (item.get("Topics") or []):
+                if len(results) >= num_results:
+                    break
+                text = st.get("Text") or ""
+                first_url = st.get("FirstURL") or ""
+                r = _normalize_result(text, text, first_url)
+                if r:
+                    results.append(r)
+            continue
+
+        text = item.get("Text") or ""
+        first_url = item.get("FirstURL") or ""
+        r = _normalize_result(text, text, first_url)
+        if r:
+            results.append(r)
+
+    return results[:num_results]
+
+
+def _decode_qwant_href(href: str) -> str:
+    try:
+        parsed = urlparse(href)
+        if "qwant.com" in parsed.netloc and "/redirect" in parsed.path:
+            target = parse_qs(parsed.query).get("u")
+            if target:
+                return unquote(target[0])
+    except Exception:
+        return href
+    return href
+
+
+def _qwant_lite_url(query: str, num_results: int, lang_code: str) -> str:
+    lang = (lang_code or "en-us").split("-", 1)[0]
+    return f"https://lite.qwant.com/?q={quote_plus(query)}&l={lang}&count={min(max(num_results, 10), 30)}"
+
+
+def _search_with_qwant_html(query: str, num_results: int, lang: Optional[str] = None) -> List[WebSearchResult]:
+    lang_code = _resolve_lang(lang)
+    url = _qwant_lite_url(query, num_results, lang_code)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (AegisChat-Qwant)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    try:
+        resp = _http_get(url, timeout=HTTP_TIMEOUT, headers=headers, allow_redirects=True)
+        if resp.status_code >= 400:
+            return []
+        soup = BeautifulSoup(resp.text or "", "html.parser")
+        anchors = soup.select("a.result-link, a[data-testid='result-title'], div.result a[href]")
+        results: List[WebSearchResult] = []
+        seen: set[str] = set()
+        for a in anchors:
+            href = a.get("href")
+            if not href:
+                continue
+            href = _decode_qwant_href(_html.unescape(href.strip()))
+            if not href.lower().startswith("http"):
+                continue
+            if href in seen:
+                continue
+            seen.add(href)
+            title = a.get_text(" ", strip=True)
+            snippet_node = None
+            parent = a.find_parent("div")
+            if parent:
+                snippet_node = parent.find(class_="result-desc")
+            snippet = snippet_node.get_text(" ", strip=True) if snippet_node else ""
+            r = _normalize_result(title, snippet, href)
+            if r:
+                results.append(r)
+            if len(results) >= num_results:
+                break
+        return results
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Qwant search failed for %r: %s", query, exc)
+        return []
+
+
+def _search_with_startpage_html(query: str, num_results: int, lang: Optional[str] = None) -> List[WebSearchResult]:
+    lang_code = _resolve_lang(lang)
+    sp_lang = _startpage_lang(lang_code)
+    url = f"https://www.startpage.com/sp/search?q={quote_plus(query)}&segment=startpage.firefox&language={sp_lang}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (AegisChat-Startpage)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    try:
+        resp = _http_get(url, timeout=HTTP_TIMEOUT, headers=headers, allow_redirects=True)
+        if resp.status_code >= 400:
+            return []
+        soup = BeautifulSoup(resp.text or "", "html.parser")
+        containers = soup.select("div.w-gl__result, div.serp-result")
+        results: List[WebSearchResult] = []
+        seen: set[str] = set()
+        for container in containers:
+            link = container.select_one("a.w-gl__result-title, a.result-link, a[data-testid='result-title']")
+            if not link:
+                continue
+            href = link.get("href")
+            if not href or not href.lower().startswith("http"):
+                continue
+            if href in seen:
+                continue
+            seen.add(href)
+            title = link.get_text(" ", strip=True)
+            snippet_el = container.select_one("p.w-gl__description, p.result-description")
+            snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
+            r = _normalize_result(title, snippet, href)
+            if r:
+                results.append(r)
+            if len(results) >= num_results:
+                break
+        return results
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Startpage search failed for %r: %s", query, exc)
+        return []
+
+
+def _search_with_brave_html(query: str, num_results: int, lang: Optional[str] = None) -> List[WebSearchResult]:
+    lang_code = _resolve_lang(lang)
+    url = f"https://search.brave.com/search?q={quote_plus(query)}&source=web&country=US&ui-lang={lang_code}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (AegisChat-Brave)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    try:
+        resp = _http_get(url, timeout=HTTP_TIMEOUT, headers=headers, allow_redirects=True)
+        if resp.status_code >= 400:
+            return []
+        soup = BeautifulSoup(resp.text or "", "html.parser")
+        anchors = soup.select("a[data-testid='result-title'], a.result-header, div.snippet a[href]")
+        results: List[WebSearchResult] = []
+        seen: set[str] = set()
+        for a in anchors:
+            href = a.get("href")
+            if not href or not href.lower().startswith("http"):
+                continue
+            if href in seen:
+                continue
+            seen.add(href)
+            title = a.get_text(" ", strip=True)
+            snippet_el = a.find_parent("div")
+            snippet = ""
+            if snippet_el:
+                snippet_candidate = snippet_el.find("p")
+                if snippet_candidate:
+                    snippet = snippet_candidate.get_text(" ", strip=True)
+            r = _normalize_result(title, snippet, href)
+            if r:
+                results.append(r)
+            if len(results) >= num_results:
+                break
+        return results
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Brave search failed for %r: %s", query, exc)
+        return []
+
+
+def _call_provider(
+    provider_name: str,
+    cfg: Dict[str, object],
+    query: str,
+    num_results: int,
+    lang: str,
+) -> List[WebSearchResult]:
+    func: Callable[[str, int, str], List[WebSearchResult]] = cfg["func"]  # type: ignore[assignment]
+    limits: Sequence[tuple[int, int]] = cfg["limits"]  # type: ignore[assignment]
+    cooldown_seconds: int = cfg["cooldown_seconds"]  # type: ignore[assignment]
+    error_cooldown_seconds: int = cfg["error_cooldown_seconds"]  # type: ignore[assignment]
+
+    search_state.guard_provider(provider_name, limits, cooldown_seconds)
+    try:
+        results = func(query, num_results, lang)
+        return results or []
+    except Exception as exc:
+        logger.exception("Provider %s failed for %r: %s", provider_name, query, exc)
+        search_state.record_error(provider_name, [window for window, _ in limits], error_cooldown_seconds)
+        raise
+
+
+def web_search_structured(
+    query: str,
+    num_results: int = DEFAULT_RESULTS,
+    lang: Optional[str] = None,
+) -> list[WebSearchResult]:
+    try:
+        cleaned = _clean_query(query)
+        if not cleaned:
+            return []
+
+        n = max(1, min(num_results, MAX_RESULTS))
+        lang_code = _resolve_lang(lang)
+
+        cached = _fetch_cached_results(cleaned, n, lang_code)
+        if cached:
+            logger.debug("web_search_structured: cache hit for %r", cleaned)
+            return cached
+
+        for provider_name in PROVIDER_ORDER:
+            cfg = _PROVIDERS.get(provider_name)
+            if not cfg:
+                logger.debug("web_search_structured: unknown provider %s", provider_name)
+                continue
+            try:
+                results = _call_provider(provider_name, cfg, cleaned, n, lang_code)
+            except ProviderCooldownError as exc:
+                logger.info("Provider %s cooling down: %s", provider_name, exc)
+                continue
+            except ProviderLimitError as exc:
+                logger.info("Provider %s quota hit: %s", provider_name, exc)
+                continue
+            except Exception:
+                continue
+
+            if not results:
+                logger.debug("Provider %s returned no results for %r", provider_name, cleaned)
+                continue
+
+            trimmed = results[:n]
+            _persist_cache(cleaned, n, lang_code, provider_name, trimmed)
+            return trimmed
+
+        logger.warning("web_search_structured: all providers exhausted for %r", cleaned)
+        stale = search_state.get_stale_cached_results(cleaned, n, lang=lang_code)
+        if stale:
+            try:
+                restored = [WebSearchResult(**item) for item in stale]
+                logger.info("Using stale cache for %r after provider exhaustion.", cleaned)
+                return restored[:n]
+            except Exception:
+                logger.debug("Failed to parse stale cache for %r", cleaned)
+        return []
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("web_search_structured failed for query=%r: %s", query, exc)
+        return []
+
+
+_warmup_started = False
+
+
+def _run_warmup_cycle() -> None:
+    for q in WARMUP_QUERIES:
+        try:
+            web_search_structured(q, num_results=3)
+        except Exception:
+            logger.debug("Warmup query %r failed", q, exc_info=True)
+
+
+def _warmup_loop() -> None:
+    if WARMUP_ON_START:
+        _run_warmup_cycle()
+    if WARMUP_INTERVAL_SECONDS <= 0:
+        return
+    while True:
+        time.sleep(max(WARMUP_INTERVAL_SECONDS, 5.0))
+        _run_warmup_cycle()
+
+
+def start_background_warmup() -> None:
+    global _warmup_started
+    if _warmup_started:
+        return
+    if not WARMUP_ON_START and WARMUP_INTERVAL_SECONDS <= 0:
+        return
+    _warmup_started = True
+    Thread(target=_warmup_loop, name="web-search-warmup", daemon=True).start()

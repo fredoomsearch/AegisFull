@@ -1,0 +1,12 @@
+cat <<'EOF' > .gitignore
+venv/
+__pycache__/
+*.pyc
+*.db
+logs/
+models/
+data/crypto_data.csv
+artifacts/
+uploads/
+.env
+EOF

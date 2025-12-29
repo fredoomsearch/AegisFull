@@ -1,0 +1,244 @@
+"""
+AEGIS main FastAPI application entrypoint.
+
+Run:
+  uvicorn main:app --reload --log-level debug
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import subprocess
+import time
+import uuid
+from collections import defaultdict, deque
+from pathlib import Path
+from typing import Deque, Dict, List, Optional, Tuple
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from app.api import router as api_router
+from app.api.files import router as files_router
+from app.db.base import engine, init_db
+from app.services.web_search import start_background_warmup
+
+import app.db.models  # noqa: F401  # register models
+
+
+logger = logging.getLogger("aegis.main")
+if not logger.handlers:
+    logging.basicConfig(
+        level=os.getenv("AEGIS_LOG_LEVEL", "INFO"),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+LLM_WARMUP_ON_START = os.getenv("AEGIS_LLM_WARMUP", "1").lower() in {"1", "true", "yes", "on"}
+
+# Trust reverse-proxy headers for client IP
+TRUST_PROXY = os.getenv("AEGIS_TRUST_PROXY", "0").lower() in {"1", "true", "yes", "on"}
+
+
+def _git_sha_cached() -> str:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], timeout=1).decode().strip()
+    except Exception:
+        return "unknown"
+
+
+GIT_SHA = _git_sha_cached()
+
+app = FastAPI(title="AEGIS Chat", version="0.1.0")
+
+# Routers
+app.include_router(files_router)
+app.include_router(api_router)
+
+# CORS
+_cors_origins_raw = os.getenv("AEGIS_CORS_ORIGINS", "*")
+_cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()] or ["*"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Rate limiting
+RATE_LIMIT = int(os.getenv("AEGIS_RATE_LIMIT_PER_MINUTE", "120"))
+RATE_LIMIT_BUCKET_TTL = int(os.getenv("AEGIS_RATE_LIMIT_BUCKET_TTL", "120"))
+
+_rate_overrides_raw = os.getenv("AEGIS_RATE_LIMITS", "")
+_rate_overrides: List[Tuple[str, int]] = []
+for part in _rate_overrides_raw.split(","):
+    part = part.strip()
+    if not part or "=" not in part:
+        continue
+    prefix, value = part.split("=", 1)
+    prefix = prefix.strip()
+    try:
+        limit_val = int(value.strip())
+    except ValueError:
+        continue
+    if prefix:
+        _rate_overrides.append((prefix, limit_val))
+
+
+class SlidingWindowRateLimiter:
+    def __init__(self) -> None:
+        self._buckets: Dict[str, Deque[float]] = defaultdict(deque)
+
+    def allow(self, key: str, limit_per_minute: int) -> bool:
+        if limit_per_minute <= 0:
+            return True
+
+        now = time.time()
+        window_start = now - 60.0
+
+        dq = self._buckets[key]
+        while dq and dq[0] < window_start:
+            dq.popleft()
+
+        if len(dq) >= limit_per_minute:
+            return False
+
+        dq.append(now)
+        return True
+
+    def gc(self, ttl_seconds: int) -> None:
+        if ttl_seconds <= 0:
+            return
+        if len(self._buckets) < 10000:
+            return
+        cutoff = time.time() - float(ttl_seconds)
+        for k, dq in list(self._buckets.items()):
+            if not dq or dq[-1] < cutoff:
+                self._buckets.pop(k, None)
+
+
+rate_limiter = SlidingWindowRateLimiter()
+
+
+def _client_ip(request: Request) -> str:
+    if TRUST_PROXY:
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            return xff.split(",")[0].strip() or "unknown"
+        xri = request.headers.get("x-real-ip")
+        if xri:
+            return xri.strip() or "unknown"
+    return request.client.host if request.client else "unknown"
+
+
+def _error_payload(detail: object, status_code: int, trace_id: Optional[str]) -> dict:
+    if isinstance(detail, dict):
+        message = detail.get("message") or detail.get("detail") or str(detail)
+    else:
+        message = str(detail)
+    return {
+        "detail": detail,
+        "error": {"message": message, "code": status_code, "trace_id": trace_id},
+    }
+
+
+@app.middleware("http")
+async def add_trace_and_rate_limit(request: Request, call_next):
+    trace_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+    request.state.trace_id = trace_id
+    request.state.logger = logging.LoggerAdapter(logger, {"trace_id": trace_id})
+
+    # rate limiting
+    limit = RATE_LIMIT
+    for prefix, override in _rate_overrides:
+        if request.url.path.startswith(prefix):
+            limit = override
+            break
+
+    if limit > 0:
+        ip = _client_ip(request)
+        key = f"{ip}:{request.url.path}"
+        if not rate_limiter.allow(key, limit):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        rate_limiter.gc(RATE_LIMIT_BUCKET_TTL)
+
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = trace_id
+    return response
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    trace_id = getattr(request.state, "trace_id", None)
+    return JSONResponse(status_code=exc.status_code, content=_error_payload(exc.detail, exc.status_code, trace_id))
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    trace_id = getattr(request.state, "trace_id", None)
+    logger.exception("Unhandled exception: %s", exc)
+    return JSONResponse(status_code=500, content=_error_payload("Internal server error", 500, trace_id))
+
+
+# Static UI
+BASE_DIR = Path(__file__).resolve().parent
+UI_DIR = BASE_DIR / "ui"
+
+if UI_DIR.exists():
+    app.mount("/ui", StaticFiles(directory=str(UI_DIR), html=False), name="ui-static")
+else:
+    logger.warning("[main] UI_DIR does not exist: %s", UI_DIR)
+
+FAVICON_PATH = UI_DIR / "urlimg.png"
+
+
+@app.get("/", response_class=HTMLResponse)
+def index() -> HTMLResponse:
+    index_path = UI_DIR / "index.html"
+    if not index_path.exists():
+        logger.error("[main] index.html NOT FOUND at %s", index_path)
+        return HTMLResponse("<h1>UI not found</h1>", status_code=500)
+    return HTMLResponse(index_path.read_text(encoding="utf-8"))
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    if FAVICON_PATH.exists():
+        return FileResponse(str(FAVICON_PATH))
+    return HTMLResponse("", status_code=204)
+
+
+def _warm_llm_once() -> None:
+    try:
+        logger.info("[main] Warming up LLM backend...")
+        from app.llm_client_offload import generate_response  # local import (safer for startup/tests)
+
+        generate_response(
+            [
+                {"role": "system", "content": "You are AEGIS."},
+                {"role": "user", "content": "ping"},
+            ],
+            max_new_tokens=8,
+        )
+        logger.info("[main] LLM warm-up completed.")
+    except Exception:
+        logger.warning("[main] LLM warm-up skipped (backend not ready).", exc_info=True)
+
+
+@app.on_event("startup")
+def on_startup() -> None:
+    logger.info("[main] Initializing DB...")
+    init_db(engine)
+    logger.info("[main] Database ready.")
+    if LLM_WARMUP_ON_START:
+        _warm_llm_once()
+    start_background_warmup()
+
+
+@app.get("/healthz")
+def healthz() -> dict:
+    return {"status": "ok", "version": app.version, "git_sha": GIT_SHA}

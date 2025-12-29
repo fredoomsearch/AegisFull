@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: aegis-chat
+    env: docker
+    plan: free
+    region: oregon
+
+    dockerfilePath: ./Dockerfile
+
+    envVars:
+      - key: AEGIS_MODEL_PATH
+        value: /app/models/wizardcoder-python-7b-v1.0.Q5_K_M.gguf
+      - key: AEGIS_N_THREADS
+        value: "10"
+      - key: AEGIS_N_CTX
+        value: "4096"
+      - key: AEGIS_N_GPU_LAYERS
+        value: "10"
+      - key: DATABASE_URL
+        value: sqlite:///./aegis.db
+      # Si algún día usas OpenAI desde Render:
+      # - key: OPENAI_API_KEY
+      #   sync: false   # la pones en el panel, no en git
+
+    healthCheckPath: "/"
