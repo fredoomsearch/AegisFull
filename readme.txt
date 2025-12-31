@@ -24,11 +24,14 @@ export AEGIS_API_KEY="your"   # optional but fine to reuse
 ## Crypto refresh (lightning icon) – MUST READ
 - The 403 “ADMIN_API_KEY not configured” means uvicorn did not see the env var. Exports after uvicorn starts do nothing.
 - Do it in order, in one shell:
+REMENBER CHANGE OF KEY FOR USE INGEST LOGS, AND CRYPTO REFRESH
 ```
 # stop uvicorn if running
 export ADMIN_API_KEY="your"
 export AEGIS_API_KEY="your"
+export FILES_API_KEY="your--key"
 echo "$ADMIN_API_KEY"   # should print: your
+
 uvicorn main:app --reload
 ```
 - In the UI key prompt, enter `your`. Or via curl (same key):
@@ -38,12 +41,18 @@ curl -X POST http://127.0.0.1:8000/admin/refresh-crypto \
   -H "Content-Type: application/json" \
   -d '{}'
 ```
+- During lightning refresh the Files/Jobs/Logs sidebar stays visible; admin logs stream into the Sources box under the chart. The Status/Sesión panel can be hidden/shown with its toggle to leave more room for chat.
 - Logs for refresh jobs now live at `/admin/refresh-log` (not `/files/ingest/log`). Example:
 ```
 curl "http://127.0.0.1:8000/admin/refresh-log?path=logs/refresh_<id>.log&tail=200" \
   -H "X-API-Key: your"
 ```
 - The UI log toggle will use the admin log endpoint when the path looks like `logs/refresh_*.log`.
+- Ingest logs (Files tab) now require `job_id` (not a path). Click a job row or:
+```
+curl "http://127.0.0.1:8000/files/ingest/log?job_id=<job>&tail=200" \
+  -H "X-API-Key: <FILES_API_KEY>"
+```
 
 ---
 ## Reddit sentiment controls (to avoid timeouts)
@@ -82,7 +91,7 @@ If running without keys: `export AEGIS_AUTH_MODE=off` and omit `X-API-Key`.
 - **Vision/OCR** – `/analyze_image` (ES/EN).
 - **RAG** – FAISS + `app/scripts/ingest_repo.py`; auto-used for coding questions.
 - **Crypto lab** – `/crypto/predict`, `/crypto/ohlcv`, `/crypto/trade`, `/crypto/predictions`, `/crypto/predictions/stats`, `/crypto/live-enriched-snapshot`, `/admin/refresh-crypto`.
-- **UI** – SPA (chat/Web/URL/image modes, crypto chart + buy/sell, project tabs, key prompt, sources sidebar with alerts/logs/stats/P&L/predictions, upload/ingest pill, cancel).
+- **UI** – SPA (chat/Web/URL/image modes, crypto chart + buy/sell, project tabs, key prompt, sources sidebar with alerts/logs/stats/P&L/predictions, upload/ingest pill, cancel). Files tab now shows ingest jobs and ingest logs (`job_id`), and Sources logs auto-switch to `/admin/refresh-log` for crypto refresh.
 - **Ops** – Dockerfile, docker-compose, Nginx, Prometheus, CI.
 
 ---
@@ -174,6 +183,11 @@ AEGIS_REDDIT_RETRIES=2
 AEGIS_REDDIT_BACKOFF=0.6
 AEGIS_REDDIT_MAX_CALLS=12
 AEGIS_ORDERBOOK_CACHE_TTL=20
+BINANCE_LIVE=0                     # keep 0 for test/demo; set 1 only when wiring live keys server-side
+
+# AV (optional; manual hook)
+FILES_MAX_UPLOAD_BYTES=52428800
+# If you add ClamAV: scan uploads/clones before ingest; reject on infection/timeout.
 ```
 Performance presets:
 - Default: balanced CPU-first. If you have VRAM, raise `AEGIS_N_GPU_LAYERS` (e.g., 8–12).
@@ -208,10 +222,12 @@ uvicorn main:app --reload
 - Auth: `AEGIS_API_KEY`, `FILES_API_KEY`, `ADMIN_API_KEY`.
 - Rate limit: `AEGIS_RATE_LIMIT_PER_MINUTE`, `AEGIS_RATE_LIMITS`.
 - Network safety: SSRF blocklist (`TOOLS_BLOCK_NETS`), redirect control, byte caps; Tor for onion.
+- Fetch hardening: only http/https, redirect limit (`TOOLS_MAX_REDIRECTS`, default 1), content-length/mime caps, `.onion` only via Tor fetch, and AV scan for persisted downloads/uploads/clones if enabled.
 - Input limits: `/analyze_image` enforces MIME/size; fetch truncates big payloads.
 - External timeouts: CoinGecko/Binance (`COINGECKO_TIMEOUT`, `BINANCE_TIMEOUT`); Reddit sentiment timeouts + retries (see env above).
 - Transport: run behind HTTPS in production; tighten CORS.
 - Observability: `/healthz`; admin logs via `/admin/refresh-log`.
+- Optional AV: run ClamAV (clamd/clamav-daemon) and scan uploads/clones before ingest; reject and delete if infected or on timeout.
 
 ---
 ## Development tips
@@ -228,8 +244,19 @@ uvicorn main:app --reload
 - Modes: chat/web/url/image/crypto; key prompt sets `X-API-Key` for all calls.
 - Crypto: chart + buy/sell; stats, comparison, alerts/logs toggles; lightning triggers refresh (admin key required).
 - Logs: when log path matches `logs/refresh_*.log`, UI polls `/admin/refresh-log`; otherwise `/files/ingest/log`.
+- Files tab: ingest jobs list + ingest log viewer (`job_id`), plus tree/upload/clone/delete controls.
 - Tabs: Fuentes/Archivos/Sesión localized; send/buy/sell labels track selected language.
 - Theme: default “future” neon palette; bubbles use theme vars.
+
+---
+## Security overview (what’s enforced)
+- Auth keys per surface: `AEGIS_API_KEY` (general), `FILES_API_KEY` (uploads/ingest), `ADMIN_API_KEY` (admin jobs). Lock CORS to your origin (`AEGIS_CORS_ORIGINS`).
+- Rate limits: global + per-route (`AEGIS_RATE_LIMIT_PER_MINUTE`, `AEGIS_RATE_LIMITS`); tighten for `/admin/*` and `/files/*`.
+- SSRF/Fetch hardening: only http/https; block private nets (`TOOLS_BLOCK_NETS`); redirect limit (`TOOLS_MAX_REDIRECTS`, default 1); content-length/MIME caps; `.onion` only via Tor fetch; size caps (`TOOLS_MAX_BYTES`).
+- Upload/ingest safety: size caps (`FILES_MAX_UPLOAD_BYTES`); zip-slip protection; AV scan on uploads/clones (clamd/clamav if installed) controlled by `FILES_AV_SCAN`/`FILES_AV_TIMEOUT`; ingest logs require `job_id`.
+- OCR guard: `AEGIS_MAX_IMAGE_BYTES` and MIME checks; web fetch truncation for oversized payloads.
+- Transport/infra: run behind HTTPS, tighten headers (CSP/Referrer/HSTS) at proxy, disable directory listing, run as non-root; if Postgres, use TLS and least-privilege DB user.
+- Logging: avoid logging secrets; keep logs non-world-readable; rotate/truncate. Admin logs via `/admin/refresh-log`; ingest logs via `/files/ingest/log?job_id=...`.
 
 ---
 ## Understanding crypto outputs
@@ -238,6 +265,7 @@ uvicorn main:app --reload
 - Horizon H: minutes until outcome check.
 - Delta: actual price change after H; BUY good if Δ>0, SELL good if Δ<0, HOLD if |Δ|<1%.
 - Stats: accuracy, avg Δ, per-model performance; grade badge summarizes direction strength.
+- Modes (current vs scalping): current mode is minute-scale (5–15m horizon) using 1m data; websocket/tick scalping is not wired yet. If you add scalping, use stricter thresholds (e.g., BUY>0.70/SELL<0.30), tight stops, and keep trades paper/testnet until proven.
 
 ---
 ## Indexing / RAG (reference)

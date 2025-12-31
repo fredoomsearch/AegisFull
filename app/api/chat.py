@@ -591,6 +591,9 @@ async def fetch_url_endpoint(req: FetchUrlRequest) -> Dict[str, Any]:
 async def analyze_image_endpoint(
     file: UploadFile = File(...),
     lang: str = Form("es"),
+    mode: str = Form("text"),
+    psm: int | None = Form(None, description="tesseract PSM, default 6"),
+    oem: int | None = Form(None, description="tesseract OEM, default 1"),
 ) -> ImageAnalysisResponse:
     MAX_IMAGE_BYTES = int(os.getenv("AEGIS_MAX_IMAGE_BYTES", "5242880"))
     try:
@@ -603,7 +606,8 @@ async def analyze_image_endpoint(
             raise HTTPException(status_code=400, detail="Image too large.")
 
         lang_norm = "es" if (lang or "es").lower().startswith("es") else "en"
-        description = analyze_image_bytes(image_bytes, lang=lang_norm)
+        mode_norm = "code" if (mode or "text").lower() == "code" else "text"
+        description = analyze_image_bytes(image_bytes, lang=lang_norm, mode=mode_norm, psm=psm, oem=oem)
         return ImageAnalysisResponse(description=description)
     except HTTPException:
         raise

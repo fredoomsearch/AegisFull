@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import time
 import uuid
@@ -196,6 +197,35 @@ else:
 FAVICON_PATH = UI_DIR / "urlimg.png"
 
 
+def _clamav_status() -> str:
+    """
+    Lightweight ClamAV status check: see if clamdscan/clamscan exists and optionally ping clamd.
+    Returns a short string for logging; does not raise.
+    """
+    clamdscan = shutil.which("clamdscan")
+    clamscan = shutil.which("clamscan")
+    if not clamdscan and not clamscan:
+        return "ClamAV: scanner not found"
+
+    # Try clamdscan --version (quick) or clamscan --version
+    scanner = clamdscan or clamscan
+    try:
+        out = subprocess.check_output([scanner, "--version"], timeout=3, stderr=subprocess.STDOUT, text=True)
+        version = (out.splitlines() or ["unknown"])[0].strip()
+    except Exception:
+        version = "unknown"
+
+    # If clamdscan is present, try a quick ping to clamd
+    if clamdscan:
+        try:
+            subprocess.check_output(["clamdscan", "--fdpass", "--stdout", "--version"], timeout=3, stderr=subprocess.STDOUT)
+            return f"ClamAV: clamdscan available ({version})"
+        except Exception:
+            return f"ClamAV: clamdscan present but ping failed ({version})"
+
+    return f"ClamAV: clamscan available ({version})"
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     index_path = UI_DIR / "index.html"
@@ -234,6 +264,7 @@ def on_startup() -> None:
     logger.info("[main] Initializing DB...")
     init_db(engine)
     logger.info("[main] Database ready.")
+    logger.info("[main] %s", _clamav_status())
     if LLM_WARMUP_ON_START:
         _warm_llm_once()
     start_background_warmup()

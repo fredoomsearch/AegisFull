@@ -89,6 +89,10 @@ REQUEST_TIMEOUT = int(os.getenv("TOOLS_REQUEST_TIMEOUT", "12"))
 TOR_SOCKS_PROXY = os.getenv("TOR_SOCKS_PROXY", "socks5h://127.0.0.1:9050")
 FETCH_TIMEOUT = int(os.getenv("TOOLS_FETCH_TIMEOUT", "15"))
 MAX_BYTES = int(os.getenv("TOOLS_MAX_BYTES", str(200_000)))
+MAX_REDIRECTS = int(os.getenv("TOOLS_MAX_REDIRECTS", "1"))
+ALLOWED_SCHEMES = {"http", "https"}
+ALLOWED_MIME_PREFIXES = ("text/",)
+ALLOWED_MIME_EXACT = {"application/json", "application/xml", "application/xhtml+xml"}
 DUCKDUCKGO_HTML = "https://html.duckduckgo.com/html"
 BLOCK_LOCAL_NETS = {"127.", "10.", "192.168.", "169.254.", "0.0.0.0"}
 BLOCK_LOCAL_NETS |= {
@@ -435,40 +439,75 @@ def fetch_url(
 
     _check_rate_limit("fetch_url")
 
+    parsed = urlparse(url)
+    if (parsed.scheme or "").lower() not in ALLOWED_SCHEMES:
+        return {"ok": False, "error": "Only http/https are allowed."}
+    if is_onion(url):
+        return {"ok": False, "error": "Use Tor fetch for .onion URLs."}
     if _is_blocked_url(url):
         return {"ok": False, "error": "Blocked or invalid URL."}
 
     try:
-        with session.get(
-            url,
-            timeout=REQUEST_TIMEOUT,
-            headers=headers,
-            stream=True,
-            allow_redirects=ALLOW_REDIRECTS,
-        ) as resp:
-            resp.raise_for_status()
-            content: List[bytes] = []
-            total = 0
-            for chunk in resp.iter_content(chunk_size=4096):
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > max_bytes:
-                    content.append(chunk[: max_bytes - (total - len(chunk))])
-                    break
-                content.append(chunk)
+        redirects = 0
+        current_url = url
+        while True:
+            with session.get(
+                current_url,
+                timeout=REQUEST_TIMEOUT,
+                headers=headers,
+                stream=True,
+                allow_redirects=False,
+            ) as resp:
+                if 300 <= resp.status_code < 400:
+                    if redirects >= MAX_REDIRECTS:
+                        return {"ok": False, "error": "Redirect limit exceeded."}
+                    loc = resp.headers.get("location")
+                    if not loc:
+                        return {"ok": False, "error": "Redirect without location."}
+                    next_url = requests.compat.urljoin(current_url, loc)
+                    parsed_next = urlparse(next_url)
+                    if (parsed_next.scheme or "").lower() not in ALLOWED_SCHEMES or _is_blocked_url(next_url):
+                        return {"ok": False, "error": "Redirected to disallowed target."}
+                    current_url = next_url
+                    redirects += 1
+                    continue
 
-            raw = b"".join(content)
-            text = raw.decode(resp.encoding or "utf-8", errors="replace")
-            soup = BeautifulSoup(text, "html.parser")
-            cleaned = " ".join(soup.get_text(separator="\n").split())
-            if len(cleaned) > max_chars:
-                cleaned = cleaned[:max_chars] + " … [truncated]"
-            return {
-                "ok": True,
-                "status": resp.status_code,
-                "text": f"Content from {url}:\n{cleaned}",
-            }
+                resp.raise_for_status()
+
+                content_length = resp.headers.get("content-length")
+                if content_length:
+                    try:
+                        if int(content_length) > max_bytes:
+                            return {"ok": False, "error": "Content too large."}
+                    except Exception:
+                        pass
+
+                ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                if not (ctype.startswith(ALLOWED_MIME_PREFIXES) or ctype in ALLOWED_MIME_EXACT or ctype == ""):
+                    return {"ok": False, "error": f"Disallowed content type: {ctype or 'unknown'}"}
+
+                content: List[bytes] = []
+                total = 0
+                for chunk in resp.iter_content(chunk_size=4096):
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        content.append(chunk[: max_bytes - (total - len(chunk))])
+                        break
+                    content.append(chunk)
+
+                raw = b"".join(content)
+                text = raw.decode(resp.encoding or "utf-8", errors="replace")
+                soup = BeautifulSoup(text, "html.parser")
+                cleaned = " ".join(soup.get_text(separator="\n").split())
+                if len(cleaned) > max_chars:
+                    cleaned = cleaned[:max_chars] + " … [truncated]"
+                return {
+                    "ok": True,
+                    "status": resp.status_code,
+                    "text": f"Content from {current_url}:\n{cleaned}",
+                }
     except Exception as exc:  # noqa: BLE001
         logger.debug("fetch_url failure for %s: %s", url, exc)
         return {"ok": False, "error": str(exc)}
@@ -489,6 +528,11 @@ def fetch_url_via_tor(
 ) -> FetchResult:
     _check_rate_limit("fetch_url_via_tor")
 
+    parsed = urlparse(url)
+    if not is_onion(url):
+        return {"ok": False, "error": "Tor fetch is only for .onion domains."}
+    if (parsed.scheme or "").lower() not in ALLOWED_SCHEMES:
+        return {"ok": False, "error": "Only http/https are allowed."}
     if _is_blocked_url(url):
         return {"ok": False, "error": "Blocked or invalid URL."}
 
@@ -505,6 +549,11 @@ def fetch_url_via_tor(
             allow_redirects=False,
         ) as r:
             r.raise_for_status()
+
+            ctype = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+            if not (ctype.startswith(ALLOWED_MIME_PREFIXES) or ctype in ALLOWED_MIME_EXACT or ctype == ""):
+                return {"ok": False, "error": f"Disallowed content type: {ctype or 'unknown'}"}
+
             data: List[bytes] = []
             total = 0
             for chunk in r.iter_content(chunk_size=8192):
@@ -599,6 +648,5 @@ def tool(name: str):
         return fn
 
     return deco
-
 
 

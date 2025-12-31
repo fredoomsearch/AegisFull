@@ -61,8 +61,8 @@
           <button id="adminRefresh" class="icon-btn" title="Refrescar datos/modelos cripto (admin)">
             <i class="fa-solid fa-bolt"></i>
           </button>
-          <button id="sessionsBtn" class="icon-btn" title="Administrar conversaciones">
-            <i class="fa-solid fa-comments"></i>
+          <button id="cancelAllBtn" class="icon-btn danger" title="Cancelar todo / Cancel all">
+            <i class="fa-solid fa-ban"></i>
           </button>
           <button id="helpBtn" class="icon-btn" title="Guía rápida / Quick guide">
             <i class="fa-solid fa-circle-question"></i>
@@ -87,6 +87,52 @@
               <li data-i18n="hint_crypto"><span class="hint-mode">Cripto</span><span>Activa el panel para predicciones, trades simulados y métricas P&amp;L.</span></li>
               <li data-i18n="hint_image"><span class="hint-mode">Imagen</span><span>Sube capturas y obtén OCR para explicar errores o textos.</span></li>
             </ul>
+          </div>
+        </div>
+
+        <button id="chatSideShow" class="chat-side-show" type="button" aria-label="Mostrar Estado/Sesión">Estado Sesión / Status Session</button>
+                                                                                                          
+        <div class="chat-side-panel" id="chatSidePanel">
+          <div class="chat-side-toolbar">
+            <span class="chat-side-label" data-i18n="status_title">Estado / Sesión</span>
+            <button id="chatSideToggle" class="icon-btn small" title="Ocultar panel" type="button">✕</button>
+          </div>
+          <div class="status-box slim">
+            <div class="status-box-header">
+              <span data-i18n="status_title">Estado</span>
+            </div>
+            <ul id="statusList" class="status-list"></ul>
+          </div>
+
+          <div class="sources-box sessions-inline compact">
+            <div class="sessions-header">
+              <div class="sessions-left">
+                <h3 data-i18n="tab_session">Sesión</h3>
+                <div class="session-id"><span data-i18n="session_id_label">ID:</span> <span id="conv-id-display">—</span></div>
+                <div class="session-actions-inline">
+                  <button id="copyConvId" class="icon-btn small" title="Copiar ID"><i class="fa-solid fa-copy"></i></button>
+                  <span class="session-note" data-i18n="session_note">Logs de sesión son solo para depurar el flujo del chat.</span>
+                </div>
+                <div class="session-archived-toggle">
+                  <label class="sessions-toggle small-toggle"><input id="sessionsIncludeArchived" type="checkbox" /><span data-i18n="show_archived">Show archived</span></label>
+                </div>
+                <div id="timeout-label" class="timeout-label">Tiempo de respuesta: —</div>
+              </div>
+              <div class="sessions-right sessions-header-actions"></div>
+            </div>
+            <div class="sessions-body">
+              <div class="sessions-list-wrap">
+                <div class="sessions-subtitle" data-i18n="session_history_title">Historial</div>
+                <ul id="sessionsList" class="sessions-list"></ul>
+              </div>
+              <div class="sessions-events-wrap">
+                <div class="sessions-subtitle" data-i18n="session_log_title">Log sesión</div>
+                <div class="sessions-events-toolbar">
+                  <button id="convEventsRefresh" class="icon-btn small" title="Actualizar log" type="button">⟳</button>
+                </div>
+                <ul id="convEventsList" class="events-list"></ul>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -124,7 +170,6 @@
           </div>
 
           <div class="controls-right">
-            <button id="cancelBtn" class="icon-btn danger" title="Cancelar solicitud" disabled><i class="fas fa-stop"></i></button>
             <button id="sendBtn" class="send-btn" type="button" data-i18n="send_btn">Enviar</button>
           </div>
         </div>
@@ -140,10 +185,12 @@
             <button id="chartExpandBtn" class="icon-btn small" title="Expandir/contraer gráfico" type="button">⤢</button>
             <label class="live-toggle"><input id="chartLive" type="checkbox" /><span data-i18n="live_label">Live</span></label>
             <label class="live-toggle"><input id="newsMarkersToggle" type="checkbox" checked /><span data-i18n="news_label">News</span></label>
+            <div class="chart-mode-hint" id="chartModeHint" title="p>63% BUY • p<37% SELL • otherwise HOLD">p&gt;63% BUY • p&lt;37% SELL • HOLD en medio</div>
           </div>
         </div>
 
         <div class="chart-canvas"><canvas id="priceChart"></canvas></div>
+        <div class="signal-bar" id="signalBar" aria-label="Confianza de la señal"></div>
         <div id="tradeStatus" class="trade-status" aria-live="polite"></div>
 
         <div id="predictionCompare" class="prediction-compare" aria-live="polite">
@@ -163,30 +210,8 @@
           <div id="predictionCompareBody" class="prediction-compare-body"></div>
         </div>
 
-        <div class="file-viewer">
-          <div class="file-viewer-header">
-            <div id="fileViewerTitle" class="file-viewer-title" data-i18n="file_viewer_placeholder">Selecciona un archivo en Archivos</div>
-            <div class="file-viewer-actions">
-              <button id="copyFileBtn" class="icon-btn small" title="Copiar contenido" type="button">
-                <i class="fa-solid fa-copy"></i>
-              </button>
-            </div>
-          </div>
-          <pre id="fileViewerBody" class="file-viewer-body"></pre>
-        </div>
-      </section>
-
-      <!-- SIDEBAR -->
-      <aside class="app-sidebar">
-        <div class="sidebar-tabs">
-          <button class="tab-btn active" data-tab="sources" type="button" data-i18n="tab_sources">Fuentes</button>
-          <button class="tab-btn" data-tab="files" type="button" data-i18n="tab_files">Archivos</button>
-          <button class="tab-btn" data-tab="session" type="button" data-i18n="tab_session">Sesión</button>
-        </div>
-
-        <div class="tab-panels">
-          <!-- SOURCES -->
-          <div id="tab-sources" class="tab-panel active">
+        <div class="chart-extras">
+          <div class="chart-extras-row">
             <div class="sources-box" id="sources-box">
               <div class="sources-toolbar">
                 <div class="sources-toolbar-top">
@@ -208,25 +233,39 @@
               <div class="sources-toolbar">
                 <div class="sources-toolbar-top">
                   <div class="sources-toolbar-top-left">
-                    <strong>News</strong>
+                    <strong data-i18n="news_heading">News</strong>
                     <span id="newsMomentum" class="news-momentum">—</span>
                   </div>
                   <div class="sources-toolbar-actions">
+                    <label class="live-toggle"><input id="newsCompactToggle" type="checkbox" /><span data-i18n="news_compact">Compacto</span></label>
                     <button id="newsRefreshBtn" class="icon-btn small" title="Refrescar noticias" type="button">⟳</button>
                   </div>
                 </div>
               </div>
               <div id="news-list" class="news-list"></div>
             </div>
-          </div>
 
-          <!-- FILES -->
-          <div id="tab-files" class="tab-panel">
+            <div class="sources-box">
+              <div class="sources-toolbar">
+                <div class="sources-toolbar-top">
+                  <div class="sources-toolbar-top-left"><strong data-i18n="security_heading">Seguridad</strong></div>
+                </div>
+              </div>
+              <div id="securityNote" class="sources-content" style="min-height:120px; white-space:pre-wrap;"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- SIDEBAR -->
+      <aside class="app-sidebar">
+        <div class="tab-panels">
+          <div id="tab-files" class="tab-panel active">
             <div class="sources-box">
               <div class="sources-toolbar">
                 <div class="sources-toolbar-top">
                   <div class="sources-toolbar-top-left">
-                    <strong>Archivos</strong>
+                    <strong data-i18n="files_heading">Archivos</strong>
                     <select id="projectSelect" class="project-select">
                       <option value="app">app (backend)</option>
                       <option value="ui">ui (frontend)</option>
@@ -238,6 +277,8 @@
                   <button id="projectUploadBtn" class="icon-btn small" title="Subir proyecto ZIP" type="button"><i class="fas fa-upload"></i></button>
                   <button id="projectCloneBtn" class="icon-btn small" title="Clonar repo" type="button"><i class="fas fa-code-branch"></i></button>
                   <button id="projectDeleteBtn" class="icon-btn small danger" title="Eliminar proyecto" type="button"><i class="fas fa-trash"></i></button>
+                  <button id="ingestLogBtn" class="icon-btn small" title="Ver log de ingesta" type="button"><i class="fas fa-scroll"></i></button>
+                  <button id="filesExpandBtn" class="icon-btn small" title="Expandir Archivos" type="button"><i class="fas fa-up-right-and-down-left-from-center"></i></button>
                   <button id="ingestStatusBtn" class="status-btn" type="button" title="Estado de ingesta">
                     <span class="status-dot" aria-hidden="true"></span>
                     <span id="ingestStatusText">Listo</span>
@@ -245,12 +286,25 @@
                 </div>
               </div>
               <div id="projectTree" class="project-tree resizable"></div>
+              <div id="projectList" class="project-list sources-content" style="min-height:80px;"></div>
+            </div>
+
+            <div class="file-viewer">
+              <div class="file-viewer-header">
+                <div id="fileViewerTitle" class="file-viewer-title" data-i18n="file_viewer_placeholder">Selecciona un archivo en Archivos</div>
+                <div class="file-viewer-actions">
+                  <button id="copyFileBtn" class="icon-btn small" title="Copiar contenido" type="button">
+                    <i class="fa-solid fa-copy"></i>
+                  </button>
+                </div>
+              </div>
+              <pre id="fileViewerBody" class="file-viewer-body"></pre>
             </div>
 
             <div class="sources-box">
               <div class="sources-toolbar">
                 <div class="sources-toolbar-top">
-                  <div class="sources-toolbar-top-left"><strong>Trabajos</strong></div>
+                  <div class="sources-toolbar-top-left"><strong data-i18n="jobs_heading">Trabajos</strong></div>
                   <div class="sources-toolbar-actions">
                     <button id="ingestJobsRefresh" class="icon-btn small" title="Actualizar lista" type="button">⟳</button>
                   </div>
@@ -258,27 +312,17 @@
               </div>
               <ul id="ingestJobsList" class="jobs-list"></ul>
             </div>
-          </div>
 
-          <!-- SESSION -->
-          <div id="tab-session" class="tab-panel">
-            <div class="sources-box" id="conv-info">
-              <strong>Info sesión</strong>
-              <div class="session-id">Id local: <span id="conv-id-display">—</span></div>
-              <div id="timeout-label" class="timeout-label">Tiempo de respuesta: —</div>
-            </div>
-            <div class="sources-box" id="conv-events">
+            <div class="sources-box">
               <div class="sources-toolbar">
                 <div class="sources-toolbar-top">
-                  <div class="sources-toolbar-top-left"><strong>Log sesión</strong></div>
-                  <div class="sources-toolbar-actions">
-                    <button id="convEventsRefresh" class="icon-btn small" title="Actualizar log" type="button">⟳</button>
-                  </div>
+                  <div class="sources-toolbar-top-left"><strong data-i18n="logs_heading">Logs</strong></div>
                 </div>
               </div>
-              <ul id="convEventsList" class="events-list"></ul>
+              <pre id="filesLogContent" class="sources-content" style="min-height:160px; white-space:pre-wrap;"></pre>
             </div>
           </div>
+
         </div>
       </aside>
     </main>

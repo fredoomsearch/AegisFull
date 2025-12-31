@@ -3,14 +3,15 @@ from __future__ import annotations
 
 import io
 import logging
-from typing import Literal
+from typing import Literal, Optional
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 import pytesseract
 
 logger = logging.getLogger(__name__)
 
 SupportedLang = Literal["es", "en"]
+SupportedMode = Literal["text", "code"]
 
 
 def _get_ocr_lang(lang: SupportedLang) -> str:
@@ -23,7 +24,42 @@ def _get_ocr_lang(lang: SupportedLang) -> str:
     return "spa+eng"
 
 
-def analyze_image_bytes(image_bytes: bytes, lang: SupportedLang = "es") -> str:
+def _preprocess_image(img: Image.Image, mode: SupportedMode = "text") -> Image.Image:
+    """
+    Preprocesado ligero para mejorar OCR:
+    - Escala mínima (900px de ancho).
+    - Escala de grises + autocontrast.
+    - Umbral binario simple (más fuerte para modo code).
+    """
+    try:
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        # upscale if very small
+        w, h = img.size
+        if w < 900:
+            scale = 900 / float(w)
+            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
+        gray = img.convert("L")
+        gray = ImageOps.autocontrast(gray)
+
+        # basic threshold
+        thresh = 150 if mode == "text" else 170
+        bw = gray.point(lambda x: 255 if x > thresh else 0, mode="1")
+        return bw
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("vision_client: fallo en preprocesado OCR: %s", exc)
+        return img
+
+
+def analyze_image_bytes(
+    image_bytes: bytes,
+    lang: SupportedLang = "es",
+    *,
+    mode: SupportedMode = "text",
+    psm: Optional[int] = None,
+    oem: Optional[int] = None,
+) -> str:
     """
     Análisis local sin API key.
 
@@ -33,7 +69,6 @@ def analyze_image_bytes(image_bytes: bytes, lang: SupportedLang = "es") -> str:
     """
     try:
         img = Image.open(io.BytesIO(image_bytes))
-        img = img.convert("RGB")
     except UnidentifiedImageError as exc:
         logger.warning("vision_client: imagen no identificable: %s", exc)
         return (
@@ -48,9 +83,15 @@ def analyze_image_bytes(image_bytes: bytes, lang: SupportedLang = "es") -> str:
         )
 
     ocr_lang = _get_ocr_lang(lang)
+    img = _preprocess_image(img, mode=mode)
+
+    cfg_parts = [f"--psm {psm if psm is not None else 6}", f"--oem {oem if oem is not None else 1}"]
+    if mode == "code":
+        cfg_parts.append("-c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_./:-")
+    config = " ".join(cfg_parts)
 
     try:
-        raw_text = pytesseract.image_to_string(img, lang=ocr_lang)
+        raw_text = pytesseract.image_to_string(img, lang=ocr_lang, config=config)
     except Exception as exc:  # noqa: BLE001
         logger.exception("vision_client: fallo en OCR: %s", exc)
         return (

@@ -68,12 +68,14 @@ const state = {
   savePredictions: JSON.parse(localStorage.getItem("aegis_save_preds") || "true"),
   alertsOn: JSON.parse(localStorage.getItem("aegis_alerts") || "false"),
   showNewsMarkers: true,
+  chatSideVisible: true,
 
   // timers
   liveTimer: null,
   newsTimer: null,
   logsTimer: null,
   logIsAdmin: false,
+  logJobId: null,
   alertsTimer: null,
   ingestPollTimer: null,
   ingestJobsTimer: null,
@@ -94,6 +96,7 @@ const state = {
 
   // theme
   theme: "future", // default: future palette; toggle removed from header
+  uploadedProjects: [],
 };
 
 const dom = {};
@@ -105,6 +108,9 @@ document.addEventListener("DOMContentLoaded", () => {
   updateAllUI();
   appendBubble(state.lang === LANG.ES ? "AEGIS listo." : "AEGIS ready.", "bot");
   localizeHelp();
+  // placeholders
+  if (dom.filesLogContent) dom.filesLogContent.textContent = state.lang === LANG.ES ? "Selecciona un log (ingest/admin) para verlo aquí." : "Select a log (ingest/admin) to view it here.";
+  renderProjectList();
 });
 
 function cacheDom() {
@@ -112,7 +118,6 @@ function cacheDom() {
   dom.modeIndicator = document.getElementById("modeIndicator");
   dom.msgInput = document.getElementById("msg");
   dom.sendBtn = document.getElementById("sendBtn");
-  dom.cancelBtn = document.getElementById("cancelBtn");
 
   dom.webBtn = document.getElementById("webBtn");
   dom.urlBtn = document.getElementById("urlBtn");
@@ -130,6 +135,7 @@ function cacheDom() {
   dom.convEventsRefresh = document.getElementById("convEventsRefresh");
 
   dom.apiKeyBtn = document.getElementById("apiKeyBtn");
+  dom.cancelAllBtn = document.getElementById("cancelAllBtn");
   dom.helpBtn = document.getElementById("helpBtn");
   dom.helpModal = document.getElementById("helpModal");
   dom.helpClose = document.getElementById("helpClose");
@@ -137,11 +143,9 @@ function cacheDom() {
   dom.hintBtn = document.getElementById("hintBtn");
   dom.hintTooltip = document.getElementById("chat-hint-tooltip");
 
-  dom.sessionsBtn = document.getElementById("sessionsBtn");
-  dom.sessionsModal = document.getElementById("sessionsModal");
-  dom.sessionsClose = document.getElementById("sessionsClose");
   dom.sessionsList = document.getElementById("sessionsList");
   dom.sessionsIncludeArchived = document.getElementById("sessionsIncludeArchived");
+  dom.focusSelect = null;
 
   // sidebar sources
   dom.sourcesTitle = document.getElementById("sources-title");
@@ -152,10 +156,13 @@ function cacheDom() {
   dom.predsBtn = document.getElementById("predsBtn");
   dom.pnlBtn = document.getElementById("pnlBtn");
   dom.statsBtn = document.getElementById("statsBtn");
+  dom.statusList = document.getElementById("statusList");
+  dom.copyConvId = document.getElementById("copyConvId");
 
   dom.newsList = document.getElementById("news-list");
   dom.newsMomentum = document.getElementById("newsMomentum");
   dom.newsRefreshBtn = document.getElementById("newsRefreshBtn");
+  dom.newsCompactToggle = document.getElementById("newsCompactToggle");
 
   // files
   dom.treeBtn = document.getElementById("treeBtn");
@@ -166,14 +173,25 @@ function cacheDom() {
   dom.projectUploadInput = document.getElementById("projectUploadInput");
   dom.projectCloneBtn = document.getElementById("projectCloneBtn");
   dom.projectDeleteBtn = document.getElementById("projectDeleteBtn");
+  dom.ingestLogBtn = document.getElementById("ingestLogBtn");
   dom.ingestStatusBtn = document.getElementById("ingestStatusBtn");
   dom.ingestStatusText = document.getElementById("ingestStatusText");
   dom.ingestJobsList = document.getElementById("ingestJobsList");
   dom.ingestJobsRefresh = document.getElementById("ingestJobsRefresh");
+  dom.filesLogContent = document.getElementById("filesLogContent");
+  dom.securityNote = document.getElementById("securityNote");
+  dom.filesExpandBtn = document.getElementById("filesExpandBtn");
+  dom.projectList = document.getElementById("projectList");
+  dom.projectList && (dom.projectList.title = state.lang === LANG.ES ? "Proyectos cargados/clonados" : "Uploaded/cloned projects");
 
   dom.fileViewerTitle = document.getElementById("fileViewerTitle");
   dom.fileViewerBody = document.getElementById("fileViewerBody");
   dom.copyFileBtn = document.getElementById("copyFileBtn");
+
+  dom.chatSidePanel = document.getElementById("chatSidePanel");
+  dom.chatSideToggle = document.getElementById("chatSideToggle");
+  dom.chatSideShow = document.getElementById("chatSideShow");
+  dom.chatCol = document.querySelector(".chat-col");
 
   // crypto controls
   dom.cryptoInline = document.getElementById("cryptoInline");
@@ -192,6 +210,7 @@ function cacheDom() {
   dom.priceChart = document.getElementById("priceChart");
   dom.chartLive = document.getElementById("chartLive");
   dom.newsMarkersToggle = document.getElementById("newsMarkersToggle");
+  dom.signalBar = document.getElementById("signalBar");
 
   dom.tradeStatus = document.getElementById("tradeStatus");
 
@@ -203,12 +222,10 @@ function cacheDom() {
 
   dom.adminRefresh = document.getElementById("adminRefresh");
 
-  // tabs
+  // tabs (sidebar reduced to Archivos only, keep structure simple)
   dom.tabButtons = Array.from(document.querySelectorAll(".tab-btn"));
   dom.tabPanels = {
-    sources: document.getElementById("tab-sources"),
     files: document.getElementById("tab-files"),
-    session: document.getElementById("tab-session"),
   };
 }
 
@@ -219,10 +236,14 @@ function initState() {
     localStorage.removeItem("aegis_conv");
     localStorage.removeItem("aegis_use_existing");
   }
+  const storedSide = localStorage.getItem("aegis_chat_side_visible");
+  if (storedSide === "0") state.chatSideVisible = false;
   applyTheme(state.theme);
   updateConversationIndicators(state.conversationId);
   resetConversationEvents();
   setProjectRoot(state.currentProjectRoot);
+  loadConversationList(state.conversationsIncludeArchived);
+  applyChatSideVisible();
 }
 
 function wireUI() {
@@ -237,8 +258,6 @@ function wireUI() {
   });
 
   // cancel
-  dom.cancelBtn?.addEventListener("click", () => cancelAllRequests());
-
   // mode buttons
   dom.webBtn?.addEventListener("click", () => setMode(state.mode === MODES.WEB ? MODES.CHAT : MODES.WEB));
   dom.urlBtn?.addEventListener("click", () => setMode(state.mode === MODES.URL ? MODES.CHAT : MODES.URL));
@@ -270,16 +289,16 @@ function wireUI() {
     if (e.target === dom.helpModal) closeModal(dom.helpModal);
   });
 
-  // sessions modal
-  dom.sessionsBtn?.addEventListener("click", () => openSessionsModal());
-  dom.sessionsClose?.addEventListener("click", () => closeSessionsModal());
-  dom.sessionsModal?.addEventListener("click", (e) => {
-    if (e.target === dom.sessionsModal) closeSessionsModal();
-  });
+  // focus selector
+  // focus selector removed
+
   dom.sessionsIncludeArchived?.addEventListener("change", (e) => {
     state.conversationsIncludeArchived = !!e.target.checked;
     loadConversationList(state.conversationsIncludeArchived);
   });
+
+  // cancel all
+  dom.cancelAllBtn?.addEventListener("click", () => cancelAllRequests(true));
 
   // API key
   dom.apiKeyBtn?.addEventListener("click", () => {
@@ -317,8 +336,26 @@ function wireUI() {
   dom.projectUploadInput?.addEventListener("change", uploadZipProject);
   dom.projectCloneBtn?.addEventListener("click", cloneRepo);
   dom.projectDeleteBtn?.addEventListener("click", deleteProject);
+  // focus selector removed
+  dom.ingestLogBtn?.addEventListener("click", () => {
+    // Prefer current job id; fall back to last known job id from status list.
+    const jobId = state.ingestJobId || state.logJobId;
+    if (!jobId) {
+      appendBubble(state.lang === LANG.ES ? "Primero inicia una ingesta para ver su log." : "Start an ingest first to view its log.", "error");
+      return;
+    }
+    state.logJobId = jobId;
+    state.logPath = null;
+    state.logIsAdmin = false;
+    if (dom.logsLiveToggle) dom.logsLiveToggle.checked = true;
+    startLogsPolling();
+    appendBubble(state.lang === LANG.ES ? `Mostrando log de ingesta (${jobId}).` : `Showing ingest log (${jobId}).`, "bot");
+  });
   dom.ingestStatusBtn?.addEventListener("click", startIngest);
   dom.ingestJobsRefresh?.addEventListener("click", loadIngestJobs);
+  dom.filesExpandBtn?.addEventListener("click", toggleFilesExpand);
+  dom.chatSideToggle?.addEventListener("click", toggleChatSidePanel);
+  dom.chatSideShow?.addEventListener("click", toggleChatSidePanel);
 
   // crypto + chart
   dom.chartRefresh?.addEventListener("click", () => loadChartData(dom.chartSymbol?.value));
@@ -338,6 +375,33 @@ function wireUI() {
     loadCryptoPrediction();
   });
   dom.cryptoHorizon?.addEventListener("change", () => loadCryptoPrediction());
+  dom.chatTradeQty?.addEventListener("change", () => loadCryptoPrediction());
+
+  // clarify crypto controls
+  if (dom.buyBtn) dom.buyBtn.title = state.lang === LANG.ES ? "Comprar (simulado, educativo)" : "Buy (simulated, educational)";
+  if (dom.sellBtn) dom.sellBtn.title = state.lang === LANG.ES ? "Vender (simulado, educativo)" : "Sell (simulated, educational)";
+  if (dom.predictionCompareHelp) dom.predictionCompareHelp.title = state.lang === LANG.ES
+    ? "Predicción vs. realidad: precisión y Δ promedio. BUY si p>63%, SELL si p<37%, HOLD en medio."
+    : "Prediction vs actual: accuracy and avg Δ. BUY if p>63%, SELL if p<37%, HOLD otherwise.";
+  if (dom.statsBtn) dom.statsBtn.title = state.lang === LANG.ES
+    ? "Precisión y movimiento promedio; mira la barra para entender aciertos."
+    : "Accuracy and average move; check the bar to interpret performance.";
+  if (dom.predsBtn) dom.predsBtn.title = state.lang === LANG.ES
+    ? "Últimas predicciones: qué se predijo y qué ocurrió."
+    : "Recent predictions: what we predicted vs what happened.";
+  if (dom.pnlBtn) dom.pnlBtn.title = state.lang === LANG.ES
+    ? "P&L de trades simulados (educativos)."
+    : "P&L from simulated trades (educational).";
+  dom.copyConvId?.addEventListener("click", async () => {
+    const id = state.conversationId || "";
+    if (!id) return appendBubble(state.lang === LANG.ES ? "Sin sesión activa." : "No active session.", "error");
+    try {
+      await navigator.clipboard.writeText(id);
+      appendBubble(state.lang === LANG.ES ? "ID copiado." : "ID copied.", "bot");
+    } catch {
+      appendBubble(id, "bot");
+    }
+  });
 
   dom.predictionCompareHelp?.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -348,6 +412,7 @@ function wireUI() {
   dom.predictionCompareRefresh?.addEventListener("click", () => loadPredictionComparison(state.chartSymbol, { force: true }));
 
   dom.newsRefreshBtn?.addEventListener("click", () => loadNews(state.chartSymbol, { force: true }));
+  dom.newsCompactToggle?.addEventListener("change", () => renderNews(state.lastNews || []));
 
   // sidebar tools
   dom.predsBtn?.addEventListener("click", () => loadRecentPredictions());
@@ -394,6 +459,7 @@ function updateAllUI() {
   updateCryptoInlineVisibility();
   updateTogglesVisibility();
   updateLatencyLabel();
+  updateStatusCenter();
   localizeUI();
 
   // init sources
@@ -403,6 +469,89 @@ function updateAllUI() {
   loadCryptoModels();
   loadChartData(state.chartSymbol);
   updatePredictionTooltipText();
+}
+
+function updateStatusCenter() {
+  if (!dom.statusList) return;
+  const es = state.lang === LANG.ES;
+  const items = [];
+
+  items.push({
+    label: es ? "Solicitudes" : "Requests",
+    note: state.pending ? (es ? "En curso" : "In progress") : (es ? "Libre" : "Idle"),
+    status: state.pending ? "on" : "off",
+    progress: state.pending ? "indeterminate" : null,
+  });
+
+  items.push({
+    label: es ? "Gráfico live" : "Live chart",
+    note: state.liveTimer ? (es ? "Actualizando cada 15s" : "Refreshing every 15s") : (es ? "Pausado" : "Paused"),
+    status: state.liveTimer ? "on" : "off",
+    progress: state.liveTimer ? "indeterminate" : null,
+  });
+
+  items.push({
+    label: es ? "Alertas" : "Alerts",
+    note: state.alertsTimer ? (es ? "Monitoreando outcomes" : "Monitoring outcomes") : (es ? "Off" : "Off"),
+    status: state.alertsTimer ? "on" : "off",
+  });
+
+  items.push({
+    label: es ? "Logs" : "Logs",
+    note: state.logsTimer ? (es ? "Auto-leyendo" : "Auto-reading") : (es ? "Manual" : "Manual"),
+    status: state.logsTimer ? "on" : "off",
+    progress: state.logsTimer ? "indeterminate" : null,
+  });
+
+  items.push({
+    label: es ? "Ingesta" : "Ingest",
+    note: state.ingestJobId ? (es ? "Trabajo activo" : "Job active") : (es ? "Sin trabajo" : "No job"),
+    status: state.ingestJobId ? "warn" : "off",
+    progress: state.ingestJobId ? "indeterminate" : null,
+  });
+
+  items.push({
+    label: es ? "Eventos chat" : "Chat events",
+    note: state.convEventsTimer ? (es ? "Subscripción activa" : "Subscription active") : (es ? "Inactiva" : "Inactive"),
+    status: state.convEventsTimer ? "on" : "off",
+  });
+
+  items.push({
+    label: es ? "Cripto refresh" : "Crypto refresh",
+    note: state.logIsAdmin ? (es ? "Log activo (usa /admin/refresh-log)" : "Log active (via /admin/refresh-log)") : (es ? "Sin log" : "No log"),
+    status: state.logIsAdmin ? "warn" : "off",
+    progress: state.logIsAdmin ? "indeterminate" : null,
+  });
+
+  dom.statusList.innerHTML = "";
+  items.forEach((it) => {
+    const li = document.createElement("li");
+    li.className = "status-item";
+    const dot = document.createElement("span");
+    dot.className = "status-dot";
+    if (it.status === "on") dot.classList.add("on");
+    if (it.status === "warn") dot.classList.add("warn");
+
+    const textWrap = document.createElement("div");
+    const label = document.createElement("div");
+    label.className = "status-label";
+    label.textContent = it.label;
+    const note = document.createElement("div");
+    note.className = "status-note";
+    note.textContent = it.note;
+
+    textWrap.appendChild(label);
+    textWrap.appendChild(note);
+    li.appendChild(dot);
+    li.appendChild(textWrap);
+    if (it.progress) {
+      const bar = document.createElement("div");
+      bar.className = "status-progress";
+      if (it.progress === "indeterminate") bar.classList.add("indeterminate");
+      li.appendChild(bar);
+    }
+    dom.statusList.appendChild(li);
+  });
 }
 
 function setLang(lang) {
@@ -479,6 +628,27 @@ function toggleHint() {
   const open = dom.hintBtn.getAttribute("aria-expanded") === "true";
   dom.hintBtn.setAttribute("aria-expanded", String(!open));
   dom.hintTooltip.hidden = open;
+}
+
+function toggleChatSidePanel() {
+  state.chatSideVisible = !state.chatSideVisible;
+  localStorage.setItem("aegis_chat_side_visible", state.chatSideVisible ? "1" : "0");
+  applyChatSideVisible();
+}
+
+function applyChatSideVisible() {
+  const visible = !!state.chatSideVisible;
+  if (dom.chatSidePanel) dom.chatSidePanel.classList.toggle("hidden", !visible);
+  if (dom.chatCol) dom.chatCol.classList.toggle("panel-hidden", !visible);
+  if (dom.chatSideToggle) {
+    dom.chatSideToggle.title = visible
+      ? (state.lang === LANG.ES ? "Ocultar panel" : "Hide panel")
+      : (state.lang === LANG.ES ? "Mostrar panel" : "Show panel");
+    dom.chatSideToggle.textContent = visible ? "✕" : "⤢";
+  }
+  if (dom.chatSideShow) {
+    dom.chatSideShow.style.display = visible ? "none" : "flex";
+  }
 }
 
 function openModal(node) { node?.classList?.remove("hidden"); }
@@ -609,6 +779,16 @@ function localizeUI() {
     tab_files: es ? "Archivos" : "Files",
     tab_session: es ? "Sesión" : "Session",
     sources_title: es ? "Fuentes" : "Sources",
+    status_title: es ? "Estado" : "Status",
+    news_heading: es ? "Noticias" : "News",
+    files_heading: es ? "Archivos" : "Files",
+    jobs_heading: es ? "Trabajos" : "Jobs",
+    logs_heading: es ? "Logs" : "Logs",
+    security_heading: es ? "Seguridad" : "Security",
+    session_id_label: es ? "ID:" : "ID:",
+    show_archived: es ? "Ver archivadas" : "Show archived",
+    session_history_title: es ? "Historial" : "History",
+    session_log_title: es ? "Log sesión" : "Session log",
     compare_title: es ? "Comparación post-horizonte" : "Post-horizon comparison",
     file_viewer_placeholder: es ? "Selecciona un archivo en Archivos" : "Select a file in Files",
   };
@@ -618,28 +798,35 @@ function localizeUI() {
     });
   });
   if (dom.sendBtn) dom.sendBtn.textContent = map.send_btn;
+
+  // security note
+  if (dom.securityNote) {
+    dom.securityNote.textContent = es
+      ? "• Claves: AEGIS / FILES / ADMIN\n• Límite y bloqueos SSRF: solo http/https, redes privadas bloqueadas, redirecciones limitadas\n• Contenido: tamaño y MIME limitados; .onion solo vía Tor\n• AV: escaneo opcional de subidas/clones (ClamAV)\n• Logs separados: /admin/refresh-log y /files/ingest/log (job_id)\n• Recomendado: HTTPS y CORS restringido"
+      : "• Keys: AEGIS / FILES / ADMIN\n• SSRF guard: http/https only, private nets blocked, redirects limited\n• Content: size & MIME caps; .onion via Tor only\n• AV: optional scan on uploads/clones (ClamAV)\n• Logs separated: /admin/refresh-log and /files/ingest/log (job_id)\n• Recommended: HTTPS and restricted CORS";
+  }
 }
 
 function localizeHelp() {
   const es = state.lang === LANG.ES;
   const map = {
-    help_title: es ? "Guía rápida de AEGIS" : "AEGIS quick guide",
-    hint_title: es ? "Guía breve" : "Quick tips",
+    help_title: es ? "🧭 Guía rápida de AEGIS" : "🧭 AEGIS quick guide",
+    hint_title: es ? "💡 Guía breve" : "💡 Quick tips",
     hint_chat: es
-      ? "Preguntas generales, debugging local o instrucciones paso a paso."
-      : "General questions, local debugging, step-by-step help.",
+      ? "💬 Chat: preguntas generales, debugging local o instrucciones paso a paso."
+      : "💬 Chat: general questions, local debugging, step-by-step help.",
     hint_web: es
-      ? "Agrega web: cuando necesites fuentes recientes o enlaces citables."
-      : "Use web: when you need fresh sources or citations.",
+      ? "🌐 Web: agrega web: cuando necesites fuentes recientes o enlaces citables."
+      : "🌐 Web: prefix web: when you need fresh sources or citations.",
     hint_url: es
-      ? "Usa url:https://... para que lea y resuma un enlace específico."
-      : "Use url:https://... to read and summarize a specific link.",
+      ? "🔗 URL: usa url:https://... para leer y resumir un enlace específico."
+      : "🔗 URL: use url:https://... to read and summarize a specific link.",
     hint_crypto: es
-      ? "Activa el panel para predicciones, trades simulados y métricas P&L."
-      : "Enable the panel for predictions, simulated trades, and P&L metrics.",
+      ? "🪙 Cripto: activa el panel para predicciones, trades simulados y métricas P&L."
+      : "🪙 Crypto: enable the panel for predictions, simulated trades, and P&L metrics.",
     hint_image: es
-      ? "Sube capturas y obtén OCR para explicar errores o textos."
-      : "Upload screenshots to OCR and explain errors or text.",
+      ? "🖼️ Imagen: sube capturas y obtén OCR para explicar errores o textos."
+      : "🖼️ Image: upload screenshots to OCR and explain errors or text.",
   };
 
   for (const [key, text] of Object.entries(map)) {
@@ -668,7 +855,11 @@ function updateConversationIndicators(id) {
 function setPending(on) {
   state.pending = !!on;
   if (dom.sendBtn) dom.sendBtn.disabled = state.pending;
-  if (dom.cancelBtn) dom.cancelBtn.disabled = !state.pending;
+  updateStatusCenter();
+}
+
+function toggleFilesExpand() {
+  document.body.classList.toggle("files-wide");
 }
 
 function registerAbortController(controller) {
@@ -679,7 +870,7 @@ function unregisterAbortController(controller) {
   if (controller) state.activeControllers.delete(controller);
 }
 
-function cancelAllRequests() {
+function cancelAllRequests(fullStop = false) {
   if (state.activeControllers.size) {
     const arr = Array.from(state.activeControllers);
     state.activeControllers.clear();
@@ -688,7 +879,25 @@ function cancelAllRequests() {
   removeTyping();
   setPending(false);
   state.cancelledByUser = true;
-  appendBubble(state.lang === LANG.ES ? "Solicitud cancelada." : "Request cancelled.", "bot");
+  if (fullStop) {
+    stopLiveChart();
+    stopAlertsPolling();
+    stopLogsPolling();
+    if (state.newsTimer) clearInterval(state.newsTimer);
+    state.newsTimer = null;
+    if (state.ingestPollTimer) clearInterval(state.ingestPollTimer);
+    state.ingestPollTimer = null;
+    if (state.ingestJobsTimer) clearInterval(state.ingestJobsTimer);
+    state.ingestJobsTimer = null;
+    stopConversationEventsPolling();
+  }
+  appendBubble(
+    fullStop
+      ? (state.lang === LANG.ES ? "Procesos detenidos." : "Processes stopped.")
+      : (state.lang === LANG.ES ? "Solicitud cancelada." : "Request cancelled."),
+    "bot"
+  );
+  updateStatusCenter();
 }
 
 async function fetchWithTimeout(url, opts = {}, { timeout = CHAT_MAX_TIMEOUT_MS, retries = 0 } = {}) {
@@ -739,6 +948,31 @@ function setProjectRoot(newRoot) {
     dom.projectSelect.appendChild(opt);
   }
   dom.projectSelect.value = newRoot;
+  renderProjectList();
+}
+
+function addUploadedProject(path) {
+  if (!path) return;
+  if (!state.uploadedProjects.includes(path)) {
+    state.uploadedProjects.push(path);
+  }
+  setProjectRoot(path);
+  renderProjectList();
+}
+
+function renderProjectList() {
+  if (!dom.projectList) return;
+  const list = [];
+  if (state.currentProjectRoot) list.push(state.currentProjectRoot);
+  state.uploadedProjects.forEach((p) => {
+    if (!list.includes(p)) list.push(p);
+  });
+  if (!list.length) {
+    dom.projectList.textContent = state.lang === LANG.ES ? "Sin proyectos cargados." : "No projects loaded.";
+    return;
+  }
+  const lines = list.map((p) => `• ${p}`);
+  dom.projectList.textContent = lines.join("\n");
 }
 
 /* ------------------------- SEND / CHAT ------------------------- */
@@ -1150,14 +1384,14 @@ function renderChart(points) {
       interaction: { mode: "index", intersect: false },
       plugins: { tooltip: { enabled: true }, legend: { display: false } },
       scales: {
-        x: { grid: { color: "rgba(148,163,184,0.1)" }, ticks: { color: "#9ca3af", maxRotation: 0, autoSkip: true, maxTicksLimit: 6 } },
-        y: { grid: { color: "rgba(148,163,184,0.1)" }, ticks: { color: "#9ca3af" } },
+        x: { grid: { color: "rgba(148,163,184,0.14)" }, ticks: { color: "#cbd5e1", maxRotation: 0, autoSkip: true, maxTicksLimit: 6 } },
+        y: { grid: { color: "rgba(148,163,184,0.14)" }, ticks: { color: "#cbd5e1" } },
       },
       responsive: true,
       maintainAspectRatio: false,
       animation: false,
-    },
-  });
+   },
+ });
 }
 
 async function loadChartData(symbolInput) {
@@ -1191,10 +1425,12 @@ async function loadChartData(symbolInput) {
 function startLiveChart() {
   stopLiveChart();
   state.liveTimer = setInterval(() => loadChartData(state.chartSymbol), 15000);
+  updateStatusCenter();
 }
 function stopLiveChart() {
   if (state.liveTimer) clearInterval(state.liveTimer);
   state.liveTimer = null;
+  updateStatusCenter();
 }
 
 function toggleChartExpand() {
@@ -1225,6 +1461,7 @@ async function loadCryptoPrediction() {
     const decision = data?.decision || data?.signal || "HOLD";
     const prob = data?.probability_up ?? data?.prob_up ?? data?.p_up;
     applySignalHighlight(decision, prob);
+    updateSignalBar(decision, prob);
 
     const px = data?.current_price ?? data?.price ?? "—";
     const probText = typeof prob === "number" ? `${(prob * 100).toFixed(1)}%` : "—";
@@ -1267,6 +1504,20 @@ function applySignalHighlight(decision, prob) {
     if (shouldGlow) dom.sellBtn.classList.add("signal-sell", `signal-${strength}`);
     dom.sellBtn.setAttribute("title", `${prefix} SELL • p=${probText} • ${strength}`);
   }
+}
+
+function updateSignalBar(decision, prob) {
+  if (!dom.signalBar) return;
+  const pct = typeof prob === "number" ? Math.max(0, Math.min(1, prob)) * 100 : 0;
+  dom.signalBar.style.setProperty("--signal-width", `${pct}%`);
+  const fill = dom.signalBar.querySelector(".signal-fill");
+  if (fill) fill.style.width = `${pct}%`;
+  dom.signalBar.setAttribute("data-decision", decision || "HOLD");
+  dom.signalBar.setAttribute("title",
+    state.lang === LANG.ES
+      ? `Confianza ${pct.toFixed(1)}% • Regla: BUY si >63%, SELL si <37%, HOLD en medio`
+      : `Confidence ${pct.toFixed(1)}% • Rule: BUY if >63%, SELL if <37%, HOLD otherwise`
+  );
 }
 
 function parseTradeCommand(text) {
@@ -1398,6 +1649,7 @@ function renderNewsList(items, momentum) {
   if (!dom.newsList) return;
   dom.newsList.innerHTML = "";
   if (dom.newsMomentum) dom.newsMomentum.textContent = momentum == null ? "—" : String(momentum);
+   dom.newsList.classList.toggle("compact", !!dom.newsCompactToggle?.checked);
 
   if (!items?.length) {
     dom.newsList.appendChild(el("div", { class: "news-card", text: state.lang === LANG.ES ? "Sin noticias." : "No news." }));
@@ -1606,13 +1858,14 @@ function renderSimpleList(obj, title) {
 /* ------------------------- SESSIONS ------------------------- */
 
 function closeSessionsModal() {
-  dom.sessionsModal?.classList?.add("hidden");
+  // sidebar version: no modal to close; just stop events polling
+  stopConversationEventsPolling();
 }
 
 function openSessionsModal() {
   if (dom.sessionsIncludeArchived) dom.sessionsIncludeArchived.checked = !!state.conversationsIncludeArchived;
-  dom.sessionsModal?.classList?.remove("hidden");
   loadConversationList(state.conversationsIncludeArchived);
+  startConversationEventsPolling();
 }
 
 async function loadConversationList(includeArchived = false) {
@@ -1838,6 +2091,7 @@ function startConversationEventsPolling() {
   resetConversationEvents();
   loadConversationEvents({ force: true });
   state.convEventsTimer = setInterval(() => loadConversationEvents(), 2000);
+  updateStatusCenter();
 }
 
 function stopConversationEventsPolling() {
@@ -1845,6 +2099,7 @@ function stopConversationEventsPolling() {
     clearInterval(state.convEventsTimer);
     state.convEventsTimer = null;
   }
+  updateStatusCenter();
 }
 
 /* ------------------------- FILE TREE / CONTENT / INGEST ------------------------- */
@@ -1947,7 +2202,7 @@ async function uploadZipProject() {
     const data = await safeJson(res);
     if (!res.ok) throw new Error(data?.detail || "upload failed");
     appendBubble(state.lang === LANG.ES ? "ZIP subido." : "ZIP uploaded.", "bot");
-    if (data?.path) setProjectRoot(data.path);
+    if (data?.path) addUploadedProject(data.path);
     loadProjectTree();
   } catch (err) {
     console.error(err);
@@ -1971,7 +2226,7 @@ async function cloneRepo() {
     const data = await safeJson(res);
     if (!res.ok) throw new Error(data?.detail || "clone failed");
     appendBubble(state.lang === LANG.ES ? "Repo clonado." : "Repo cloned.", "bot");
-    if (data?.path) setProjectRoot(data.path);
+    if (data?.path) addUploadedProject(data.path);
     loadProjectTree();
   } catch {
     appendBubble(state.lang === LANG.ES ? "No se pudo clonar." : "Clone failed.", "error");
@@ -2044,11 +2299,15 @@ async function startIngest() {
         state.lang === LANG.ES ? `Ingesta en background (job ${state.ingestJobId}).` : `Ingest queued (job ${state.ingestJobId}).`,
         "bot"
       );
+      state.logJobId = state.ingestJobId;
+      state.logPath = null;
+      state.logIsAdmin = false;
       pollIngestStatus();
     } else {
       appendBubble(state.lang === LANG.ES ? "Ingesta completada." : "Ingest finished.", "bot");
     }
     loadIngestJobs();
+    updateStatusCenter();
   } catch {
     appendBubble(state.lang === LANG.ES ? "No se pudo iniciar ingesta." : "Could not start ingest.", "error");
   }
@@ -2059,6 +2318,7 @@ function pollIngestStatus() {
   if (state.ingestPollTimer) clearInterval(state.ingestPollTimer);
   loadIngestStatus();
   state.ingestPollTimer = setInterval(loadIngestStatus, 3000);
+  updateStatusCenter();
 }
 
 async function loadIngestStatus() {
@@ -2087,6 +2347,7 @@ async function loadIngestStatus() {
         statusLower === "failed" ? "error" : "bot"
       );
       state.ingestJobId = null;
+      updateStatusCenter();
     }
   } catch {
     clearInterval(state.ingestPollTimer);
@@ -2094,6 +2355,7 @@ async function loadIngestStatus() {
     state.ingestJobId = null;
     dom.ingestStatusBtn?.classList.remove("active");
     if (dom.ingestStatusText) dom.ingestStatusText.textContent = state.lang === LANG.ES ? "error" : "error";
+    updateStatusCenter();
   }
 }
 
@@ -2123,6 +2385,19 @@ async function loadIngestJobs() {
         </div>
         <div class="jobs-meta">${j.updated_at ? new Date(j.updated_at * 1000).toLocaleString() : ""}</div>
       `;
+      li.addEventListener("click", () => {
+        const id = j.id || j.job_id;
+        if (!id) return;
+        state.logJobId = String(id);
+        state.logIsAdmin = false;
+        state.logPath = null;
+        if (dom.logsLiveToggle) dom.logsLiveToggle.checked = true;
+        startLogsPolling();
+        appendBubble(
+          state.lang === LANG.ES ? `Mostrando log de ingesta (${id}).` : `Showing ingest log (${id}).`,
+          "bot"
+        );
+      });
       dom.ingestJobsList.appendChild(li);
     });
   } catch {
@@ -2151,38 +2426,55 @@ async function adminRefreshCrypto() {
       const rel = rawLog.includes("/logs/") ? rawLog.split("/logs/").pop() : rawLog;
       state.logPath = rel ? `logs/${rel}` : rawLog;
       state.logIsAdmin = true;
+      state.logJobId = null;
     } else {
       state.logPath = null;
       state.logIsAdmin = false;
+      state.logJobId = null;
     }
-    activateTab("sources");
+    // Stay on files tab so the Files/Jobs/Logs pane is not hidden.
+    activateTab("files");
     if (dom.logsLiveToggle) dom.logsLiveToggle.checked = true;
     startLogsPolling();
+    updateStatusCenter();
   } catch {
     appendBubble(state.lang === LANG.ES ? "No se pudo iniciar refresh." : "Could not start refresh.", "error");
   }
 }
 
 function startLogsPolling() {
+  // only start if we have a source (admin log path or ingest job id)
+  const hasSource = state.logIsAdmin ? state.logPath : (state.logJobId || state.ingestJobId);
+  if (!hasSource) return;
   stopLogsPolling();
   state.logsTimer = setInterval(loadLogs, 3000);
   loadLogs();
+  updateStatusCenter();
 }
 function stopLogsPolling() {
   if (state.logsTimer) clearInterval(state.logsTimer);
   state.logsTimer = null;
+  updateStatusCenter();
 }
 
 async function loadLogs() {
   if (!dom.sourcesContent) return;
+  if (!state.logIsAdmin && !state.logJobId && !state.ingestJobId) {
+    if (dom.filesLogContent) {
+      dom.filesLogContent.textContent = state.lang === LANG.ES ? "Selecciona un log (ingest/admin) para verlo aquí." : "Select a log (ingest/admin) to view it here.";
+    }
+    return; // nothing to load
+  }
   try {
     let url;
     if ((state.logPath && state.logPath.includes("refresh_")) || state.logIsAdmin) {
       url = new URL(endpoints.adminRefreshLog, location.origin);
-      url.searchParams.set("path", state.logPath);
+      if (state.logPath) url.searchParams.set("path", state.logPath);
     } else {
       url = new URL(endpoints.filesIngestLog, location.origin);
-      if (state.logPath) url.searchParams.set("path", state.logPath);
+      const jobId = state.logJobId || state.ingestJobId;
+      if (!jobId) return;
+      url.searchParams.set("job_id", jobId);
     }
 
     const res = await fetchWithTimeout(url.toString(), {}, { timeout: 9000, retries: 0 });
@@ -2202,6 +2494,9 @@ async function loadLogs() {
     pre.style.whiteSpace = "pre-wrap";
     pre.textContent = Array.isArray(lines) ? lines.join("") : String(lines ?? "");
     dom.sourcesContent.appendChild(pre);
+    if (dom.filesLogContent) {
+      dom.filesLogContent.textContent = Array.isArray(lines) ? lines.join("") : String(lines ?? "");
+    }
   } catch {}
 }
 
@@ -2209,10 +2504,12 @@ function startAlertsPolling() {
   stopAlertsPolling();
   state.alertsTimer = setInterval(checkAlerts, 12000);
   checkAlerts();
+  updateStatusCenter();
 }
 function stopAlertsPolling() {
   if (state.alertsTimer) clearInterval(state.alertsTimer);
   state.alertsTimer = null;
+  updateStatusCenter();
 }
 
 async function checkAlerts() {
