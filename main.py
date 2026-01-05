@@ -38,6 +38,7 @@ if not logger.handlers:
     )
 
 LLM_WARMUP_ON_START = os.getenv("AEGIS_LLM_WARMUP", "1").lower() in {"1", "true", "yes", "on"}
+DISABLE_DB = os.getenv("AEGIS_DISABLE_DB", "0").lower() in {"1", "true", "yes", "on"}
 
 # Trust reverse-proxy headers for client IP
 TRUST_PROXY = os.getenv("AEGIS_TRUST_PROXY", "0").lower() in {"1", "true", "yes", "on"}
@@ -261,9 +262,12 @@ def _warm_llm_once() -> None:
 
 @app.on_event("startup")
 def on_startup() -> None:
-    logger.info("[main] Initializing DB...")
-    init_db(engine)
-    logger.info("[main] Database ready.")
+    if DISABLE_DB:
+        logger.info("[main] DB init skipped (AEGIS_DISABLE_DB=1).")
+    else:
+        logger.info("[main] Initializing DB...")
+        init_db(engine)
+        logger.info("[main] Database ready.")
     logger.info("[main] %s", _clamav_status())
     if LLM_WARMUP_ON_START:
         _warm_llm_once()

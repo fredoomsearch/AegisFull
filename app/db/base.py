@@ -9,7 +9,7 @@ This is the low-level DB wiring. FastAPI dependencies use app.db.deps.get_db.
 import logging
 import os
 from contextlib import contextmanager
-from typing import Generator, Optional
+from typing import Any, Generator, Optional
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
@@ -22,24 +22,15 @@ from app.db.models import Base  # side-effect import to register models
 logger = logging.getLogger(__name__)
 
 
-DATABASE_URL="postgresql+psycopg2://USER:PASS@HOST:PORT/Dbtest"
-# optional pool tuning
-AEGIS_DB_POOL_SIZE=5
-AEGIS_DB_MAX_OVERFLOW=10
-AEGIS_DB_POOL_TIMEOUT=30
-AEGIS_DB_POOL_RECYCLE=1800
-
-
 # ---------------------------------------------------------
 # Configuración de la base de datos
 # ---------------------------------------------------------
 
 def _build_database_url() -> str:
-    raw = os.getenv("DATABASE_URL") or settings.DB_URL
-    if raw and raw.strip():
-        return raw.strip()
+    raw = (os.getenv("DATABASE_URL") or settings.DB_URL or "").strip()
+    if raw:
+        return raw
 
-    # Fallback builder for Postgres when DATABASE_URL is not provided
     host = os.getenv("POSTGRES_HOST") or os.getenv("PGHOST") or ""
     db = os.getenv("POSTGRES_DB") or os.getenv("PGDATABASE") or ""
     user = os.getenv("POSTGRES_USER") or os.getenv("PGUSER") or ""
@@ -58,25 +49,21 @@ def _build_database_url() -> str:
         )
         return str(url)
 
-    # Final fallback
-    return "sqlite:///./aegis.db"
+    raise RuntimeError("DATABASE_URL or POSTGRES_* env vars must be set for PostgreSQL.")
 
 
-def _engine_params(db_url: str) -> tuple[dict, dict]:
+def _engine_params(db_url: str) -> tuple[URL, dict[str, Any]]:
     url_obj = make_url(db_url)
-    is_sqlite = url_obj.get_backend_name() == "sqlite"
+    backend = url_obj.get_backend_name()
+    if backend not in {"postgresql", "postgres"}:
+        raise ValueError(f"Unsupported backend '{backend}'. Only PostgreSQL URLs are allowed.")
 
-    engine_kwargs: dict = {
+    engine_kwargs: dict[str, Any] = {
         "future": True,
         "pool_pre_ping": True,
         "echo": (os.getenv("SQL_ECHO") or "").lower() in {"1", "true", "yes", "on"},
     }
 
-    if is_sqlite:
-        engine_kwargs["connect_args"] = {"check_same_thread": False}
-        return url_obj, engine_kwargs
-
-    # Pool tuning for Postgres / others
     pool_size = int(os.getenv("AEGIS_DB_POOL_SIZE", "5") or "5")
     max_overflow = int(os.getenv("AEGIS_DB_MAX_OVERFLOW", "10") or "10")
     pool_timeout = int(os.getenv("AEGIS_DB_POOL_TIMEOUT", "30") or "30")
@@ -94,7 +81,7 @@ def _engine_params(db_url: str) -> tuple[dict, dict]:
 
 
 DATABASE_URL: str = _build_database_url()
-_url_obj, _engine_kwargs = _engine_params(DATABASE_URL)
+_, _engine_kwargs = _engine_params(DATABASE_URL)
 
 engine: Engine = create_engine(DATABASE_URL, **_engine_kwargs)
 

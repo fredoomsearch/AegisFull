@@ -202,7 +202,7 @@ AEGIS_LLAMA_CTX = _get_int_env("AEGIS_LLAMA_CTX",3048, fast_default=1536)
 AEGIS_LLAMA_THREADS = _get_int_env("AEGIS_LLAMA_THREADS", 10, fast_default=4)
 AEGIS_N_GPU_LAYERS = _get_int_env("AEGIS_N_GPU_LAYERS", 32, fast_default=0)
 AEGIS_LLAMA_BATCH = _get_int_env("AEGIS_LLAMA_BATCH", 512, fast_default=128)
-MAX_NEW_TOKENS = _get_int_env("AEGIS_MAX_NEW_TOKENS", 1400, fast_default=256)
+MAX_NEW_TOKENS = _get_int_env("AEGIS_MAX_NEW_TOKENS", 1800, fast_default=256)
 # Disable backend timeouts by default; set LLM_MAX_CALL_SECONDS>0 to cap.
 MAX_CALL_SECONDS = _get_float_env("LLM_MAX_CALL_SECONDS", 0.0, fast_default=0.0)
 AEGIS_FAST_MODE = FAST_MODE

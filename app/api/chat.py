@@ -320,6 +320,65 @@ def _respond_with_url_fetch(conv_id: str, url: str, lang: str, db, crud, db_avai
     )
 
 
+_CRYPTO_TICKERS = {
+    "btc",
+    "eth",
+    "bnb",
+    "sol",
+    "ada",
+    "xrp",
+    "doge",
+    "dot",
+    "avax",
+    "matic",
+    "link",
+    "ltc",
+    "trx",
+    "atom",
+    "uni",
+    "usdt",
+    "usdc",
+}
+
+
+def _extract_crypto_symbol(text: str) -> str | None:
+    """
+    Best-effort coin symbol extractor from free text (BTC, ETH, SOL, or pairs like BTC/USDT).
+    """
+    t = text or ""
+    pair = re.search(r"\b([A-Za-z]{2,10})(?:/)?(USDT|USD|USDC|BUSD|BTC|ETH)\b", t, flags=re.IGNORECASE)
+    if pair:
+        sym = pair.group(1)
+        if sym.lower() in _CRYPTO_TICKERS:
+            return sym.upper()
+    for token in re.findall(r"[A-Za-z]{2,10}", t):
+        if token.lower() in _CRYPTO_TICKERS:
+            return token.upper()
+    return None
+
+
+def _format_crypto_prediction(pred, lang: str) -> str:
+    prob = pred.probability_up
+    prob_pct = f"{prob*100:.1f}%" if isinstance(prob, (int, float)) else "N/A"
+    curr = pred.current_price if pred.current_price is not None else "?"
+    nxt = pred.predicted_price if pred.predicted_price is not None else "?"
+    decision = pred.decision or "HOLD"
+    if lang.startswith("es"):
+        return f"Predicción demo para {pred.symbol} ({pred.horizon_minutes}m): precio actual {curr}, predicción {nxt}, prob. subida {prob_pct}, señal {decision}."
+    return f"Demo prediction for {pred.symbol} ({pred.horizon_minutes}m): current {curr}, predicted {nxt}, prob up {prob_pct}, signal {decision}."
+
+
+def _maybe_crypto_prediction(symbol: str):
+    """Call the internal crypto predictor without saving logs."""
+    try:
+        from app.api.crypto import PredictRequest, predict  # local import to avoid cycles
+
+        return predict(PredictRequest(symbol=symbol, save=False))
+    except Exception:
+        logger.debug("Crypto prediction failed for %s", symbol, exc_info=True)
+        return None
+
+
 def _append_db_message(
     db: Session | None,
     crud,
@@ -740,7 +799,6 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
             history_messages=history_override,
             summary_override=summary_override,
         )
-        prompt_chars = sum(len(m.get("content") or "") for m in messages_for_llm)
 
         is_code = is_code_question(new_user_message)
         is_market = is_market_question(new_user_message)
@@ -753,11 +811,35 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
         if mode_value in {"code", "crypto"}:
             mode = mode_value
 
+        crypto_summary = ""
+        if mode == "crypto":
+            sym = _extract_crypto_symbol(user_msg_for_llm)
+            if sym:
+                pred = _maybe_crypto_prediction(sym)
+                if pred:
+                    crypto_summary = _format_crypto_prediction(pred, lang)
+                    messages_for_llm.append(
+                        {"role": "system", "content": f"Crypto prediction context: {crypto_summary}"}
+                    )
+                    record_event(
+                        conv_id,
+                        "crypto_prediction",
+                        data={
+                            "symbol": sym,
+                            "decision": getattr(pred, "decision", None),
+                            "probability_up": getattr(pred, "probability_up", None),
+                        },
+                    )
+
+        prompt_chars = sum(len(m.get("content") or "") for m in messages_for_llm)
+
         try:
             record_event(conv_id, "llm_start", data={"mode": mode, "prompt_chars": prompt_chars})
             resp_raw: str = await loop.run_in_executor(_executor, lambda: generate_response(messages_for_llm, mode=mode))
             resp = clean_model_output(resp_raw or "(empty response)")
             resp = _truncate_response(resp, lang=lang)
+            if crypto_summary:
+                resp = f"{crypto_summary}\n\n{resp}"
             record_event(conv_id, "llm_done", data={"response": resp})
         except Exception:
             traceback.print_exc()

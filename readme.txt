@@ -27,12 +27,19 @@ export AEGIS_API_KEY="your"   # optional but fine to reuse
 REMENBER CHANGE OF KEY FOR USE INGEST LOGS, AND CRYPTO REFRESH
 ```
 # stop uvicorn if running
-export ADMIN_API_KEY="your"
-export AEGIS_API_KEY="your"
-export FILES_API_KEY="your--key"
-echo "$ADMIN_API_KEY"   # should print: your
+
+docker run --name aegis-postgres -p 5432:5432 \
+  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=aegis -d postgres:15
+
+docker start aegis-postgres
+
+export DATABASE_URL="postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/aegis"
+export ADMIN_API_KEY=your
+export AEGIS_API_KEY=your
+export FILES_API_KEY=your--key
 
 uvicorn main:app --reload
+
 ```
 - In the UI key prompt, enter `your`. Or via curl (same key):
 ```
@@ -85,7 +92,7 @@ If running without keys: `export AEGIS_AUTH_MODE=off` and omit `X-API-Key`.
 ---
 ## Key features
 - **Local LLM** – WizardCoder 7B (`.gguf`) via `llama.cpp`; optional OpenAI fallback.
-- **Chat with memory** – SQLite/Postgres + summarization.
+- **Chat with memory** – PostgreSQL + summarization.
 - **Web search** – DDG/Qwant/Startpage/Brave rotation with quotas/cache; snippet fetcher with robots/HTTPS guard.
 - **URL / Tor tools** – `/fetch_url` with SSRF guards; Tor for `.onion`.
 - **Vision/OCR** – `/analyze_image` (ES/EN).
@@ -128,8 +135,7 @@ OPENAI_MODEL=gpt-4o-mini
 OPENAI_TIMEOUT=20
 
 # Database
-DATABASE_URL=sqlite:///./aegis.db
-# or postgresql+psycopg2://user:pass@host:5432/db
+DATABASE_URL=postgresql+psycopg2://user:pass@host:5432/db
 
 # API keys
 AEGIS_API_KEY=...

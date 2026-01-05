@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     DEFAULT_LLM_MODEL: str = "wizardcoder"
 
     # DB
-    DB_URL: str = "sqlite:///./aegis.db"
+    DB_URL: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

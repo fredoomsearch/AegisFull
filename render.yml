@@ -17,7 +17,7 @@ services:
       - key: AEGIS_N_GPU_LAYERS
         value: "10"
       - key: DATABASE_URL
-        value: sqlite:///./aegis.db
+        value: postgresql+psycopg2://USER:PASSWORD@HOST:PORT/DBNAME
       # Si algún día usas OpenAI desde Render:
       # - key: OPENAI_API_KEY
       #   sync: false   # la pones en el panel, no en git

@@ -33,7 +33,7 @@ ENV AEGIS_MODEL_PATH=/app/models/wizardcoder-python-7b-v1.0.Q5_K_M.gguf
 ENV AEGIS_N_THREADS=4
 ENV AEGIS_N_CTX=2048
 ENV AEGIS_N_GPU_LAYERS=0
-ENV DATABASE_URL=sqlite:///./aegis.db
+ENV DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/aegis
 
 # Uvicorn escuchando en 0.0.0.0:8000
 EXPOSE 8000

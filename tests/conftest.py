@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 
-os.environ["DATABASE_URL"] = "sqlite:///./test_aegis.db"
+os.environ["DATABASE_URL"] = "postgresql+psycopg2://postgres:postgres@localhost:5432/test_aegis"
 os.environ["AEGIS_SEARCH_WARMUP_ON_START"] = "0"
 os.environ["AEGIS_SEARCH_WARMUP_INTERVAL"] = "0"
 os.environ["AEGIS_AUTH_MODE"] = "off"
