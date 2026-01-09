@@ -23,7 +23,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 
   <!-- Your CSS -->
-  <link rel="stylesheet" href="/ui/styles.css" />
+  <link rel="stylesheet" href="/ui/styles.css?v=20260106" />
 </head>
 
 <body>
@@ -336,11 +336,12 @@
         </div>
         <div class="modal-body">
           <ul class="help-list">
-            <li><strong>Chat</strong>: conversación normal con memoria y modo código/cripto.</li>
-            <li><strong>Modo Web</strong>: activa el botón globo; usa /websearch y muestra fuentes a la derecha.</li>
-            <li><strong>Modo URL</strong>: pega una URL; /fetch_url la lee y aparece en Fuentes.</li>
-            <li><strong>Modo Cripto</strong>: símbolo + H (minutos). Buy/Sell son educativos/test.</li>
-            <li><strong>Imagen</strong>: sube una imagen; /analyze_image hace OCR local (ES/EN).</li>
+            <li>💬 <strong>Chat</strong>: conversación normal con memoria. Usa modo Código/Cripto si aplica.</li>
+            <li>🌐 <strong>Modo Web</strong>: botón globo; llama a /websearch y muestra fuentes a la derecha.</li>
+            <li>🔗 <strong>Modo URL</strong>: pega una URL; /fetch_url la lee y la ves en Fuentes.</li>
+            <li>🧠 <strong>Modo Código</strong>: envía preguntas técnicas; usa RAG si hay índice.</li>
+            <li>🖼️ <strong>Imagen</strong>: sube una imagen; /analyze_image hace OCR local (ES/EN).</li>
+            <li>📈 <strong>Cripto (señal + horizonte)</strong>: escribe “BTCUSDT H=2m” o usa el panel Cripto. Genera señal demo y guarda precio base.</li>
           </ul>
         </div>
       </div>
@@ -370,6 +371,6 @@
     <input id="projectUploadInput" type="file" accept=".zip" class="visually-hidden" />
   </div>
 
-  <script src="/ui/app.js" defer></script>
+  <script src="/ui/app.js?v=20260106" defer></script>
 </body>
 </html>
