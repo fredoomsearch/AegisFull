@@ -15,6 +15,7 @@ import io
 import logging
 import os
 import shutil
+import subprocess
 import zipfile
 from pathlib import Path
 from typing import List
@@ -31,6 +32,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # Keep uploads in the same root as /files/upload-zip so /files/ingest accepts them.
 UPLOADS_DIR = Path(os.getenv("FILES_UPLOAD_ROOT", "data/uploads")).resolve()
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+MAX_UPLOAD_BYTES = int(os.getenv("FILES_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
+FILES_AV_SCAN = os.getenv("FILES_AV_SCAN", "1") != "0"
+FILES_AV_TIMEOUT = int(os.getenv("FILES_AV_TIMEOUT", "15"))
 
 EXCLUDED_DIRS = {
     ".git",
@@ -161,6 +165,61 @@ def _build_tree(root: Path, max_depth: int = 4, depth: int = 0) -> TreeNode:
         pass
 
     return node
+
+
+def _dir_size_mb(path: Path) -> int:
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            fp = Path(root) / f
+            try:
+                total += fp.stat().st_size
+            except OSError:
+                pass
+    return int(total / (1024 * 1024))
+
+
+def _av_scan_path(path: Path) -> None:
+    """
+    Reuse the same lightweight AV scan used in /files. Skips silently if disabled.
+    """
+    if not FILES_AV_SCAN:
+        return
+    if not path.exists():
+        return
+
+    scanner = shutil.which("clamdscan") or shutil.which("clamscan")
+    if not scanner:
+        return
+
+    size_mb = _dir_size_mb(path)
+    if size_mb > (MAX_UPLOAD_BYTES // (1024 * 1024) * 2):
+        raise HTTPException(status_code=400, detail="AV scan skipped: tree too large")
+
+    cmd = [scanner, "--infected", "--no-summary", str(path)]
+    if "clamdscan" in scanner:
+        cmd.insert(1, "--fdpass")
+
+    try:
+        res = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=FILES_AV_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=400, detail="AV scan timed out")
+    except Exception:
+        raise HTTPException(status_code=400, detail="AV scan failed")
+
+    output = (res.stdout or "").strip()
+    if res.returncode == 0:
+        return
+    if res.returncode == 1:
+        raise HTTPException(status_code=400, detail=f"Malware detected: {output or 'infected'}")
+    raise HTTPException(status_code=400, detail=f"AV scan error: {output or 'scan error'}")
 
 
 def _extract_zip_safe(buf: bytes, dest: Path) -> None:
@@ -294,6 +353,7 @@ async def upload_project(file: UploadFile = File(...)):
     dest.mkdir(parents=True, exist_ok=False)
 
     _extract_zip_safe(buf, dest)
+    _av_scan_path(dest)
 
     # Intenta detectar si el zip tenía una carpeta raíz única; si es así, usa esa.
     children = list(dest.iterdir())

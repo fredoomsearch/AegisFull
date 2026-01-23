@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import math
 import os
 import random
@@ -19,13 +20,15 @@ from app.api.deps import require_api_key
 from app.models.ml.models import ModelCatalog, TrainedModel, discover_trained_models
 from app.services.crypto_news_service import fetch_news as fetch_crypto_news
 from app.services.crypto_prediction_log import (
+    clear_predictions_and_outcomes,
     list_outcomes,
     list_predictions,
     log_outcome,
     log_prediction,
+    pair_predictions_with_outcomes,
     recent_stats,
 )
-from app.services.crypto_trade_log import compute_pnl, list_trades, log_trade
+from app.services.crypto_trade_log import clear_trades, compute_pnl, list_trades, log_trade
 
 try:
     import pandas as pd  # type: ignore
@@ -38,6 +41,7 @@ except Exception:  # pragma: no cover
     meta_module = None  # type: ignore
 
 router = APIRouter(prefix="/crypto", tags=["crypto"], dependencies=[Depends(require_api_key)])
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Binance helpers
@@ -45,12 +49,49 @@ router = APIRouter(prefix="/crypto", tags=["crypto"], dependencies=[Depends(requ
 
 PRICE_CACHE_TTL = float(os.getenv("BINANCE_PRICE_CACHE_TTL", "8") or "8")
 _price_cache: Dict[str, tuple[float, float]] = {}
+_price_source: Dict[str, str] = {}
 _price_lock = threading.Lock()
 
-
+# ACTIVATE REAL TIME DATA "1"
 def _binance_base_url() -> str:
-    live = os.getenv("BINANCE_LIVE", "").lower() in {"1", "true", "yes"}
+    live = os.getenv("BINANCE_LIVE", "1").lower() in {"1", "true", "yes"}
     return "https://api.binance.com" if live else "https://testnet.binance.vision"
+
+
+def _coingecko_id(sym: str) -> Optional[str]:
+    sym = sym.lower()
+    mapping = {
+        "btc": "bitcoin",
+        "eth": "ethereum",
+        "bnb": "binancecoin",
+        "sol": "solana",
+        "ada": "cardano",
+        "xrp": "ripple",
+        "doge": "dogecoin",
+        "dot": "polkadot",
+        "matic": "polygon",
+        "ltc": "litecoin",
+    }
+    return mapping.get(sym)
+
+
+def _coingecko_spot_price(symbol: str) -> Optional[float]:
+    cid = _coingecko_id(symbol)
+    if not cid:
+        return None
+    try:
+        resp = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": cid, "vs_currencies": "usd"},
+            timeout=6,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        val = data.get(cid, {}).get("usd")
+        return float(val) if val is not None else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("CoinGecko price fetch failed for %s: %s", symbol, exc)
+        return None
 
 
 def _binance_spot_price(symbol: str) -> Optional[float]:
@@ -61,6 +102,8 @@ def _binance_spot_price(symbol: str) -> Optional[float]:
             cached = _price_cache.get(pair)
         if cached and now - cached[1] <= PRICE_CACHE_TTL:
             return cached[0]
+    price_val: Optional[float] = None
+    source = None
     try:
         resp = requests.get(
             f"{_binance_base_url()}/api/v3/ticker/price",
@@ -71,17 +114,28 @@ def _binance_spot_price(symbol: str) -> Optional[float]:
         data = resp.json()
         price_str = data.get("price") or data.get("lastPrice")
         price_val = float(price_str) if price_str is not None else None
-        if price_val is not None and PRICE_CACHE_TTL > 0:
-            with _price_lock:
-                _price_cache[pair] = (price_val, now)
-        return price_val
-    except Exception:
-        if PRICE_CACHE_TTL > 0:
-            with _price_lock:
-                cached = _price_cache.get(pair)
-            if cached:
-                return cached[0]
-        return None
+        source = "binance"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Binance price fetch failed for %s: %s", pair, exc)
+
+    if price_val is None:
+        price_val = _coingecko_spot_price(pair.replace("USDT", ""))
+        if price_val is not None:
+            source = "coingecko"
+
+    if price_val is None and PRICE_CACHE_TTL > 0:
+        with _price_lock:
+            cached = _price_cache.get(pair)
+        if cached:
+            _price_source[pair] = "cache"
+            return cached[0]
+
+    if price_val is not None and PRICE_CACHE_TTL > 0:
+        with _price_lock:
+            _price_cache[pair] = (price_val, now)
+        if source:
+            _price_source[pair] = source
+    return price_val
 
 
 def _binance_signed_request(
@@ -208,6 +262,15 @@ def get_models() -> ModelCatalog:
     )
 
 
+@router.get("/models/metrics")
+def get_model_metrics(limit: int = Query(200, ge=10, le=1000)) -> Dict[str, Any]:
+    """Return recent accuracy stats across models."""
+    try:
+        return recent_stats(limit=limit)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error computing model metrics: {exc}") from exc
+
+
 @router.post("/predict", response_model=PredictResponse)
 def predict(req: PredictRequest) -> PredictResponse:
     sym = req.symbol.upper().strip()
@@ -219,6 +282,7 @@ def predict(req: PredictRequest) -> PredictResponse:
         raise HTTPException(status_code=400, detail="Unsupported model")
 
     live_price = _binance_spot_price(sym)
+    price_source = _price_source.get(sym, "demo" if live_price is None else "binance")
     digest = int(hashlib.sha256(f"{sym}:{req.horizon_minutes}".encode()).hexdigest(), 16)
     base = 100 + (digest % 500)
     wobble = 5 * math.sin(time.time() / 60.0)
@@ -319,6 +383,7 @@ def predict(req: PredictRequest) -> PredictResponse:
             "model_used": requested_model,
             "news_provider": news_payload.get("provider") if news_payload else None,
             "log_id": log_id,
+            "price_source": price_source,
         },
         news=news_items,
     )
@@ -422,7 +487,7 @@ def recent_predictions(
     symbol: Optional[str] = Query(None, description="Optional symbol filter"),
 ) -> List[Dict[str, Any]]:
     try:
-        return list_predictions(limit=limit, symbol=symbol)
+        return pair_predictions_with_outcomes(limit=limit, symbol=symbol)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error listing predictions: {exc}") from exc
 
@@ -436,6 +501,16 @@ def recent_outcomes(
         return list_outcomes(limit=limit, symbol=symbol)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error listing outcomes: {exc}") from exc
+
+
+@router.delete("/predictions")
+def clear_predictions(_: Optional[str] = Depends(require_api_key)) -> dict:
+    """Remove prediction and outcome logs (crypto history)."""
+    try:
+        clear_predictions_and_outcomes()
+        return {"status": "ok"}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Error clearing predictions: {exc}") from exc
 
 
 @router.get("/predictions/stats")
@@ -481,8 +556,8 @@ def trade(order: TradeRequest) -> TradeResponse:
 
     symbol_pair = order.symbol.upper().strip()
     price_live = _binance_spot_price(symbol_pair)
-    api_key = os.getenv("BINANCE_API_KEY", "").strip()
-    api_secret = os.getenv("BINANCE_API_SECRET", "").strip()
+    api_key = os.getenv("BINANCE_API_KEY", "wS58t0PEQX4szcC0zHEfNQwpAvEwhshvMyItIzOPmtvE25bV5KieXgsJXdwLrlBV").strip()
+    api_secret = os.getenv("BINANCE_API_SECRET", "v49yE62yFVcXoSgw53ehsgdJHiXWeN7CpbHbpbZWxpoKyxWBxOuu2qA7KRVOgzET").strip()
     base_url = _binance_base_url()
 
     if api_key and api_secret:
@@ -572,6 +647,16 @@ def get_trades(
         return list_trades(limit=limit, symbol=symbol)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Error listing trades: {exc}") from exc
+
+
+@router.delete("/trades")
+def clear_trades_history(_: Optional[str] = Depends(require_api_key)) -> dict:
+    """Remove stored simulated trades."""
+    try:
+        clear_trades()
+        return {"status": "ok"}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Error clearing trades: {exc}") from exc
 
 
 @router.get("/pnl")

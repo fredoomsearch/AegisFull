@@ -58,8 +58,14 @@
           <button id="treeBtn" class="icon-btn" title="Ver árbol de proyecto">
             <i class="fa-solid fa-diagram-project"></i>
           </button>
+          <button id="symbolsBtn" class="icon-btn" title="Pares y despliegue rápido">
+            <i class="fa-solid fa-rocket"></i>
+          </button>
           <button id="adminRefresh" class="icon-btn" title="Refrescar datos/modelos cripto (admin)">
             <i class="fa-solid fa-bolt"></i>
+          </button>
+          <button id="clearLogsBtn" class="icon-btn" title="Limpiar logs / Clear logs">
+            <i class="fa-solid fa-eraser"></i>
           </button>
           <button id="cancelAllBtn" class="icon-btn danger" title="Cancelar todo / Cancel all">
             <i class="fa-solid fa-ban"></i>
@@ -223,6 +229,8 @@
                     <button id="predsBtn" class="icon-btn small" title="Ver últimas predicciones" type="button">≣</button>
                     <button id="pnlBtn" class="icon-btn small" title="P&L y trades" type="button">$</button>
                     <button id="statsBtn" class="icon-btn small" title="Ver estadísticos de predicciones" type="button">Σ</button>
+                    <button id="snapshotBtn" class="icon-btn small" title="Ver snapshot del sistema" type="button">🛰</button>
+                    <button id="clearCryptoBtn" class="icon-btn small danger" title="Borrar historial cripto" type="button">🗑</button>
                   </div>
                 </div>
               </div>
@@ -231,15 +239,16 @@
 
             <div class="sources-box">
               <div class="sources-toolbar">
-                <div class="sources-toolbar-top">
-                  <div class="sources-toolbar-top-left">
-                    <strong data-i18n="news_heading">News</strong>
-                    <span id="newsMomentum" class="news-momentum">—</span>
-                  </div>
-                  <div class="sources-toolbar-actions">
-                    <label class="live-toggle"><input id="newsCompactToggle" type="checkbox" /><span data-i18n="news_compact">Compacto</span></label>
-                    <button id="newsRefreshBtn" class="icon-btn small" title="Refrescar noticias" type="button">⟳</button>
-                  </div>
+                  <div class="sources-toolbar-top">
+                    <div class="sources-toolbar-top-left">
+                      <strong data-i18n="news_heading">News</strong>
+                      <span id="newsMomentum" class="news-momentum">—</span>
+                      <span id="newsProvider" class="news-provider">—</span>
+                    </div>
+                    <div class="sources-toolbar-actions">
+                      <label class="live-toggle"><input id="newsCompactToggle" type="checkbox" /><span data-i18n="news_compact">Compacto</span></label>
+                      <button id="newsRefreshBtn" class="icon-btn small" title="Refrescar noticias" type="button">⟳</button>
+                    </div>
                 </div>
               </div>
               <div id="news-list" class="news-list"></div>
@@ -347,6 +356,32 @@
       </div>
     </div>
 
+    <!-- SYMBOLS / DEPLOY MODAL -->
+    <div id="symbolsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="symbolsTitle">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3 id="symbolsTitle">Despliegue rápido y símbolos (USDT)</h3>
+          <button id="symbolsClose" class="icon-btn small" aria-label="Cerrar" type="button">✕</button>
+        </div>
+        <div class="modal-body">
+          <p><strong>Deploy (local):</strong> activa DB + claves, luego <code>uvicorn main:app --reload</code>. Usa el ícono de llave para poner la misma clave en la UI.</p>
+          <p><strong>Claves mínimas:</strong> <code>ADMIN_API_KEY</code>, <code>AEGIS_API_KEY</code>, <code>FILES_API_KEY</code>, <code>DATABASE_URL</code>. Opcional: <code>NEWSAPI_TOKEN</code>, <code>CRYPTOPANIC_TOKEN</code>, <code>CRYPTO_NEWS_RSS</code>.</p>
+          <p><strong>Pares Binance (USDT):</strong></p>
+          <pre id="symbolsList" class="symbols-list">
+BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT,
+ADAUSDT, DOGEUSDT, AVAXUSDT, DOTUSDT, TRXUSDT,
+LINKUSDT, MATICUSDT, LTCUSDT, ATOMUSDT, ETCUSDT,
+XLMUSDT, APTUSDT, ARBUSDT, OPUSDT, SUIUSDT,
+NEARUSDT, AAVEUSDT, UNIUSDT, XMRUSDT, EOSUSDT,
+FILUSDT, ALGOUSDT, XTZUSDT, MKRUSDT, INJUSDT,
+RUNEUSDT, KASUSDT, IMXUSDT, JTOUSDT, JUPUSDT,
+TIAUSDT, WIFUSDT, PEPEUSDT, SHIBUSDT, BONKUSDT
+          </pre>
+          <p style="font-size:0.9rem;">Copia un símbolo y pégalo en el campo del gráfico/cripto para ver precio y predicción. Todos son pares USDT (spot).</p>
+        </div>
+      </div>
+    </div>
+
     <!-- SESSIONS MODAL -->
     <div id="sessionsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="sessionsTitle">
       <div class="modal-card">
@@ -371,6 +406,6 @@
     <input id="projectUploadInput" type="file" accept=".zip" class="visually-hidden" />
   </div>
 
-  <script src="/ui/app.js?v=20260106" defer></script>
+  <script src="/ui/app.js?v=20260112" defer></script>
 </body>
 </html>

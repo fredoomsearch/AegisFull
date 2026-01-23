@@ -23,7 +23,7 @@ from app.memory import (
     update_memory,
 )
 from app.models.llm_client import generate_response
-from app.models.llm_utils import build_messages, is_code_question, is_market_question
+from app.models.llm_utils import _LINKY_WORDS, build_messages, is_code_question, is_market_question
 from app.schemas import (
     ChatRequest,
     ChatResponse,
@@ -38,6 +38,9 @@ from app.services.conversation_events import list_events as list_conversation_ev
 from app.services.conversation_events import record_event
 from app.services.web_search import web_search_structured
 from app.services.web_snippets import fetch_snippets_from_sources
+from app.services.crypto_prediction_log import pair_predictions_with_outcomes
+from app.services.crypto_trade_log import compute_pnl, list_trades
+from app.api.crypto import prediction_stats, _binance_spot_price
 from app.tools import fetch_url, fetch_url_via_tor, is_onion, sanitize_web_context
 from app.vision_client import analyze_image_bytes
 
@@ -63,32 +66,12 @@ router = APIRouter(tags=["chat"], dependencies=[Depends(require_api_key)])
 _executor = ThreadPoolExecutor(max_workers=2)
 
 MAX_RAW_FETCH_BYTES = 200_000
-DEFAULT_WEB_CONTEXT_CHARS = 1600
+DEFAULT_WEB_CONTEXT_CHARS = 1200
 MAX_PROMPT_CHARS = int(os.getenv("AEGIS_MAX_PROMPT_CHARS", "5000"))
 HISTORY_FETCH_LIMIT = int(os.getenv("AEGIS_HISTORY_FETCH_LIMIT", "24"))
 MAX_RESPONSE_CHARS = int(os.getenv("AEGIS_MAX_RESPONSE_CHARS", "8000"))
 
-_LINKY_WORDS = (
-    "link",
-    "links",
-    "resource",
-    "resources",
-    "source",
-    "sources",
-    "reference",
-    "references",
-    "citation",
-    "citations",
-    "urls",
-    "url",
-    "websites",
-    "sitios",
-    "fuentes",
-    "referencias",
-    "enlaces",
-    "enlace",
-    "fuente",
-)
+
 
 _QUERY_NORMALIZATIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bformulary\b", flags=re.IGNORECASE), "form"),
@@ -133,7 +116,10 @@ def clean_model_output(t: str) -> str:
     bad = ["[INST]", "[/INST]", "<<SYS>>", "<</SYS>>"]
     for b in bad:
         t = (t or "").replace(b, "")
-    return (t or "").strip()
+    cleaned = (t or "").strip()
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
 def _truncate_response(text: str, lang: str = "es") -> str:
@@ -366,6 +352,34 @@ def _format_crypto_prediction(pred, lang: str) -> str:
     if lang.startswith("es"):
         return f"Predicción demo para {pred.symbol} ({pred.horizon_minutes}m): precio actual {curr}, predicción {nxt}, prob. subida {prob_pct}, señal {decision}."
     return f"Demo prediction for {pred.symbol} ({pred.horizon_minutes}m): current {curr}, predicted {nxt}, prob up {prob_pct}, signal {decision}."
+
+
+def _build_crypto_context(symbol: str, horizon_minutes: int = 15, recent: int = 5) -> str:
+    """Build a short context string from recent predictions/outcomes and P&L."""
+    try:
+        sym = symbol.upper()
+        preds = pair_predictions_with_outcomes(limit=recent, symbol=sym)
+        stats = prediction_stats(symbol=sym)  # type: ignore[arg-type]
+        pnl = compute_pnl(list_trades(limit=200, symbol=sym), _binance_spot_price)
+    except Exception:
+        return ""
+
+    lines = []
+    if preds:
+        last = preds[0]
+        lines.append(
+            f"last {sym}: {last.get('decision')} p={last.get('probability_up')} px={last.get('current_price')} ts={last.get('ts')}"
+        )
+    acc = stats.get("accuracy") if isinstance(stats, dict) else None
+    if isinstance(acc, (int, float)):
+        lines.append(f"hit_rate≈{acc:.2f}")
+    if isinstance(pnl, dict):
+        per = pnl.get("per_symbol", {}).get(sym)
+        if per:
+            lines.append(
+                f"pos={per.get('position')} avg={per.get('avg_price')} unrlzd={per.get('unrealized')}"
+            )
+    return " | ".join(lines)
 
 
 def _maybe_crypto_prediction(symbol: str):
@@ -765,7 +779,7 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
                 msg = "En modo cripto no se buscan fuentes web." if lang.startswith("es") else "Web sources are disabled in crypto mode."
                 record_event(conv_id, "links_response", data={"sources": 0, "lang": lang, "mode": "crypto"})
                 return ChatResponse(response=msg, conversation_id=conv_id, timestamp=datetime.utcnow(), sources=[])
-            if not raw_sources:
+            if not raw_sources or len(raw_sources) < 2:
                 msg = "No encontré fuentes web suficientes para darte enlaces." if lang.startswith("es") \
                     else "I couldn't find enough web sources to provide reliable links."
                 record_event(conv_id, "links_response", data={"sources": 0, "lang": lang})
@@ -816,11 +830,13 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
             sym = _extract_crypto_symbol(user_msg_for_llm)
             if sym:
                 pred = _maybe_crypto_prediction(sym)
+                context_line = _build_crypto_context(sym)
                 if pred:
                     crypto_summary = _format_crypto_prediction(pred, lang)
-                    messages_for_llm.append(
-                        {"role": "system", "content": f"Crypto prediction context: {crypto_summary}"}
-                    )
+                    ctx = "Crypto prediction context: " + crypto_summary
+                    if context_line:
+                        ctx += " | " + context_line
+                    messages_for_llm.append({"role": "system", "content": ctx})
                     record_event(
                         conv_id,
                         "crypto_prediction",
@@ -837,6 +853,8 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
             record_event(conv_id, "llm_start", data={"mode": mode, "prompt_chars": prompt_chars})
             resp_raw: str = await loop.run_in_executor(_executor, lambda: generate_response(messages_for_llm, mode=mode))
             resp = clean_model_output(resp_raw or "(empty response)")
+            if not resp:
+                resp = "El modelo no devolvió texto; intenta de nuevo." if lang.startswith("es") else "The model returned empty text; please retry."
             resp = _truncate_response(resp, lang=lang)
             if crypto_summary:
                 resp = f"{crypto_summary}\n\n{resp}"

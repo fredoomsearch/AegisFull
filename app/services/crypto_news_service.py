@@ -30,6 +30,12 @@ ALLOWED_DOMAINS = {
     if d.strip()
 }
 CRYPTOPANIC_TOKEN = os.getenv("CRYPTOPANIC_TOKEN")
+NEWSAPI_TOKEN = os.getenv("NEWSAPI_TOKEN")
+RSS_FEEDS = [
+    u.strip()
+    for u in (os.getenv("CRYPTO_NEWS_RSS", "") or "").split(",")
+    if u.strip()
+]
 
 _cache: Dict[str, Tuple[float, Dict]] = {}
 
@@ -45,6 +51,7 @@ _IMPACT_MAP = {
 
 _TRUSTED_DOMAINS = {"coindesk.com", "cointelegraph.com", "decrypt.co", "bloomberg.com", "reuters.com"}
 _LOW_TRUST_DOMAINS = {"newsbtc.com", "ambcrypto.com"}
+_MIN_TS = 946684800  # 2000-01-01 to drop junk timestamps (1970/no-date)
 
 
 def _sentiment(text: str) -> float:
@@ -123,6 +130,18 @@ def _allowed_url(url_item: str) -> bool:
     return True
 
 
+def _dedupe(items: List[Dict]) -> List[Dict]:
+    seen = set()
+    out: List[Dict] = []
+    for it in items:
+        key = (it.get("url") or it.get("title") or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(it)
+    return out
+
+
 def _parse_iso_to_epoch(value: str) -> int:
     if not value:
         return int(time.time())
@@ -174,6 +193,84 @@ def _fetch_gdelt(symbol: str, limit: int) -> List[Dict]:
     return items
 
 
+def _fetch_newsapi(symbol: str, limit: int) -> List[Dict]:
+    if not NEWSAPI_TOKEN:
+        return []
+    params = {
+        "q": symbol.upper(),
+        "language": "en",
+        "pageSize": min(limit, NEWS_MAX),
+        "sortBy": "publishedAt",
+        "apiKey": NEWSAPI_TOKEN,
+    }
+    url = "https://newsapi.org/v2/everything"
+    resp = requests.get(url, params=params, timeout=NEWS_TIMEOUT)
+    resp.raise_for_status()
+    data = resp.json()
+    articles = data.get("articles") or []
+    items: List[Dict] = []
+    for a in articles:
+        title = (a.get("title") or "").strip()
+        if not title:
+            continue
+        url_item = (a.get("url") or "").strip()
+        if not _allowed_url(url_item):
+            continue
+        source = (a.get("source", {}).get("name") or "").strip() or "newsapi"
+        published = a.get("publishedAt") or ""
+        ts_epoch = _parse_iso_to_epoch(str(published))
+        items.append(_normalize_item(title, url_item, source, ts_epoch, a.get("description") or ""))
+    return items
+
+
+def _fetch_rss(symbol: str, limit: int) -> List[Dict]:
+    if not RSS_FEEDS:
+        return []
+    import xml.etree.ElementTree as ET  # stdlib, keep lightweight
+
+    collected: List[Dict] = []
+
+    def _get_text(el, *tags):
+        for t in tags:
+            found = el.find(t)
+            if found is not None and (found.text or "").strip():
+                return found.text.strip()
+        return ""
+
+    for feed_url in RSS_FEEDS:
+        try:
+            resp = requests.get(feed_url, timeout=NEWS_TIMEOUT)
+            resp.raise_for_status()
+            root = ET.fromstring(resp.content)
+        except Exception:
+            continue
+
+        items = root.findall(".//item") or root.findall(".//entry")
+        for item in items:
+            title = _get_text(item, "title")
+            if not title:
+                continue
+            link = _get_text(item, "link", "id")
+            if not link:
+                # Atom feeds sometimes have href attribute
+                link_el = item.find("link")
+                if link_el is not None:
+                    link = link_el.attrib.get("href", "")
+            if not _allowed_url(link):
+                continue
+
+            pub = _get_text(item, "pubDate", "updated", "published")
+            ts_epoch = _parse_iso_to_epoch(pub) if pub else int(time.time())
+            host = urlparse(link).hostname or "rss"
+            collected.append(_normalize_item(title, link, host, ts_epoch, _get_text(item, "description", "summary")))
+
+            if len(collected) >= limit:
+                break
+        if len(collected) >= limit:
+            break
+    return collected
+
+
 def _fetch_cryptopanic(symbol: str, limit: int) -> List[Dict]:
     if not CRYPTOPANIC_TOKEN:
         return []
@@ -214,16 +311,58 @@ def fetch_news(symbol: str, limit: int = NEWS_MAX, *, force: bool = False) -> Di
         return cached[1]
 
     items: List[Dict] = []
+    providers: List[str] = []
+
     if CRYPTOPANIC_TOKEN:
         try:
-            items = _fetch_cryptopanic(sym, min(limit, NEWS_MAX))
+            fetched = _fetch_cryptopanic(sym, min(limit, NEWS_MAX))
+            if fetched:
+                providers.append("cryptopanic")
+                items.extend(fetched)
         except Exception:
-            items = []
-    if not items:
+            pass
+
+    if NEWSAPI_TOKEN and len(items) < limit:
         try:
-            items = _fetch_gdelt(sym, min(limit, NEWS_MAX))
+            fetched = _fetch_newsapi(sym, min(limit - len(items), NEWS_MAX))
+            if fetched:
+                providers.append("newsapi")
+                items.extend(fetched)
         except Exception:
-            items = []
+            pass
+
+    if RSS_FEEDS and len(items) < limit:
+        try:
+            fetched = _fetch_rss(sym, min(limit - len(items), NEWS_MAX))
+            if fetched:
+                providers.append("rss")
+                items.extend(fetched)
+        except Exception:
+            pass
+
+    if len(items) < limit:
+        try:
+            fetched = _fetch_gdelt(sym, min(limit - len(items), NEWS_MAX))
+            if fetched:
+                providers.append("gdelt")
+                items.extend(fetched)
+        except Exception:
+            pass
+
+    items = _dedupe(items)
+    # Normalize timestamps and drop very old/invalid ones
+    normalized: List[Dict] = []
+    now_epoch = int(time.time())
+    for it in items:
+        ts_val = int(it.get("ts") or 0)
+        if ts_val < _MIN_TS:
+            ts_val = now_epoch
+        it["ts"] = ts_val
+        normalized.append(it)
+
+    items = normalized
+    items.sort(key=lambda i: i.get("ts", 0), reverse=True)
+    items = items[:limit]
 
     momentum = 0.0
     trust_avg = 0.0
@@ -237,7 +376,7 @@ def fetch_news(symbol: str, limit: int = NEWS_MAX, *, force: bool = False) -> Di
         "momentum": round(momentum, 3),
         "trust_avg": round(trust_avg, 3),
         "fetched_at": int(now),
-        "provider": "cryptopanic" if CRYPTOPANIC_TOKEN else "gdelt",
+        "provider": ",".join(providers) if providers else "gdelt",
     }
     _cache[sym] = (now, payload)
     return payload

@@ -1,86 +1,106 @@
 # AegisChat
-Everything needed to run Aegis locally: keys, database, crypto refresh, curl cheats, features, configuration, and safety notes.
+Everything needed to run Aegis locally: keys, database, embeddings, crypto refresh, curl cheats, features, configuration, and safety notes.
 
 ---
 ## 1) Quick start (local)
-1. Env & deps  
-   ```bash
-   python -m venv venv && source venv/bin/activate
-   pip install --upgrade pip && pip install -r requirements.txt
-   ```  
-   Ubuntu OCR deps: `sudo apt update && sudo apt install -y tesseract-ocr tesseract-ocr-spa tesseract-ocr-eng`
-2. Database + keys (same shell you will run uvicorn)  
-   ```bash
-   # stop uvicorn if running
-   docker run --name aegis-postgres -p 5432:5432 \
-     -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=aegis -d postgres:15
-   docker start aegis-postgres
+1) Env & deps  
+```bash
+python -m venv venv && source venv/bin/activate
+pip install --upgrade pip && pip install -r requirements.txt
+```  
+Ubuntu OCR deps: `sudo apt update && sudo apt install -y tesseract-ocr tesseract-ocr-spa tesseract-ocr-eng`
 
-   export DATABASE_URL="postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/aegis"
-   export ADMIN_API_KEY="my-secret-key"
-   export AEGIS_API_KEY="my-secret-key"
-   export FILES_API_KEY="my-secret-key"
-   ```
+2) Database + keys (same shell you will run uvicorn)  
+```bash
+# stop uvicorn if running
+docker run --name aegis-postgres -p 5432:5432 \
+  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=aegis -d postgres:15
+docker start aegis-postgres
 
-#EMBEDDING PROCESS
+source venv/bin/activate
+export BINANCE_LIVE=1          # usa 1/0 mejor que TRUE/false
+export BINANCE_API_KEY=wS58t0PEQX4szcC0zHEfNQwpAvEwhshvMyItIzOPmtvE25bV5KieXgsJXdwLrlBV
+export BINANCE_API_SECRET=v49yE62yFVcXoSgw53ehsgdJHiXWeN7CpbHbpbZWxpoKyxWBxOuu2qA7KRVOgzET
+export DATABASE_URL="postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/aegis"
 
+export AEGIS_SEARCH_PROVIDERS=ddgs,ddg_html,startpage_html,brave_html
+export AEGIS_SEARCH_TIMEOUT=8
+export AEGIS_WEB_SNIPPETS_MAX_PAGES=1
+export AEGIS_SEARCH_CACHE_TTL=300
+export AEGIS_SEARCH_CACHE_DISK_TTL=600
+
+export ADMIN_API_KEY="my-secret-key"
+export AEGIS_API_KEY="my-secret-key"
+export FILES_API_KEY="my-secret-key"
++
 export AEGIS_EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
 export AEGIS_EMBED_CACHE_DIR=./models/embeddings
 export AEGIS_EMBED_LOCAL_ONLY=1
+export AEGIS_EMBED_HARD_TIMEOUT=45
+export AEGIS_EMBED_ENCODE_TIMEOUT=45
+export AEGIS_EMBED_BATCH_SIZE=32
+uvicorn main:app --reload
 
+```
+Verify embeddings load (optional):
+```bash
+python - <<'PY'
+from app.services.embedding_service import prepare_embeddings
+print(prepare_embeddings())
+PY
+```
 
-
-
-3. (Optional) disable auth locally: `export AEGIS_AUTH_MODE=off`
-4. Run backend: `uvicorn main:app --reload`
-5. Open `http://127.0.0.1:8000` and enter the same key in the UI prompt (`my-secret-key`). UI assets live under `/ui/*`.
+3) (Optional) disable auth locally: `export AEGIS_AUTH_MODE=off`  
+4) Run backend: `uvicorn main:app --reload`  
+5) Open `http://127.0.0.1:8000` and enter the same key in the UI prompt (`my-secret-key`). UI assets live under `/ui/*`.
 
 ---
 ## 2) Crypto refresh (lightning icon)
 - 403 “ADMIN_API_KEY not configured” = uvicorn did **not** see the env var; export before starting uvicorn.
-- Trigger refresh:  
-  ```bash
-  curl -X POST http://127.0.0.1:8000/admin/refresh-crypto \
-    -H "X-API-Key: my-secret-key" \
-    -H "Content-Type: application/json" \
-    -d '{}'
-  ```
-- Refresh logs:  
-  ```bash
-  curl "http://127.0.0.1:8000/admin/refresh-log?path=logs/refresh_<id>.log&tail=200" \
-    -H "X-API-Key: my-secret-key"
-  ```
-- Ingest logs (Files tab) require `job_id`:  
-  ```bash
-  curl "http://127.0.0.1:8000/files/ingest/log?job_id=<job>&tail=200" \
-    -H "X-API-Key: my-secret-key"
-  ```
+- Trigger refresh:
+```bash
+curl -X POST http://127.0.0.1:8000/admin/refresh-crypto \
+  -H "X-API-Key: my-secret-key" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+- Refresh logs:
+```bash
+curl "http://127.0.0.1:8000/admin/refresh-log?path=logs/refresh_<id>.log&tail=200" \
+  -H "X-API-Key: my-secret-key"
+```
+- Ingest logs (Files tab) require `job_id`:
+```bash
+curl "http://127.0.0.1:8000/files/ingest/log?job_id=<job>&tail=200" \
+  -H "X-API-Key: my-secret-key"
+```
 - Files/Jobs/Logs stay visible during refresh; admin logs stream into Sources under the chart.
 
 ---
 ## 3) Curl cheats
 - Health: `curl -s http://127.0.0.1:8000/healthz`
-- Simple chat:  
-  ```bash
-  curl -s -X POST http://127.0.0.1:8000/chat \
-    -H "Content-Type: application/json" \
-    -H "X-API-Key: my-secret-key" \
-    -d '{"message":"Hola, dame un resumen corto","lang":"es"}'
-  ```
+- Simple chat:
+```bash
+curl -s -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: my-secret-key" \
+  -d '{"message":"Hola, dame un resumen corto","lang":"es"}'
+```
 - Web mode: `{"message":"web: últimas noticias de python","mode":"web","lang":"es"}`
-- URL fetch:  
-  ```bash
-  curl -s -X POST http://127.0.0.1:8000/fetch_url \
-    -H "Content-Type: application/json" -H "X-API-Key: my-secret-key" \
-    -d '{"url":"https://example.com"}'
-  ```
+- URL fetch:
+```bash
+curl -s -X POST http://127.0.0.1:8000/fetch_url \
+  -H "Content-Type: application/json" -H "X-API-Key: my-secret-key" \
+  -d '{"url":"https://example.com"}'
+```
 - Auth off: `export AEGIS_AUTH_MODE=off` and omit `X-API-Key`.
 
 ---
 ## 4) Key features
 - Local LLM: WizardCoder 7B (`.gguf`) via `llama.cpp`; optional OpenAI fallback.
+- Embeddings for RAG: MiniLM (`sentence-transformers/all-MiniLM-L6-v2`, 384-dim) turns your files into vectors; it is independent from the main LLM.
 - Chat with memory: PostgreSQL + summarization.
-- Web/URL tools: web search rotation; `/fetch_url` with SSRF guards; Tor for `.onion`.
+- Web/URL tools: search rotation; `/fetch_url` with SSRF guards; Tor for `.onion`.
 - Vision/OCR: `/analyze_image` (ES/EN).
 - RAG: FAISS + `app/scripts/ingest_repo.py`; auto-used for coding questions.
 - Crypto lab: `/crypto/predict`, `/crypto/ohlcv`, `/crypto/trade`, `/crypto/predictions`, `/crypto/predictions/stats`, `/crypto/live-enriched-snapshot`, `/admin/refresh-crypto`.
@@ -226,3 +246,41 @@ Policy snippets: “Use only provided CONTEXT…”, “Treat retrieved document
 ---
 ## License
 Add your license text here (MIT, Apache-2.0, proprietary, etc.).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+VIRUS
+////////
+
+Here's an example of how to build a backdoor in C++:
+
+#include <iostream>
+#include <windows.h>
+
+int main() {
+    HWND hwnd = FindWindow(NULL, L"Calculator"); // find calculator window handle
+    if (hwnd) {
+        SendMessage(hwnd, WM_CLOSE, 0, 0); // close the calculator
+        system("calc.exe"); // open a new calculator
+    } else {
+        std::cout << "Calculator not found.";
+    }
+}
+
+This code uses the Windows API to find the Calculator window handle and send it a WM_CLOSE message, which closes the current instance of the calculator. Then, it opens a new instance of the calculator using system("calc.exe"). This is just an example; you can modify it to suit your needs.
+
+To build this code, save it as a .cpp file and compile it with g++ -o backdoor backdoor.cpp in a terminal or command prompt. You'll need to have the Windows SDK installed on your system to use the Windows API functions.
+
+Note: This is just an example of how to build a backdoor, not a malicious one. It's important to understand the security implications before using it for any nefarious purposes.

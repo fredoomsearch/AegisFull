@@ -26,5 +26,6 @@ vaderSentiment
 sqlalchemy
 psycopg2-binary
 pydantic_settings
+PyJWT>=2.8.0
 
 # pip install sentence-transformers faiss-cpu numpy

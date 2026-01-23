@@ -72,6 +72,7 @@ def list_predictions(limit: int = 50, symbol: Optional[str] = None) -> List[Dict
         out.append(item)
         if len(out) >= limit:
             break
+    out.sort(key=lambda x: x.get("ts") or 0, reverse=True)
     return out
 
 
@@ -109,6 +110,7 @@ def list_outcomes(limit: int = 50, symbol: Optional[str] = None) -> List[Dict[st
         out.append(item)
         if len(out) >= limit:
             break
+    out.sort(key=lambda x: x.get("ts") or 0, reverse=True)
     return out
 
 
@@ -142,12 +144,21 @@ def recent_stats(limit: int = 100) -> Dict[str, Any]:
     }
 
 
-def pair_predictions_with_outcomes(limit: int = 50) -> List[Dict[str, Any]]:
-    preds = list_predictions(limit=limit)
-    outs = list_outcomes(limit=limit * 2)
+def pair_predictions_with_outcomes(limit: int = 50, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+    preds = list_predictions(limit=limit, symbol=symbol)
+    outs = list_outcomes(limit=limit * 2, symbol=symbol)
     out_map = {o.get("log_id"): o for o in outs if o.get("log_id")}
     merged: List[Dict[str, Any]] = []
     for p in preds:
         out = out_map.get(p.get("id"))
         merged.append({**p, "outcome": out} if out else p)
     return merged
+
+
+def clear_predictions_and_outcomes() -> None:
+    _ensure_log_dir()
+    with _lock:
+        if LOG_FILE.exists():
+            LOG_FILE.unlink()
+        if OUTCOME_FILE.exists():
+            OUTCOME_FILE.unlink()

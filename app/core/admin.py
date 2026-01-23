@@ -13,21 +13,19 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
+from threading import Lock
+from typing import Set
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+
+from app.api.deps import require_admin_scope
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
-
-
-def require_admin_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> None:
-    expected = (os.getenv("ADMIN_API_KEY") or "").strip()
-    if not expected:
-        raise HTTPException(status_code=403, detail="ADMIN_API_KEY not configured")
-    if not x_api_key or x_api_key != expected:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+_running_procs: Set[subprocess.Popen] = set()
+_procs_lock = Lock()
 
 
 class RefreshRequest(BaseModel):
@@ -45,14 +43,24 @@ class RefreshResponse(BaseModel):
 
 
 def _run_cmd(cmd: list[str], log_file: Path) -> None:
+    proc: subprocess.Popen | None = None
     try:
         logger.info("Running: %s", " ".join(cmd))
         with log_file.open("a", encoding="utf-8") as lf:
             lf.write(f"\n[$] {' '.join(cmd)}\n")
             lf.flush()
-            subprocess.run(cmd, check=True, stdout=lf, stderr=lf)
+            proc = subprocess.Popen(cmd, stdout=lf, stderr=lf, text=True)
+        with _procs_lock:
+            if proc:
+                _running_procs.add(proc)
+        if proc:
+            proc.wait()
     except Exception as exc:  # noqa: BLE001
         logger.exception("Admin refresh command failed: %s", exc)
+    finally:
+        if proc:
+            with _procs_lock:
+                _running_procs.discard(proc)
 
 
 def _refresh_crypto_background(req: RefreshRequest, log_file: Path) -> None:
@@ -89,7 +97,7 @@ def _refresh_crypto_background(req: RefreshRequest, log_file: Path) -> None:
 async def refresh_crypto(
     req: RefreshRequest,
     background: BackgroundTasks,
-    _: None = Depends(require_admin_key),
+    _: None = Depends(require_admin_scope),
 ) -> RefreshResponse:
     job_id = uuid.uuid4().hex[:10]
     logs_dir = Path(os.getenv("CRYPTO_REFRESH_LOG_DIR", "logs")).resolve()
@@ -104,6 +112,7 @@ async def refresh_crypto(
 async def refresh_log(
     path: str = Query(..., description="Path to log file (must be under logs/)"),
     tail: int = Query(200, ge=10, le=2000, description="Number of lines from the end"),
+    _: None = Depends(require_admin_scope),
 ) -> dict:
     """
     Return the last N lines of a refresh log. Restricted to logs/ directory.
@@ -122,3 +131,30 @@ async def refresh_log(
         return {"path": str(target), "lines": tail_lines}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Cannot read log: {exc}")
+
+
+@router.post("/cancel-all")
+async def cancel_all_processes(_: None = Depends(require_admin_scope)) -> dict:
+    """
+    Best-effort terminate all running admin background subprocesses.
+    """
+    killed = 0
+    with _procs_lock:
+        procs = list(_running_procs)
+    for p in procs:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+    for p in procs:
+        try:
+            p.wait(timeout=3)
+        except Exception:
+            try:
+                p.kill()
+            except Exception:
+                pass
+        killed += 1
+        with _procs_lock:
+            _running_procs.discard(p)
+    return {"status": "ok", "terminated": killed}

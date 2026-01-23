@@ -81,5 +81,5 @@ def list_events(
     if since_ts:
         items = [evt for evt in items if int(evt.get("ts", 0)) > int(since_ts)]
     if limit > 0:
-        return items[-limit:]
+        return items[-limit:] 
     return items

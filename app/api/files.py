@@ -322,6 +322,7 @@ async def ingest_path(body: IngestRequest) -> Dict[str, Any]:
 
     def _run_ingest(log_file: Path) -> Dict[str, Any]:
         # Ingest can be heavy (chunk + embed + index); keep timeout configurable.
+        
         cmd = [sys.executable or "python", "app/scripts/ingest_repo.py", "--root", str(p)]
         INGEST_LOG_DIR.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()

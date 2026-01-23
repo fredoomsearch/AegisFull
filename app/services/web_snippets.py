@@ -25,7 +25,7 @@ except Exception:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-MAX_PAGES = int(os.getenv("AEGIS_WEB_SNIPPETS_MAX_PAGES", "2"))
+MAX_PAGES = int(os.getenv("AEGIS_WEB_SNIPPETS_MAX_PAGES", "1"))
 SNIPPET_MAX_CHARS = int(os.getenv("AEGIS_WEB_SNIPPETS_MAX_CHARS", "1600"))
 SNIPPET_CACHE_TTL = float(os.getenv("AEGIS_WEB_SNIPPETS_CACHE_TTL", "600"))
 DOMAIN_WINDOW_SECONDS = int(os.getenv("AEGIS_WEB_SNIPPETS_DOMAIN_WINDOW", "60"))
@@ -165,6 +165,7 @@ def fetch_snippets_from_sources(
             continue
         if not _robots_allows(url):
             logger.info("robots disallow %s", url)
+            errors.append(f"{url}: blocked by robots.txt")
             continue
 
         cached = search_state.get_url_cache(url)
@@ -204,8 +205,12 @@ def fetch_snippets_from_sources(
         text = sanitize_web_context(text, SNIPPET_MAX_CHARS)
         text = _shorten(text)
         if not text:
-            errors.append(f"{url}: empty snippet")
-            continue
+            # fallback to the source-provided snippet or domain if available
+            fallback = src.get("snippet") or domain
+            if not fallback:
+                errors.append(f"{url}: empty snippet")
+                continue
+            text = _shorten(fallback)
 
         snippets.append({"title": src.get("title") or "", "url": url, "snippet": text})
         search_state.set_url_cache(url, {"snippet": text}, SNIPPET_CACHE_TTL)

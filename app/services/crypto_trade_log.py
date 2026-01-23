@@ -74,6 +74,7 @@ def list_trades(limit: int = 50, symbol: Optional[str] = None) -> List[Dict[str,
         out.append(item)
         if len(out) >= limit:
             break
+    out.sort(key=lambda x: x.get("ts") or 0, reverse=True)
     return out
 
 
@@ -125,3 +126,10 @@ def compute_pnl(trades: List[Dict[str, Any]], price_lookup: Callable[[str], Opti
         total_unrealized += float(pnl_info.get("unrealized") or 0.0)
 
     return {"per_symbol": results, "total_unrealized": total_unrealized}
+
+
+def clear_trades() -> None:
+    _ensure_log_dir()
+    with _lock:
+        if TRADE_FILE.exists():
+            TRADE_FILE.unlink()

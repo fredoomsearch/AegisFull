@@ -1281,10 +1281,15 @@ body {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
-  padding: 8px 10px;
+  padding: 10px;
   border-radius: 10px;
   background: rgba(15, 23, 42, 0.7);
   border: 1px solid rgba(148, 163, 184, 0.18);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.compare-row.compare-highlight {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.35);
 }
 
 .compare-metric {
@@ -1313,21 +1318,40 @@ body {
   border-radius: 999px;
   font-size: 0.74rem;
   font-weight: 700;
-  background: rgba(56, 189, 248, 0.15);
-  border: 1px solid rgba(56, 189, 248, 0.35);
-  color: #bae6fd;
+  background: rgba(148, 163, 184, 0.15);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  color: #e2e8f0;
 }
 
-.compare-pill.positive {
-  background: rgba(34, 197, 94, 0.16);
-  border-color: rgba(34, 197, 94, 0.4);
-  color: #bbf7d0;
+.compare-pill.success {
+  background: #dcfce7;
+  border-color: #86efac;
+  color: #166534;
 }
 
-.compare-pill.negative {
-  background: rgba(248, 113, 113, 0.16);
-  border-color: rgba(248, 113, 113, 0.4);
-  color: #fecaca;
+.compare-pill.fail {
+  background: #fee2e2;
+  border-color: #fecdd3;
+  color: #991b1b;
+}
+
+.compare-pill.neutral {
+  background: #e5e7eb;
+  border-color: #cbd5e1;
+  color: #111827;
+}
+
+.compare-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: rgba(148, 163, 184, 0.12);
+  color: #e5e7eb;
+  margin-top: 4px;
+  width: fit-content;
 }
 
 .compare-note {
@@ -1604,6 +1628,133 @@ body {
   background: rgba(15, 23, 42, 0.85);
   font-size: 0.78rem;
   color: #e5e7eb;
+}
+
+.news-provider {
+  margin-left: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  color: #bfdbfe;
+  font-size: 0.74rem;
+}
+
+.news-badges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.news-badge {
+  padding: 2px 6px;
+  border-radius: 8px;
+  background: rgba(148, 163, 184, 0.12);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  color: #e5e7eb;
+  font-size: 0.72rem;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 4px;
+  margin-bottom: 8px;
+}
+
+.kpi-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 10px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.kpi-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+}
+
+.kpi-title { font-weight: 700; color: #e5e7eb; }
+.kpi-value { font-weight: 800; font-size: 1.1rem; color: #e5e7eb; }
+.kpi-hint { color: var(--muted); font-size: 0.8rem; }
+.kpi-bar {
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.18);
+  overflow: hidden;
+  position: relative;
+}
+.kpi-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(34, 197, 94, 0.65), rgba(52, 211, 153, 0.85));
+}
+.kpi-bar-fill.negative {
+  background: linear-gradient(90deg, rgba(248, 113, 113, 0.8), rgba(248, 113, 113, 0.55));
+}
+.kpi-bar-fill.neutral {
+  background: linear-gradient(90deg, rgba(148, 163, 184, 0.65), rgba(148, 163, 184, 0.45));
+}
+
+.kpi-row,
+.kpi-metrics,
+.kpi-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.kpi-item { color: #cbd5e1; font-size: 0.82rem; }
+.kpi-item.pos { color: #34d399; }
+.kpi-item.neg { color: #f87171; }
+.kpi-subtitle { margin-top: 4px; margin-bottom: 4px; font-weight: 700; color: #e5e7eb; }
+.kpi-foot { margin-top: 6px; color: var(--muted); font-size: 0.82rem; }
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  color: #e5e7eb;
+}
+
+.pill.buy {
+  background: rgba(34, 197, 94, 0.12);
+  border-color: rgba(34, 197, 94, 0.4);
+  color: #bbf7d0;
+}
+
+.pill.sell {
+  background: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.4);
+  color: #fecdd3;
+}
+
+.pill.neutral {
+  background: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.4);
+  color: #e5e7eb;
+}
+
+.pill.muted {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  border-color: rgba(148, 163, 184, 0.25);
 }
 
 .sources-box {
