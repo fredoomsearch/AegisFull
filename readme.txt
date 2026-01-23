@@ -21,6 +21,16 @@ Everything needed to run Aegis locally: keys, database, crypto refresh, curl che
    export AEGIS_API_KEY="my-secret-key"
    export FILES_API_KEY="my-secret-key"
    ```
+
+#EMBEDDING PROCESS
+
+export AEGIS_EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
+export AEGIS_EMBED_CACHE_DIR=./models/embeddings
+export AEGIS_EMBED_LOCAL_ONLY=1
+
+
+
+
 3. (Optional) disable auth locally: `export AEGIS_AUTH_MODE=off`
 4. Run backend: `uvicorn main:app --reload`
 5. Open `http://127.0.0.1:8000` and enter the same key in the UI prompt (`my-secret-key`). UI assets live under `/ui/*`.
