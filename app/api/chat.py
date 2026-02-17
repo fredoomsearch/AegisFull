@@ -12,18 +12,21 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
 
 from app.api.deps import require_api_key
-from app.db import crud_conversation
-from app.db.deps import get_db
 from app.memory import (
     delete_conversation as delete_memory_conversation,
     get_or_create_conversation,
     update_memory,
 )
 from app.models.llm_client import generate_response
-from app.models.llm_utils import _LINKY_WORDS, build_messages, is_code_question, is_market_question
+from app.models.llm_utils import (
+    _LINKY_WORDS,
+    build_messages,
+    is_code_question,
+    is_market_question,
+    is_repo_content_question,
+)
 from app.schemas import (
     ChatRequest,
     ChatResponse,
@@ -36,11 +39,18 @@ from app.schemas import (
 from app.services.time_service import maybe_answer_time_question
 from app.services.conversation_events import list_events as list_conversation_events
 from app.services.conversation_events import record_event
+from app.services.upload_inspector import (
+    extract_upload_path_from_text,
+    format_upload_summary,
+    get_last_upload_path,
+    inspect_upload_tree,
+    resolve_upload_path,
+)
 from app.services.web_search import web_search_structured
 from app.services.web_snippets import fetch_snippets_from_sources
 from app.services.crypto_prediction_log import pair_predictions_with_outcomes
 from app.services.crypto_trade_log import compute_pnl, list_trades
-from app.api.crypto import prediction_stats, _binance_spot_price
+from app.services import health_state
 from app.tools import fetch_url, fetch_url_via_tor, is_onion, sanitize_web_context
 from app.vision_client import analyze_image_bytes
 
@@ -51,13 +61,24 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 # Feature flags
 # -----------------------------------------------------------------------------
+DISABLE_DB = (os.getenv("AEGIS_DISABLE_DB", "0") or "0").lower() in {"1", "true", "yes", "on"}
 ENABLE_CONVERSATIONS_API = (os.getenv("AEGIS_ENABLE_CONVERSATIONS_API", "1") or "0").lower() in {
     "1",
     "true",
     "yes",
     "on",
-}
-DISABLE_DB = (os.getenv("AEGIS_DISABLE_DB", "0") or "0").lower() in {"1", "true", "yes", "on"}
+} and not DISABLE_DB
+
+if not DISABLE_DB:
+    from sqlalchemy.orm import Session
+    from app.db import crud_conversation
+    from app.db.deps import get_db
+else:
+    Session = Any  # type: ignore[misc,assignment]
+    crud_conversation = None  # type: ignore[assignment]
+
+    def get_db():  # type: ignore[override]
+        raise HTTPException(status_code=503, detail="Database disabled")
 
 # -----------------------------------------------------------------------------
 # Router + executor
@@ -96,6 +117,44 @@ def _prepare_web_query(msg: str) -> str:
 def wants_links_or_sources(message: str) -> bool:
     msg = (message or "").lower()
     return any(w in msg for w in _LINKY_WORDS)
+
+
+def _maybe_local_upload_summary_response(message: str, lang: str) -> str | None:
+    """
+    Deterministic fallback for questions like:
+      - "what contains /data/uploads/..."
+      - "qué contiene /home/.../data/uploads/..."
+    This avoids LLM hallucinations when user asks for concrete file inventory.
+    """
+    if not is_repo_content_question(message):
+        return None
+    raw = message or ""
+    raw_path = extract_upload_path_from_text(raw)
+    resolved = resolve_upload_path(raw_path) if raw_path else None
+    if resolved is None:
+        lower = raw.lower()
+        asks_last = any(
+            hint in lower
+            for hint in (
+                "last upload",
+                "latest upload",
+                "ultimo upload",
+                "último upload",
+                "ultimo zip",
+                "último zip",
+                "last zip",
+                "my upload",
+                "mi upload",
+                "archivo subido",
+                "proyecto subido",
+            )
+        )
+        if asks_last:
+            resolved = get_last_upload_path()
+    if resolved is None:
+        return None
+    info = inspect_upload_tree(resolved, sample_limit=80)
+    return format_upload_summary(info, lang=lang)
 
 
 def _norm_url(u: str) -> str:
@@ -354,13 +413,25 @@ def _format_crypto_prediction(pred, lang: str) -> str:
     return f"Demo prediction for {pred.symbol} ({pred.horizon_minutes}m): current {curr}, predicted {nxt}, prob up {prob_pct}, signal {decision}."
 
 
+def _prediction_stats(symbol: str) -> dict:
+    from app.api.crypto import prediction_stats as _prediction_stats_impl
+
+    return _prediction_stats_impl(symbol=symbol)  # type: ignore[call-arg]
+
+
+def _spot_price(symbol: str) -> float | None:
+    from app.api.crypto import _binance_spot_price as _spot_price_impl
+
+    return _spot_price_impl(symbol)
+
+
 def _build_crypto_context(symbol: str, horizon_minutes: int = 15, recent: int = 5) -> str:
     """Build a short context string from recent predictions/outcomes and P&L."""
     try:
         sym = symbol.upper()
         preds = pair_predictions_with_outcomes(limit=recent, symbol=sym)
-        stats = prediction_stats(symbol=sym)  # type: ignore[arg-type]
-        pnl = compute_pnl(list_trades(limit=200, symbol=sym), _binance_spot_price)
+        stats = _prediction_stats(symbol=sym)
+        pnl = compute_pnl(list_trades(limit=200, symbol=sym), _spot_price)
     except Exception:
         return ""
 
@@ -730,6 +801,17 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
                 record_event(conv_id, "quick_time_store_failed", level="warn")
             return ChatResponse(response=resp, conversation_id=conv_id, timestamp=datetime.utcnow())
 
+        upload_summary = _maybe_local_upload_summary_response(new_user_message, lang)
+        if upload_summary:
+            try:
+                _append_db_message(db, crud, conv_id, "assistant", upload_summary)
+                update_memory(conv_id, new_user_message, upload_summary)
+                record_event(conv_id, "upload_summary_response", data={"path_hint": True})
+            except Exception:
+                logger.exception("Failed to store upload summary response")
+                record_event(conv_id, "upload_summary_store_failed", level="warn")
+            return ChatResponse(response=upload_summary, conversation_id=conv_id, timestamp=datetime.utcnow())
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -860,6 +942,7 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
                 resp = f"{crypto_summary}\n\n{resp}"
             record_event(conv_id, "llm_done", data={"response": resp})
         except Exception:
+            health_state.record("llm_error", "generate_response failed")
             traceback.print_exc()
             resp = "(error generating response)"
             record_event(conv_id, "llm_failed", level="error")

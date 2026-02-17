@@ -17,28 +17,52 @@ docker run --name aegis-postgres -p 5432:5432 \
   -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=aegis -d postgres:15
 docker start aegis-postgres
 
+# 0) Activate venv
 source venv/bin/activate
-export BINANCE_LIVE=1          # usa 1/0 mejor que TRUE/false
-export BINANCE_API_KEY=wS58t0PEQX4szcC0zHEfNQwpAvEwhshvMyItIzOPmtvE25bV5KieXgsJXdwLrlBV
-export BINANCE_API_SECRET=v49yE62yFVcXoSgw53ehsgdJHiXWeN7CpbHbpbZWxpoKyxWBxOuu2qA7KRVOgzET
+
+# 1) Core services
 export DATABASE_URL="postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/aegis"
+export AEGIS_IMAGE_ENDPOINT="http://127.0.0.1:8188/prompt"
+export AEGIS_IMAGE_CKPT="DreamShaper_8_pruned.safetensors"
+export AEGIS_IMAGE_TIMEOUT=90
 
-export AEGIS_SEARCH_PROVIDERS=ddgs,ddg_html,startpage_html,brave_html
-export AEGIS_SEARCH_TIMEOUT=8
-export AEGIS_WEB_SNIPPETS_MAX_PAGES=1
-export AEGIS_SEARCH_CACHE_TTL=300
-export AEGIS_SEARCH_CACHE_DISK_TTL=600
-
+# 2) API keys
 export ADMIN_API_KEY="my-secret-key"
 export AEGIS_API_KEY="my-secret-key"
 export FILES_API_KEY="my-secret-key"
-+
+
+# 3) Auth mode (optional: off/local/on). Keep “on” for safety.
+export AEGIS_AUTH_MODE=on
+
+# 4) Web search
+export AEGIS_SEARCH_PROVIDERS=brave_html,startpage_html,qwant_html
+export AEGIS_SEARCH_TIMEOUT=8
+export AEGIS_WEB_SNIPPETS_MAX_PAGES=1
+export AEGIS_SEARCH_CACHE_TTL=0
+export AEGIS_SEARCH_CACHE_DISK_TTL=0
+
+# 5) Embeddings / RAG
 export AEGIS_EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
 export AEGIS_EMBED_CACHE_DIR=./models/embeddings
 export AEGIS_EMBED_LOCAL_ONLY=1
 export AEGIS_EMBED_HARD_TIMEOUT=45
 export AEGIS_EMBED_ENCODE_TIMEOUT=45
 export AEGIS_EMBED_BATCH_SIZE=32
+
+# 6) Crypto
+export BINANCE_LIVE=1
+export BINANCE_API_KEY="wS58t0PEQX4szcC0zHEfNQwpAvEwhshvMyItIzOPmtvE25bV5KieXgsJXdwLrlBV"
+export BINANCE_API_SECRET="v49yE62yFVcXoSgw53ehsgdJHiXWeN7CpbHbpbZWxpoKyxWBxOuu2qA7KRVOgzET"
+
+# RUN THIS CONFG FROM ROUTE /Documents/whioutoKn/models/ComfyUI
+# 7) Image generation (ComfyUI)
+source .venv/bin/activate
+export AEGIS_IMAGE_CKPT="sd_turbo.safetensors"
+export AEGIS_IMAGE_TIMEOUT=60
+python main.py --listen 127.0.0.1 --port 8188
+
+
+# 8) Run backend
 uvicorn main:app --reload
 
 ```

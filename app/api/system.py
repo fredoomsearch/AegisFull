@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends
 
 from app.api.deps import require_api_key
 from app.services import crypto_prediction_log, crypto_trade_log, job_manager
+from app.services import health_state
 
 router = APIRouter(prefix="/system", tags=["system"], dependencies=[Depends(require_api_key)])
 
@@ -88,6 +89,41 @@ def _embedding_status() -> Dict[str, Any]:
         return {"status": "error", "detail": str(exc)}
 
 
+def _retrieval_status() -> Dict[str, Any]:
+    try:
+        from app.services import retrieval_service
+
+        return retrieval_service.get_retrieval_status()
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "error", "detail": str(exc)}
+
+
+def _image_status() -> Dict[str, Any]:
+    images_dir = Path("data/images").resolve()
+    log_file = images_dir / "log.jsonl"
+    recent_count = 0
+    if log_file.exists():
+        try:
+            recent_count = len(log_file.read_text(encoding="utf-8", errors="ignore").splitlines())
+        except Exception:
+            recent_count = 0
+    endpoint = (os.getenv("AEGIS_IMAGE_ENDPOINT") or "http://127.0.0.1:8188/prompt").strip()
+    if "/prompt" not in endpoint:
+        endpoint = endpoint.rstrip("/") + "/prompt"
+    try:
+        timeout_seconds = float(os.getenv("AEGIS_IMAGE_TIMEOUT", "60") or "60")
+    except Exception:
+        timeout_seconds = 60.0
+    return {
+        "endpoint": endpoint,
+        "provider": (os.getenv("AEGIS_IMAGE_PROVIDER") or "sd-local").strip() or "sd-local",
+        "timeout_seconds": timeout_seconds,
+        "images_dir": str(images_dir),
+        "images_dir_exists": images_dir.exists(),
+        "recent_log_rows": recent_count,
+    }
+
+
 def _pnl_snapshot() -> Dict[str, Any]:
     try:
         trades = crypto_trade_log.list_trades(limit=200)
@@ -97,6 +133,25 @@ def _pnl_snapshot() -> Dict[str, Any]:
         return {}
 
 
+def _env_snapshot() -> Dict[str, Any]:
+    """Expose a few non-sensitive env toggles to help the assistant describe its state."""
+    keys = [
+        "BINANCE_LIVE",
+        "AEGIS_SEARCH_PROVIDERS",
+        "AEGIS_WEB_SNIPPETS_MAX_PAGES",
+        "AEGIS_SEARCH_CACHE_TTL",
+        "AEGIS_SEARCH_CACHE_DISK_TTL",
+        "AEGIS_DISABLE_EMBEDDINGS",
+        "AEGIS_DISABLE_DB",
+    ]
+    out: Dict[str, Any] = {}
+    for k in keys:
+        v = os.getenv(k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
 @router.get("/snapshot")
 async def system_snapshot() -> Dict[str, Any]:
     """
@@ -104,16 +159,49 @@ async def system_snapshot() -> Dict[str, Any]:
     predictions/outcomes, stats, and P&L.
     """
     emb = _embedding_status()
+    retrieval = _retrieval_status()
+    image = _image_status()
     jobs = [job_manager.serialize_job(j) for j in job_manager.list_jobs(limit=5)]
     preds = crypto_prediction_log.pair_predictions_with_outcomes(limit=10)
     stats = crypto_prediction_log.recent_stats(limit=200)
     pnl = _pnl_snapshot()
+    health = health_state.snapshot()
 
     return {
         "ingest_roots": _list_ingest_roots(),
         "jobs": jobs,
         "embeddings": emb,
+        "retrieval": retrieval,
+        "image": image,
         "predictions": preds,
         "stats": stats,
         "pnl": pnl,
+        "env": _env_snapshot(),
+        "health": health,
+    }
+
+
+@router.get("/readyz")
+async def readyz() -> Dict[str, Any]:
+    emb = _embedding_status()
+    retrieval = _retrieval_status()
+    image = _image_status()
+    jobs = [job_manager.serialize_job(j) for j in job_manager.list_jobs(limit=3)]
+
+    emb_ok = emb.get("status") != "error"
+    retrieval_ok = retrieval.get("status") != "error"
+    image_ok = bool(image.get("images_dir_exists"))
+    ready = emb_ok and retrieval_ok and image_ok
+
+    return {
+        "ready": ready,
+        "checks": {
+            "embeddings": emb_ok,
+            "retrieval": retrieval_ok,
+            "image": image_ok,
+        },
+        "embeddings": emb,
+        "retrieval": retrieval,
+        "image": image,
+        "jobs": jobs,
     }

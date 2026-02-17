@@ -52,25 +52,25 @@
         </div>
 
         <div class="header-icons">
-          <button id="apiKeyBtn" class="icon-btn" title="Configurar API key">
+          <button id="apiKeyBtn" class="icon-btn" title="Configurar API key" data-i18n-title="api_key_title">
             <i class="fa-solid fa-key"></i>
           </button>
-          <button id="treeBtn" class="icon-btn" title="Ver árbol de proyecto">
+          <button id="treeBtn" class="icon-btn" title="Ver árbol de proyecto" data-i18n-title="tree_title">
             <i class="fa-solid fa-diagram-project"></i>
           </button>
-          <button id="symbolsBtn" class="icon-btn" title="Pares y despliegue rápido">
+          <button id="symbolsBtn" class="icon-btn" title="Pares y despliegue rápido" data-i18n-title="symbols_title_btn">
             <i class="fa-solid fa-rocket"></i>
           </button>
-          <button id="adminRefresh" class="icon-btn" title="Refrescar datos/modelos cripto (admin)">
+          <button id="adminRefresh" class="icon-btn" title="Refrescar datos/modelos cripto (admin)" data-i18n-title="admin_refresh_title">
             <i class="fa-solid fa-bolt"></i>
           </button>
-          <button id="clearLogsBtn" class="icon-btn" title="Limpiar logs / Clear logs">
+          <button id="clearLogsBtn" class="icon-btn" title="Limpiar logs / Clear logs" data-i18n-title="clear_logs_title">
             <i class="fa-solid fa-eraser"></i>
           </button>
-          <button id="cancelAllBtn" class="icon-btn danger" title="Cancelar todo / Cancel all">
+          <button id="cancelAllBtn" class="icon-btn danger" title="Cancelar todo / Cancel all" data-i18n-title="cancel_all_title">
             <i class="fa-solid fa-ban"></i>
           </button>
-          <button id="helpBtn" class="icon-btn" title="Guía rápida / Quick guide">
+          <button id="helpBtn" class="icon-btn" title="Guía rápida / Quick guide" data-i18n-title="help_btn_title">
             <i class="fa-solid fa-circle-question"></i>
           </button>
         </div>
@@ -87,21 +87,30 @@
           <div id="chat-hint-tooltip" class="chat-hint-tooltip" role="tooltip" hidden>
             <p class="chat-hint-title" data-i18n="hint_title">Guía breve</p>
             <ul>
-              <li data-i18n="hint_chat"><span class="hint-mode">Chat</span><span>Preguntas generales, debugging local o instrucciones paso a paso.</span></li>
-              <li data-i18n="hint_web"><span class="hint-mode">Web</span><span>Agrega <code>web:</code> cuando necesites fuentes recientes o enlaces citables.</span></li>
-              <li data-i18n="hint_url"><span class="hint-mode">URL</span><span>Usa <code>url:https://...</code> para que lea y resuma un enlace específico.</span></li>
-              <li data-i18n="hint_crypto"><span class="hint-mode">Cripto</span><span>Activa el panel para predicciones, trades simulados y métricas P&amp;L.</span></li>
-              <li data-i18n="hint_image"><span class="hint-mode">Imagen</span><span>Sube capturas y obtén OCR para explicar errores o textos.</span></li>
+              <li data-i18n="hint_chat"><span class="hint-mode" data-i18n="hint_mode_chat">Chat</span><span>Preguntas generales, debugging local o instrucciones paso a paso.</span></li>
+              <li data-i18n="hint_web"><span class="hint-mode" data-i18n="hint_mode_web">Web</span><span>Agrega <code>web:</code> cuando necesites fuentes recientes o enlaces citables.</span></li>
+              <li data-i18n="hint_url"><span class="hint-mode" data-i18n="hint_mode_url">URL</span><span>Usa <code>url:https://...</code> para que lea y resuma un enlace específico.</span></li>
+              <li data-i18n="hint_crypto"><span class="hint-mode" data-i18n="hint_mode_crypto">Cripto</span><span>Activa el panel para predicciones, trades simulados y métricas P&amp;L.</span></li>
+              <li data-i18n="hint_image"><span class="hint-mode" data-i18n="hint_mode_image">Imagen</span><span>Sube capturas y obtén OCR para explicar errores o textos.</span></li>
             </ul>
           </div>
         </div>
 
-        <button id="chatSideShow" class="chat-side-show" type="button" aria-label="Mostrar Estado/Sesión">Estado Sesión / Status Session</button>
+        <button
+          id="chatSideShow"
+          class="chat-side-show"
+          type="button"
+          aria-label="Mostrar Estado/Sesión"
+          data-i18n="chat_side_show"
+          data-i18n-aria-label="chat_side_show_aria"
+        >
+          Estado Sesión / Status Session
+        </button>
                                                                                                           
         <div class="chat-side-panel" id="chatSidePanel">
           <div class="chat-side-toolbar">
             <span class="chat-side-label" data-i18n="status_title">Estado / Sesión</span>
-            <button id="chatSideToggle" class="icon-btn small" title="Ocultar panel" type="button">✕</button>
+            <button id="chatSideToggle" class="icon-btn small" title="Ocultar panel" data-i18n-title="hide_panel_title" type="button">✕</button>
           </div>
           <div class="status-box slim">
             <div class="status-box-header">
@@ -116,7 +125,7 @@
                 <h3 data-i18n="tab_session">Sesión</h3>
                 <div class="session-id"><span data-i18n="session_id_label">ID:</span> <span id="conv-id-display">—</span></div>
                 <div class="session-actions-inline">
-                  <button id="copyConvId" class="icon-btn small" title="Copiar ID"><i class="fa-solid fa-copy"></i></button>
+                  <button id="copyConvId" class="icon-btn small" title="Copiar ID" data-i18n-title="copy_id_title"><i class="fa-solid fa-copy"></i></button>
                   <span class="session-note" data-i18n="session_note">Logs de sesión son solo para depurar el flujo del chat.</span>
                 </div>
                 <div class="session-archived-toggle">
@@ -134,7 +143,7 @@
               <div class="sessions-events-wrap">
                 <div class="sessions-subtitle" data-i18n="session_log_title">Log sesión</div>
                 <div class="sessions-events-toolbar">
-                  <button id="convEventsRefresh" class="icon-btn small" title="Actualizar log" type="button">⟳</button>
+                  <button id="convEventsRefresh" class="icon-btn small" title="Actualizar log" data-i18n-title="refresh_log_title" type="button">⟳</button>
                 </div>
                 <ul id="convEventsList" class="events-list"></ul>
               </div>
@@ -147,21 +156,22 @@
         <div class="chat-controls">
           <div class="controls-left">
             <div class="icon-group">
-              <button id="webBtn" class="icon-btn" aria-pressed="false" title="Modo búsqueda web"><i class="fas fa-globe"></i></button>
-              <button id="urlBtn" class="icon-btn" aria-pressed="false" title="Modo leer URL"><i class="fas fa-link"></i></button>
-              <button id="cryptoBtn" class="icon-btn" aria-pressed="false" title="Modo cripto"><i class="fas fa-coins"></i></button>
-              <button id="imgBtn" class="icon-btn" aria-pressed="false" title="Analizar imagen"><i class="fas fa-image"></i></button>
+              <button id="webBtn" class="icon-btn" aria-pressed="false" title="Modo búsqueda web" data-i18n-title="mode_web_title"><i class="fas fa-globe"></i></button>
+              <button id="urlBtn" class="icon-btn" aria-pressed="false" title="Modo leer URL" data-i18n-title="mode_url_title"><i class="fas fa-link"></i></button>
+              <button id="cryptoBtn" class="icon-btn" aria-pressed="false" title="Modo cripto" data-i18n-title="mode_crypto_title"><i class="fas fa-coins"></i></button>
+              <button id="imgBtn" class="icon-btn" aria-pressed="false" title="Analizar imagen" data-i18n-title="mode_image_title"><i class="fas fa-image"></i></button>
+              <button id="layoutToggle" class="icon-btn" aria-pressed="false" title="Ocultar paneles laterales" data-i18n-title="layout_toggle_title"><i class="fas fa-up-right-and-down-left-from-center"></i></button>
             </div>
 
             <div id="cryptoInline" class="crypto-inline" aria-hidden="true">
               <div class="crypto-inline-row">
-                <label for="cryptoModelSelect">Model</label>
+                <label for="cryptoModelSelect" data-i18n="model_label">Model</label>
                 <select id="cryptoModelSelect"></select>
               </div>
               <div class="crypto-inline-row">
-                <label for="cryptoHorizon">H</label>
+                <label for="cryptoHorizon" data-i18n="horizon_label">Horizon</label>
                 <input id="cryptoHorizon" type="number" min="1" step="1" value="15" />
-              <label for="chatTradeQty">Qty</label>
+              <label for="chatTradeQty" data-i18n="qty_label">Qty</label>
               <input id="chatTradeQty" type="number" min="0.0001" step="0.0001" value="0.001" />
               <div class="trade-actions inline-actions">
                 <button id="buyBtn" class="btn-trade buy" type="button" data-i18n="trade_buy">Buy</button>
@@ -186,17 +196,19 @@
         <div class="chart-header">
           <div class="chart-title"><i class="fa-solid fa-chart-line"></i><span id="chartTitle">BTCUSDT</span></div>
           <div class="chart-controls">
-            <input id="chartSymbol" class="chart-input" type="text" value="BTCUSDT" aria-label="Símbolo cripto" />
-            <button id="chartRefresh" class="icon-btn small" title="Actualizar gráfico" type="button">⟳</button>
-            <button id="chartExpandBtn" class="icon-btn small" title="Expandir/contraer gráfico" type="button">⤢</button>
+            <input id="chartSymbol" class="chart-input" type="text" value="BTCUSDT" aria-label="Símbolo cripto" data-i18n-aria-label="chart_symbol_aria" />
+            <button id="chartRefresh" class="icon-btn small" title="Actualizar gráfico" data-i18n-title="chart_refresh_title" type="button">⟳</button>
+            <button id="chartExpandBtn" class="icon-btn small" title="Expandir/contraer gráfico" data-i18n-title="chart_expand_title" type="button">⤢</button>
             <label class="live-toggle"><input id="chartLive" type="checkbox" /><span data-i18n="live_label">Live</span></label>
             <label class="live-toggle"><input id="newsMarkersToggle" type="checkbox" checked /><span data-i18n="news_label">News</span></label>
-            <div class="chart-mode-hint" id="chartModeHint" title="p>63% BUY • p<37% SELL • otherwise HOLD">p&gt;63% BUY • p&lt;37% SELL • HOLD en medio</div>
+            <div class="chart-mode-hint" id="chartModeHint" title="p>63% BUY • p<37% SELL • otherwise HOLD" data-i18n="chart_mode_hint" data-i18n-title="chart_mode_hint_title">p&gt;63% BUY • p&lt;37% SELL • HOLD en medio</div>
+            <span id="priceSourceBadge" class="pill pill-demo" title="Fuente de precio" data-i18n-title="price_source_title">DEMO</span>
+            <span id="cryptoContextPill" class="pill pill-muted" title="Contexto cripto" data-i18n-title="crypto_context_title">—</span>
           </div>
         </div>
 
         <div class="chart-canvas"><canvas id="priceChart"></canvas></div>
-        <div class="signal-bar" id="signalBar" aria-label="Confianza de la señal"></div>
+        <div class="signal-bar" id="signalBar" aria-label="Confianza de la señal" data-i18n-aria-label="signal_confidence_aria"></div>
         <div id="tradeStatus" class="trade-status" aria-live="polite"></div>
 
         <div id="predictionCompare" class="prediction-compare" aria-live="polite">
@@ -206,10 +218,10 @@
               <span id="predictionCompareTitle" data-i18n="compare_title">Comparación post-horizonte</span>
             </div>
             <div class="prediction-compare-actions">
-              <button id="predictionCompareHelp" class="icon-btn small" title="¿Cómo leer esta sección?" aria-expanded="false" type="button">
+              <button id="predictionCompareHelp" class="icon-btn small" title="¿Cómo leer esta sección?" data-i18n-title="compare_help_title" aria-expanded="false" type="button">
                 <i class="fa-solid fa-circle-question" aria-hidden="true"></i>
               </button>
-              <button id="predictionCompareRefresh" class="icon-btn small" title="Actualizar comparación" type="button">⟳</button>
+              <button id="predictionCompareRefresh" class="icon-btn small" title="Actualizar comparación" data-i18n-title="compare_refresh_title" type="button">⟳</button>
             </div>
           </div>
           <div id="predictionCompareTooltip" class="prediction-compare-tooltip" role="tooltip" hidden></div>
@@ -226,11 +238,11 @@
                     <label class="live-toggle"><input id="alertsToggle" type="checkbox" /><span data-i18n="alerts_label">Alerts</span></label>
                     <label class="live-toggle"><input id="savePredToggle" type="checkbox" checked /><span data-i18n="save_label">Save</span></label>
                     <label class="live-toggle"><input id="logsLiveToggle" type="checkbox" /><span data-i18n="logs_label">Logs</span></label>
-                    <button id="predsBtn" class="icon-btn small" title="Ver últimas predicciones" type="button">≣</button>
-                    <button id="pnlBtn" class="icon-btn small" title="P&L y trades" type="button">$</button>
-                    <button id="statsBtn" class="icon-btn small" title="Ver estadísticos de predicciones" type="button">Σ</button>
-                    <button id="snapshotBtn" class="icon-btn small" title="Ver snapshot del sistema" type="button">🛰</button>
-                    <button id="clearCryptoBtn" class="icon-btn small danger" title="Borrar historial cripto" type="button">🗑</button>
+                    <button id="predsBtn" class="icon-btn small" title="Ver últimas predicciones" data-i18n-title="preds_btn_title" type="button">≣</button>
+                    <button id="pnlBtn" class="icon-btn small" title="P&L y trades" data-i18n-title="pnl_btn_title" type="button">$</button>
+                    <button id="statsBtn" class="icon-btn small" title="Ver estadísticos de predicciones" data-i18n-title="stats_btn_title" type="button">Σ</button>
+                    <button id="snapshotBtn" class="icon-btn small" title="Ver snapshot del sistema" data-i18n-title="snapshot_btn_title" type="button">🛰</button>
+                    <button id="clearCryptoBtn" class="icon-btn small danger" title="Borrar historial cripto" data-i18n-title="clear_crypto_title" type="button">🗑</button>
                   </div>
                 </div>
               </div>
@@ -247,7 +259,7 @@
                     </div>
                     <div class="sources-toolbar-actions">
                       <label class="live-toggle"><input id="newsCompactToggle" type="checkbox" /><span data-i18n="news_compact">Compacto</span></label>
-                      <button id="newsRefreshBtn" class="icon-btn small" title="Refrescar noticias" type="button">⟳</button>
+                      <button id="newsRefreshBtn" class="icon-btn small" title="Refrescar noticias" data-i18n-title="news_refresh_title" type="button">⟳</button>
                     </div>
                 </div>
               </div>
@@ -266,6 +278,43 @@
         </div>
       </section>
 
+      <!-- IMAGE PANEL (only visible in Modo Imagen) -->
+      <section class="image-panel sources-box" id="imagePanel" aria-hidden="true" style="display:none;">
+        <div class="sources-toolbar">
+          <div class="sources-toolbar-top">
+            <div class="sources-toolbar-top-left">
+              <strong data-i18n="image_generator_title">Generador de imágenes (local demo)</strong>
+              <span id="imageStatus" class="pill pill-muted" title="Estado" data-i18n-title="image_status_title">Listo</span>
+            </div>
+            <div class="sources-toolbar-actions">
+              <button id="imageRefreshBtn" class="icon-btn small" type="button" title="Recargar galería" data-i18n-title="image_refresh_title">⟳</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="image-form">
+          <label>
+            <span data-i18n="image_prompt_label">Prompt</span>
+            <textarea id="imagePrompt" rows="2" placeholder="Describe la imagen..." data-i18n-placeholder="image_prompt_placeholder"></textarea>
+          </label>
+          <label>
+            <span data-i18n="image_negative_label">Negative</span>
+            <input id="imageNegative" type="text" placeholder="Evita... (opcional)" data-i18n-placeholder="image_negative_placeholder" />
+          </label>
+          <div class="image-form-row">
+            <label><span data-i18n="image_steps_label">Steps</span> <input id="imageSteps" type="number" min="5" max="50" value="20" /></label>
+            <label><span data-i18n="image_seed_label">Seed</span> <input id="imageSeed" type="number" min="0" placeholder="aleatoria" data-i18n-placeholder="image_seed_placeholder" /></label>
+            <button id="imageGenerateBtn" class="btn" type="button" data-i18n="image_generate_btn">Generar</button>
+          </div>
+          <div class="image-config-help">
+            <div data-i18n="image_steps_help">Steps: cantidad de iteraciones. Más = mejor detalle, pero tarda más.</div>
+            <div data-i18n="image_seed_help">Seed: número base aleatorio. Mismo prompt + misma seed = resultado similar.</div>
+          </div>
+        </div>
+
+        <div id="imageGallery" class="image-grid"></div>
+      </section>
+
       <!-- SIDEBAR -->
       <aside class="app-sidebar">
         <div class="tab-panels">
@@ -276,21 +325,21 @@
                   <div class="sources-toolbar-top-left">
                     <strong data-i18n="files_heading">Archivos</strong>
                     <select id="projectSelect" class="project-select">
-                      <option value="app">app (backend)</option>
-                      <option value="ui">ui (frontend)</option>
+                      <option value="app" data-i18n="project_option_app">app (backend)</option>
+                      <option value="ui" data-i18n="project_option_ui">ui (frontend)</option>
                     </select>
                   </div>
                 </div>
                 <div class="sources-toolbar-actions">
-                  <button id="refreshTreeBtn" class="icon-btn small" title="Recargar árbol" type="button">⟳</button>
-                  <button id="projectUploadBtn" class="icon-btn small" title="Subir proyecto ZIP" type="button"><i class="fas fa-upload"></i></button>
-                  <button id="projectCloneBtn" class="icon-btn small" title="Clonar repo" type="button"><i class="fas fa-code-branch"></i></button>
-                  <button id="projectDeleteBtn" class="icon-btn small danger" title="Eliminar proyecto" type="button"><i class="fas fa-trash"></i></button>
-                  <button id="ingestLogBtn" class="icon-btn small" title="Ver log de ingesta" type="button"><i class="fas fa-scroll"></i></button>
-                  <button id="filesExpandBtn" class="icon-btn small" title="Expandir Archivos" type="button"><i class="fas fa-up-right-and-down-left-from-center"></i></button>
-                  <button id="ingestStatusBtn" class="status-btn" type="button" title="Estado de ingesta">
+                  <button id="refreshTreeBtn" class="icon-btn small" title="Recargar árbol" data-i18n-title="refresh_tree_title" type="button">⟳</button>
+                  <button id="projectUploadBtn" class="icon-btn small" title="Subir proyecto ZIP" data-i18n-title="upload_zip_title" type="button"><i class="fas fa-upload"></i></button>
+                  <button id="projectCloneBtn" class="icon-btn small" title="Clonar repo" data-i18n-title="clone_repo_title" type="button"><i class="fas fa-code-branch"></i></button>
+                  <button id="projectDeleteBtn" class="icon-btn small danger" title="Eliminar proyecto" data-i18n-title="delete_project_title" type="button"><i class="fas fa-trash"></i></button>
+                  <button id="ingestLogBtn" class="icon-btn small" title="Ver log de ingesta" data-i18n-title="ingest_log_title" type="button"><i class="fas fa-scroll"></i></button>
+                  <button id="filesExpandBtn" class="icon-btn small" title="Expandir Archivos" data-i18n-title="files_expand_title" type="button"><i class="fas fa-up-right-and-down-left-from-center"></i></button>
+                  <button id="ingestStatusBtn" class="status-btn" type="button" title="Estado de ingesta" data-i18n-title="ingest_status_title">
                     <span class="status-dot" aria-hidden="true"></span>
-                    <span id="ingestStatusText">Listo</span>
+                    <span id="ingestStatusText" data-i18n="ready_label">Listo</span>
                   </button>
                 </div>
               </div>
@@ -302,7 +351,7 @@
               <div class="file-viewer-header">
                 <div id="fileViewerTitle" class="file-viewer-title" data-i18n="file_viewer_placeholder">Selecciona un archivo en Archivos</div>
                 <div class="file-viewer-actions">
-                  <button id="copyFileBtn" class="icon-btn small" title="Copiar contenido" type="button">
+                  <button id="copyFileBtn" class="icon-btn small" title="Copiar contenido" data-i18n-title="copy_content_title" type="button">
                     <i class="fa-solid fa-copy"></i>
                   </button>
                 </div>
@@ -315,7 +364,7 @@
                 <div class="sources-toolbar-top">
                   <div class="sources-toolbar-top-left"><strong data-i18n="jobs_heading">Trabajos</strong></div>
                   <div class="sources-toolbar-actions">
-                    <button id="ingestJobsRefresh" class="icon-btn small" title="Actualizar lista" type="button">⟳</button>
+                    <button id="ingestJobsRefresh" class="icon-btn small" title="Actualizar lista" data-i18n-title="refresh_list_title" type="button">⟳</button>
                   </div>
                 </div>
               </div>
@@ -341,16 +390,16 @@
       <div class="modal-card">
         <div class="modal-header">
           <h3 id="helpTitle" data-i18n="help_title">Guía rápida de AEGIS</h3>
-          <button id="helpClose" class="icon-btn small" aria-label="Cerrar" type="button">✕</button>
+          <button id="helpClose" class="icon-btn small" aria-label="Cerrar" data-i18n-aria-label="close_aria" type="button">✕</button>
         </div>
         <div class="modal-body">
           <ul class="help-list">
-            <li>💬 <strong>Chat</strong>: conversación normal con memoria. Usa modo Código/Cripto si aplica.</li>
-            <li>🌐 <strong>Modo Web</strong>: botón globo; llama a /websearch y muestra fuentes a la derecha.</li>
-            <li>🔗 <strong>Modo URL</strong>: pega una URL; /fetch_url la lee y la ves en Fuentes.</li>
-            <li>🧠 <strong>Modo Código</strong>: envía preguntas técnicas; usa RAG si hay índice.</li>
-            <li>🖼️ <strong>Imagen</strong>: sube una imagen; /analyze_image hace OCR local (ES/EN).</li>
-            <li>📈 <strong>Cripto (señal + horizonte)</strong>: escribe “BTCUSDT H=2m” o usa el panel Cripto. Genera señal demo y guarda precio base.</li>
+            <li>💬 <strong data-i18n="help_item_chat_label">Chat</strong>: <span data-i18n="help_item_chat_desc">conversación normal con memoria. Usa modo Código/Cripto si aplica.</span></li>
+            <li>🌐 <strong data-i18n="help_item_web_label">Modo Web</strong>: <span data-i18n="help_item_web_desc">botón globo; llama a /websearch y muestra fuentes a la derecha.</span></li>
+            <li>🔗 <strong data-i18n="help_item_url_label">Modo URL</strong>: <span data-i18n="help_item_url_desc">pega una URL; /fetch_url la lee y la ves en Fuentes.</span></li>
+            <li>🧠 <strong data-i18n="help_item_code_label">Modo Código</strong>: <span data-i18n="help_item_code_desc">envía preguntas técnicas; usa RAG si hay índice.</span></li>
+            <li>🖼️ <strong data-i18n="help_item_image_label">Imagen</strong>: <span data-i18n="help_item_image_desc">sube una imagen; /analyze_image hace OCR local (ES/EN).</span></li>
+            <li>📈 <strong data-i18n="help_item_crypto_label">Cripto (señal + horizonte)</strong>: <span data-i18n="help_item_crypto_desc">escribe “BTCUSDT H=2m” o usa el panel Cripto. Genera señal demo y guarda precio base.</span></li>
           </ul>
         </div>
       </div>
@@ -360,13 +409,13 @@
     <div id="symbolsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="symbolsTitle">
       <div class="modal-card">
         <div class="modal-header">
-          <h3 id="symbolsTitle">Despliegue rápido y símbolos (USDT)</h3>
-          <button id="symbolsClose" class="icon-btn small" aria-label="Cerrar" type="button">✕</button>
+          <h3 id="symbolsTitle" data-i18n="symbols_modal_title">Despliegue rápido y símbolos (USDT)</h3>
+          <button id="symbolsClose" class="icon-btn small" aria-label="Cerrar" data-i18n-aria-label="close_aria" type="button">✕</button>
         </div>
         <div class="modal-body">
-          <p><strong>Deploy (local):</strong> activa DB + claves, luego <code>uvicorn main:app --reload</code>. Usa el ícono de llave para poner la misma clave en la UI.</p>
-          <p><strong>Claves mínimas:</strong> <code>ADMIN_API_KEY</code>, <code>AEGIS_API_KEY</code>, <code>FILES_API_KEY</code>, <code>DATABASE_URL</code>. Opcional: <code>NEWSAPI_TOKEN</code>, <code>CRYPTOPANIC_TOKEN</code>, <code>CRYPTO_NEWS_RSS</code>.</p>
-          <p><strong>Pares Binance (USDT):</strong></p>
+          <p><strong data-i18n="symbols_deploy_label">Deploy (local):</strong> <span data-i18n="symbols_deploy_desc">activa DB + claves, luego</span> <code>uvicorn main:app --reload</code>. <span data-i18n="symbols_deploy_desc_2">Usa el ícono de llave para poner la misma clave en la UI.</span></p>
+          <p><strong data-i18n="symbols_keys_label">Claves mínimas:</strong> <code>ADMIN_API_KEY</code>, <code>AEGIS_API_KEY</code>, <code>FILES_API_KEY</code>, <code>DATABASE_URL</code>. <span data-i18n="symbols_keys_optional">Opcional:</span> <code>NEWSAPI_TOKEN</code>, <code>CRYPTOPANIC_TOKEN</code>, <code>CRYPTO_NEWS_RSS</code>.</p>
+          <p><strong data-i18n="symbols_pairs_label">Pares Binance (USDT):</strong></p>
           <pre id="symbolsList" class="symbols-list">
 BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT,
 ADAUSDT, DOGEUSDT, AVAXUSDT, DOTUSDT, TRXUSDT,
@@ -377,7 +426,7 @@ FILUSDT, ALGOUSDT, XTZUSDT, MKRUSDT, INJUSDT,
 RUNEUSDT, KASUSDT, IMXUSDT, JTOUSDT, JUPUSDT,
 TIAUSDT, WIFUSDT, PEPEUSDT, SHIBUSDT, BONKUSDT
           </pre>
-          <p style="font-size:0.9rem;">Copia un símbolo y pégalo en el campo del gráfico/cripto para ver precio y predicción. Todos son pares USDT (spot).</p>
+          <p style="font-size:0.9rem;" data-i18n="symbols_tip">Copia un símbolo y pégalo en el campo del gráfico/cripto para ver precio y predicción. Todos son pares USDT (spot).</p>
         </div>
       </div>
     </div>
@@ -386,13 +435,13 @@ TIAUSDT, WIFUSDT, PEPEUSDT, SHIBUSDT, BONKUSDT
     <div id="sessionsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="sessionsTitle">
       <div class="modal-card">
         <div class="modal-header">
-          <h3 id="sessionsTitle">Conversaciones</h3>
+          <h3 id="sessionsTitle" data-i18n="sessions_title">Conversaciones</h3>
           <div class="sessions-header-actions">
             <label class="sessions-toggle">
               <input type="checkbox" id="sessionsIncludeArchived" />
-              <span>Mostrar archivadas</span>
+              <span data-i18n="show_archived">Mostrar archivadas</span>
             </label>
-            <button id="sessionsClose" class="icon-btn small" aria-label="Cerrar" type="button">✕</button>
+            <button id="sessionsClose" class="icon-btn small" aria-label="Cerrar" data-i18n-aria-label="close_aria" type="button">✕</button>
           </div>
         </div>
         <div class="modal-body">
@@ -406,6 +455,6 @@ TIAUSDT, WIFUSDT, PEPEUSDT, SHIBUSDT, BONKUSDT
     <input id="projectUploadInput" type="file" accept=".zip" class="visually-hidden" />
   </div>
 
-  <script src="/ui/app.js?v=20260112" defer></script>
+  <script src="/ui/app.js?v=20260214" defer></script>
 </body>
 </html>

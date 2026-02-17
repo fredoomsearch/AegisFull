@@ -93,7 +93,7 @@ MAX_REDIRECTS = int(os.getenv("TOOLS_MAX_REDIRECTS", "1"))
 ALLOWED_SCHEMES = {"http", "https"}
 ALLOWED_MIME_PREFIXES = ("text/",)
 ALLOWED_MIME_EXACT = {"application/json", "application/xml", "application/xhtml+xml"}
-DUCKDUCKGO_HTML = "https://html.duckduckgo.com/html"
+DUCKDUCKGO_HTML = "https://html.duckduckgo.com/html"  # kept for backwards compat; actual search now uses Brave-first providers
 BLOCK_LOCAL_NETS = {"127.", "10.", "192.168.", "169.254.", "0.0.0.0"}
 BLOCK_LOCAL_NETS |= {
     p.strip()
@@ -212,35 +212,14 @@ def duckduckgo_search_html_structured(
     max_results: int = 3,
     session: Optional[requests.Session] = None,
 ) -> List[SearchResult]:
-    session = session or _default_session
+    # Reuse core web_search with Brave-first provider order; keep signature for compatibility.
     try:
-        headers = {"User-Agent": session.headers.get("User-Agent", DEFAULT_USER_AGENT)}
-        resp = session.post(
-            DUCKDUCKGO_HTML,
-            data={"q": query},
-            timeout=REQUEST_TIMEOUT,
-            headers=headers,
-        )
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        results: List[SearchResult] = []
-
-        for div in soup.select("div.result")[:max_results]:
-            a = div.select_one("a")
-            title = a.get_text(strip=True) if a else ""
-            link = a.get("href") if a and a.has_attr("href") else ""
-            snippet_el = div.select_one(".result__snippet, .snippet, p")
-            snippet = snippet_el.get_text(strip=True) if snippet_el else ""
-            results.append({"title": title, "snippet": snippet, "link": link})
-
-        logger.debug(
-            "duckduckgo returned %d results for query=%s",
-            len(results),
-            query,
-        )
-        return results
+        results = _svc_web_search_structured(query, max_results, lang=None) or []
+        trimmed = results[:max_results]
+        logger.debug("web_search_structured (Brave-first) returned %d results for query=%s", len(trimmed), query)
+        return [{"title": r.title, "snippet": r.snippet, "link": r.link} for r in trimmed]
     except Exception as exc:  # noqa: BLE001
-        logger.debug("duckduckgo_search_html_structured failed: %s", exc)
+        logger.debug("duckduckgo_search_html_structured (Brave-first wrapper) failed: %s", exc)
         return []
 
 
@@ -254,13 +233,13 @@ def browser_search_scrape_structured(
 
     if not SELENIUM_AVAILABLE or not CHROMEDRIVER_AUTOINSTALLER_AVAILABLE:
         logger.debug(
-            "Selenium or chromedriver autoinstaller not available; using duckduckgo."
+            "Selenium or chromedriver autoinstaller not available; using Brave-first web_search fallback."
         )
         return duckduckgo_search_html_structured(query, max_results, session=session)
 
     brave_bin = find_brave_binary()
     if not brave_bin:
-        logger.debug("Brave/Chromium binary not found; using duckduckgo.")
+        logger.debug("Brave/Chromium binary not found; using Brave-first web_search fallback.")
         return duckduckgo_search_html_structured(query, max_results, session=session)
 
     try:
@@ -648,5 +627,4 @@ def tool(name: str):
         return fn
 
     return deco
-
 

@@ -35,6 +35,8 @@ const endpoints = {
   adminRefreshLog: "/admin/refresh-log",
   adminCancelAll: "/admin/cancel-all",
   systemSnapshot: "/system/snapshot",
+  imageGenerate: "/image/generate",
+  imageRecent: "/image/recent",
   healthz: "/healthz",
   authToken: "/auth/token",
   authRefresh: "/auth/refresh",
@@ -51,13 +53,19 @@ const endpoints = {
   filesIngestLog: "/files/ingest/log",
 };
 
+const cleanKey = (k) =>
+  (k || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)[0] || "";
+
 const state = {
   mode: MODES.CHAT,
   lang: localStorage.getItem("aegis_lang") || LANG.ES,
   conversationId: localStorage.getItem("aegis_conv") || null,
   useExistingConversation: localStorage.getItem("aegis_use_existing") === "1",
-  apiKey: localStorage.getItem("aegis_api_key") || "",
-  filesApiKey: localStorage.getItem("aegis_files_api_key") || localStorage.getItem("aegis_api_key") || "",
+  apiKey: cleanKey(localStorage.getItem("aegis_api_key")),
+  filesApiKey: cleanKey(localStorage.getItem("aegis_files_api_key") || localStorage.getItem("aegis_api_key")),
 
   pending: false,
   activeControllers: new Set(),
@@ -81,6 +89,9 @@ const state = {
   showNewsMarkers: true,
   newsProvider: null,
   chatSideVisible: true,
+  layoutCollapsed: localStorage.getItem("aegis_layout_collapsed") === "1",
+  chartVisible: localStorage.getItem("aegis_chart_visible") !== "0",
+  sidebarVisible: localStorage.getItem("aegis_sidebar_visible") !== "0",
 
   // timers
   liveTimer: null,
@@ -116,6 +127,11 @@ const state = {
   accessToken: localStorage.getItem("aegis_access_token") || "",
   refreshToken: localStorage.getItem("aegis_refresh_token") || "",
   tokenExp: Number(localStorage.getItem("aegis_token_exp") || "0"), // epoch seconds
+  authDiag: {
+    failures: 0,
+    lastError: null,
+    lastOkAt: 0,
+  },
 };
 
 const dom = {};
@@ -131,6 +147,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if (dom.filesLogContent) dom.filesLogContent.textContent = state.lang === LANG.ES ? "Selecciona un log (ingest/admin) para verlo aquí." : "Select a log (ingest/admin) to view it here.";
   renderProjectList();
   startTokenAutoRefresh();
+  applyLayoutCollapsed();
+  if (state.autoSnapshotEnabled) scheduleSnapshot(1500);
 });
 
 function cacheDom() {
@@ -143,6 +161,7 @@ function cacheDom() {
   dom.urlBtn = document.getElementById("urlBtn");
   dom.cryptoBtn = document.getElementById("cryptoBtn");
   dom.imgBtn = document.getElementById("imgBtn");
+  dom.layoutToggle = document.getElementById("layoutToggle");
   dom.imgInput = document.getElementById("imgInput");
 
   dom.langEs = document.getElementById("langEs");
@@ -192,6 +211,16 @@ function cacheDom() {
   dom.newsRefreshBtn = document.getElementById("newsRefreshBtn");
   dom.newsCompactToggle = document.getElementById("newsCompactToggle");
 
+  // image mode
+  dom.imagePrompt = document.getElementById("imagePrompt");
+  dom.imageNegative = document.getElementById("imageNegative");
+  dom.imageSteps = document.getElementById("imageSteps");
+  dom.imageSeed = document.getElementById("imageSeed");
+  dom.imageGenerateBtn = document.getElementById("imageGenerateBtn");
+  dom.imageGallery = document.getElementById("imageGallery");
+  dom.imageStatus = document.getElementById("imageStatus");
+  dom.imageRefreshBtn = document.getElementById("imageRefreshBtn");
+
   // files
   dom.treeBtn = document.getElementById("treeBtn");
   dom.projectSelect = document.getElementById("projectSelect");
@@ -220,6 +249,7 @@ function cacheDom() {
   dom.chatSideToggle = document.getElementById("chatSideToggle");
   dom.chatSideShow = document.getElementById("chatSideShow");
   dom.chatCol = document.querySelector(".chat-col");
+  dom.appSidebar = document.querySelector(".app-sidebar");
 
   // crypto controls
   dom.cryptoInline = document.getElementById("cryptoInline");
@@ -239,6 +269,8 @@ function cacheDom() {
   dom.chartLive = document.getElementById("chartLive");
   dom.newsMarkersToggle = document.getElementById("newsMarkersToggle");
   dom.signalBar = document.getElementById("signalBar");
+  dom.priceSourceBadge = document.getElementById("priceSourceBadge");
+  dom.cryptoContextPill = document.getElementById("cryptoContextPill");
 
   dom.tradeStatus = document.getElementById("tradeStatus");
 
@@ -273,8 +305,10 @@ function initState() {
   setProjectRoot(state.currentProjectRoot);
   loadConversationList(state.conversationsIncludeArchived);
   applyChatSideVisible();
+  applyPanelVisibility();
   // Try to load the file tree once on init (will use currentProjectRoot).
   loadProjectTree();
+  setImageStatus(state.lang === LANG.ES ? "Listo" : "Ready", "muted");
 }
 
 function wireUI() {
@@ -295,8 +329,8 @@ function wireUI() {
   dom.cryptoBtn?.addEventListener("click", () => setMode(state.mode === MODES.CRYPTO ? MODES.CHAT : MODES.CRYPTO));
   dom.imgBtn?.addEventListener("click", () => {
     setMode(MODES.IMAGE);
-    dom.imgInput?.click();
   });
+  dom.layoutToggle?.addEventListener("click", toggleLayoutCollapse);
 
   // image input
   dom.imgInput?.addEventListener("change", async () => {
@@ -304,6 +338,16 @@ function wireUI() {
     dom.imgInput.value = "";
     if (!f) return;
     await analyzeImage(f);
+  });
+
+  dom.imageGenerateBtn?.addEventListener("click", (e) => {
+    e.preventDefault();
+    generateImageFromUI();
+  });
+
+  dom.imageRefreshBtn?.addEventListener("click", (e) => {
+    e.preventDefault();
+    loadRecentImages();
   });
 
   // language
@@ -349,7 +393,7 @@ function wireUI() {
     const msgMain = state.lang === LANG.ES ? "X-API-Key (vacío para borrar):" : "X-API-Key (empty to clear):";
     const next = prompt(msgMain, state.apiKey || "");
     if (next == null) return;
-    state.apiKey = (next || "").trim();
+    state.apiKey = cleanKey(next || "");
     if (state.apiKey) localStorage.setItem("aegis_api_key", state.apiKey);
     else localStorage.removeItem("aegis_api_key");
 
@@ -360,7 +404,7 @@ function wireUI() {
     if (nextFiles === null) {
       // keep previous if user cancels second prompt
     } else {
-      const trimmed = (nextFiles || "").trim();
+      const trimmed = cleanKey(nextFiles || "");
       state.filesApiKey = trimmed || state.apiKey || "";
       if (state.filesApiKey) localStorage.setItem("aegis_files_api_key", state.filesApiKey);
       else localStorage.removeItem("aegis_files_api_key");
@@ -415,13 +459,25 @@ function wireUI() {
   });
   dom.ingestStatusBtn?.addEventListener("click", startIngest);
   dom.ingestJobsRefresh?.addEventListener("click", loadIngestJobs);
-  dom.filesExpandBtn?.addEventListener("click", toggleFilesExpand);
+  dom.filesExpandBtn?.addEventListener("click", (e) => {
+    if (e.shiftKey) {
+      toggleFilesExpand();
+      return;
+    }
+    toggleSidebarVisibility();
+  });
   dom.chatSideToggle?.addEventListener("click", toggleChatSidePanel);
   dom.chatSideShow?.addEventListener("click", toggleChatSidePanel);
 
   // crypto + chart
   dom.chartRefresh?.addEventListener("click", () => loadChartData(dom.chartSymbol?.value));
-  dom.chartExpandBtn?.addEventListener("click", toggleChartExpand);
+  dom.chartExpandBtn?.addEventListener("click", (e) => {
+    if (e.shiftKey) {
+      toggleChartExpand();
+      return;
+    }
+    toggleChartVisibility();
+  });
   dom.chartLive?.addEventListener("change", () => (dom.chartLive.checked ? startLiveChart() : stopLiveChart()));
   dom.newsMarkersToggle?.addEventListener("change", () => {
     state.showNewsMarkers = !!dom.newsMarkersToggle.checked;
@@ -439,21 +495,6 @@ function wireUI() {
   dom.cryptoHorizon?.addEventListener("change", () => loadCryptoPrediction());
   dom.chatTradeQty?.addEventListener("change", () => loadCryptoPrediction());
 
-  // clarify crypto controls
-  if (dom.buyBtn) dom.buyBtn.title = state.lang === LANG.ES ? "Comprar (simulado, educativo)" : "Buy (simulated, educational)";
-  if (dom.sellBtn) dom.sellBtn.title = state.lang === LANG.ES ? "Vender (simulado, educativo)" : "Sell (simulated, educational)";
-  if (dom.predictionCompareHelp) dom.predictionCompareHelp.title = state.lang === LANG.ES
-    ? "Predicción vs. realidad: precisión y Δ promedio. BUY si p>63%, SELL si p<37%, HOLD en medio."
-    : "Prediction vs actual: accuracy and avg Δ. BUY if p>63%, SELL if p<37%, HOLD otherwise.";
-  if (dom.statsBtn) dom.statsBtn.title = state.lang === LANG.ES
-    ? "Precisión y movimiento promedio; mira la barra para entender aciertos."
-    : "Accuracy and average move; check the bar to interpret performance.";
-  if (dom.predsBtn) dom.predsBtn.title = state.lang === LANG.ES
-    ? "Últimas predicciones: qué se predijo y qué ocurrió."
-    : "Recent predictions: what we predicted vs what happened.";
-  if (dom.pnlBtn) dom.pnlBtn.title = state.lang === LANG.ES
-    ? "P&L de trades simulados (educativos)."
-    : "P&L from simulated trades (educational).";
   dom.copyConvId?.addEventListener("click", async () => {
     const id = state.conversationId || "";
     if (!id) return appendBubble(state.lang === LANG.ES ? "Sin sesión activa." : "No active session.", "error");
@@ -493,7 +534,7 @@ function wireUI() {
   dom.savePredToggle?.addEventListener("change", () => {
     state.savePredictions = !!dom.savePredToggle.checked;
     localStorage.setItem("aegis_save_preds", JSON.stringify(state.savePredictions));
-    appendBubble(state.lang === LANG.ES ? "Save toggled." : "Save toggled.", "bot");
+    appendBubble(state.lang === LANG.ES ? "Guardado de señales actualizado." : "Signal saving updated.", "bot");
   });
 
   dom.alertsToggle?.addEventListener("change", () => {
@@ -528,11 +569,13 @@ function updateAllUI() {
   updateModeIndicator();
   updateModeButtons();
   updateCryptoInlineVisibility();
+  updateImageVisibility();
   updateTogglesVisibility();
   updateLatencyLabel();
   updateStatusCenter();
   updateSnapshotToggleUI();
   localizeUI();
+  applyPanelVisibility();
 
   // init sources
   clearSources();
@@ -553,6 +596,18 @@ function updateStatusCenter() {
     note: state.pending ? (es ? "En curso" : "In progress") : (es ? "Libre" : "Idle"),
     status: state.pending ? "on" : "off",
     progress: state.pending ? "indeterminate" : null,
+  });
+
+  const authErr = state.authDiag?.lastError || null;
+  const hasCreds = !!(state.apiKey || state.filesApiKey || state.accessToken);
+  items.push({
+    label: "Auth",
+    note: authErr
+      ? `${authErr.scope || "main"} ${authErr.status || 401} (${authErr.hasKey ? "key" : "no-key"}|${authErr.hasBearer ? "bearer" : "no-bearer"})${authErr.detail ? ` · ${authErr.detail}` : ""}`
+      : hasCreds
+        ? (es ? "Credenciales cargadas" : "Credentials loaded")
+        : (es ? "Sin credenciales" : "No credentials"),
+    status: authErr ? "warn" : (hasCreds ? "on" : "off"),
   });
 
   items.push({
@@ -639,6 +694,7 @@ function setMode(mode) {
   updateModeIndicator();
   updateModeButtons();
   updateCryptoInlineVisibility();
+  updateImageVisibility();
   updateTogglesVisibility();
 
   // when entering crypto, refresh chart/prediction
@@ -646,6 +702,11 @@ function setMode(mode) {
     loadCryptoModels();
     loadCryptoPrediction();
     loadPredictionComparison(state.chartSymbol, { force: true });
+  }
+
+  // when entering image, load recent gallery
+  if (state.mode === MODES.IMAGE) {
+    loadRecentImages();
   }
 }
 
@@ -681,6 +742,14 @@ function updateCryptoInlineVisibility() {
   dom.cryptoInline.setAttribute("aria-hidden", String(!show));
 }
 
+function updateImageVisibility() {
+  const section = document.getElementById("imagePanel");
+  if (!section) return;
+  const show = state.mode === MODES.IMAGE;
+  section.style.display = show ? "block" : "none";
+  section.setAttribute("aria-hidden", String(!show));
+}
+
 function updateTogglesVisibility() {
   // show save/alerts/logs only in crypto mode
   const show = state.mode === MODES.CRYPTO;
@@ -710,16 +779,39 @@ function toggleChatSidePanel() {
 
 function applyChatSideVisible() {
   const visible = !!state.chatSideVisible;
+  const es = state.lang === LANG.ES;
   if (dom.chatSidePanel) dom.chatSidePanel.classList.toggle("hidden", !visible);
   if (dom.chatCol) dom.chatCol.classList.toggle("panel-hidden", !visible);
   if (dom.chatSideToggle) {
     dom.chatSideToggle.title = visible
-      ? (state.lang === LANG.ES ? "Ocultar panel" : "Hide panel")
-      : (state.lang === LANG.ES ? "Mostrar panel" : "Show panel");
+      ? (es ? "Ocultar panel" : "Hide panel")
+      : (es ? "Mostrar panel" : "Show panel");
     dom.chatSideToggle.textContent = visible ? "✕" : "⤢";
   }
   if (dom.chatSideShow) {
     dom.chatSideShow.style.display = visible ? "none" : "flex";
+    dom.chatSideShow.textContent = es ? "Estado / Sesión" : "Status / Session";
+    dom.chatSideShow.setAttribute("aria-label", es ? "Mostrar panel Estado/Sesión" : "Show Status/Session panel");
+  }
+}
+
+function toggleLayoutCollapse() {
+  state.layoutCollapsed = !state.layoutCollapsed;
+  localStorage.setItem("aegis_layout_collapsed", state.layoutCollapsed ? "1" : "0");
+  applyLayoutCollapsed();
+}
+
+function applyLayoutCollapsed() {
+  const collapsed = !!state.layoutCollapsed;
+  document.body.classList.toggle("layout-collapsed", collapsed);
+  if (dom.layoutToggle) {
+    dom.layoutToggle.setAttribute("aria-pressed", String(collapsed));
+    dom.layoutToggle.title = collapsed
+      ? (state.lang === LANG.ES ? "Mostrar paneles" : "Show panels")
+      : (state.lang === LANG.ES ? "Ocultar paneles" : "Hide panels");
+    dom.layoutToggle.innerHTML = collapsed
+      ? '<i class="fas fa-up-right-and-down-left-from-center"></i>'
+      : '<i class="fas fa-up-right-and-down-left-from-center"></i>';
   }
 }
 
@@ -837,13 +929,19 @@ function updateLatencyLabel() {
 
 function localizeUI() {
   const es = state.lang === LANG.ES;
+  document.documentElement.lang = state.lang;
   const map = {
     subtitle: es ? "Memoria • Búsqueda web • LLM local y remoto" : "Memory • Web search • Local + remote LLM",
+    help_title: es ? "Guía rápida de AEGIS" : "AEGIS quick guide",
     send_btn: es ? "Enviar" : "Send",
     trade_buy: es ? "Comprar" : "Buy",
     trade_sell: es ? "Vender" : "Sell",
+    model_label: es ? "Modelo" : "Model",
+    horizon_label: es ? "Horizonte" : "Horizon",
+    qty_label: es ? "Cantidad" : "Qty",
     live_label: es ? "En vivo" : "Live",
     news_label: es ? "Noticias" : "News",
+    news_compact: es ? "Compacto" : "Compact",
     alerts_label: es ? "Alertas" : "Alerts",
     save_label: es ? "Guardar" : "Save",
     logs_label: es ? "Logs" : "Logs",
@@ -858,18 +956,154 @@ function localizeUI() {
     logs_heading: es ? "Logs" : "Logs",
     security_heading: es ? "Seguridad" : "Security",
     session_id_label: es ? "ID:" : "ID:",
+    session_note: es ? "Logs de sesión son solo para depurar el flujo del chat." : "Session logs are only for debugging chat flow.",
     show_archived: es ? "Ver archivadas" : "Show archived",
     session_history_title: es ? "Historial" : "History",
     session_log_title: es ? "Log sesión" : "Session log",
+    sessions_title: es ? "Conversaciones" : "Conversations",
     compare_title: es ? "Comparación post-horizonte" : "Post-horizon comparison",
+    chart_mode_hint: es ? "p>63% COMPRAR • p<37% VENDER • mantener en medio" : "p>63% BUY • p<37% SELL • HOLD in between",
     file_viewer_placeholder: es ? "Selecciona un archivo en Archivos" : "Select a file in Files",
+    image_generator_title: es ? "Generador de imágenes (local demo)" : "Image generator (local demo)",
+    image_prompt_label: es ? "Prompt" : "Prompt",
+    image_prompt_placeholder: es ? "Describe la imagen..." : "Describe the image...",
+    image_negative_label: es ? "Negativo" : "Negative",
+    image_negative_placeholder: es ? "Evita... (opcional)" : "Avoid... (optional)",
+    image_steps_label: es ? "Steps" : "Steps",
+    image_seed_label: es ? "Seed" : "Seed",
+    image_seed_placeholder: es ? "aleatoria" : "random",
+    image_generate_btn: es ? "Generar" : "Generate",
+    image_steps_help: es
+      ? "Steps: cantidad de iteraciones. Más = mejor detalle, pero tarda más."
+      : "Steps: denoising iterations. Higher = more detail, but slower.",
+    image_seed_help: es
+      ? "Seed: número base aleatorio. Mismo prompt + misma seed = resultado similar."
+      : "Seed: random base number. Same prompt + same seed = similar result.",
+    project_option_app: es ? "app (backend)" : "app (backend)",
+    project_option_ui: es ? "ui (frontend)" : "ui (frontend)",
+    ready_label: es ? "Listo" : "Ready",
+    help_item_chat_label: es ? "Chat" : "Chat",
+    help_item_chat_desc: es ? "conversación normal con memoria. Usa modo Código/Cripto si aplica." : "normal conversation with memory. Use Code/Crypto mode when needed.",
+    help_item_web_label: es ? "Modo Web" : "Web mode",
+    help_item_web_desc: es ? "botón globo; llama a /websearch y muestra fuentes a la derecha." : "globe button; calls /websearch and shows sources on the right.",
+    help_item_url_label: es ? "Modo URL" : "URL mode",
+    help_item_url_desc: es ? "pega una URL; /fetch_url la lee y la ves en Fuentes." : "paste a URL; /fetch_url reads it and you can see it in Sources.",
+    help_item_code_label: es ? "Modo Código" : "Code mode",
+    help_item_code_desc: es ? "envía preguntas técnicas; usa RAG si hay índice." : "send technical questions; uses RAG when an index exists.",
+    help_item_image_label: es ? "Imagen" : "Image",
+    help_item_image_desc: es ? "sube una imagen; /analyze_image hace OCR local (ES/EN)." : "upload an image; /analyze_image runs local OCR (ES/EN).",
+    help_item_crypto_label: es ? "Cripto (señal + horizonte)" : "Crypto (signal + horizon)",
+    help_item_crypto_desc: es ? "escribe “BTCUSDT H=2m” o usa el panel Cripto. Genera señal demo y guarda precio base." : "type “BTCUSDT H=2m” or use the Crypto panel. It creates a demo signal and saves base price.",
+    symbols_modal_title: es ? "Despliegue rápido y símbolos (USDT)" : "Quick deploy and symbols (USDT)",
+    symbols_deploy_label: es ? "Deploy (local):" : "Deploy (local):",
+    symbols_deploy_desc: es ? "activa DB + claves, luego" : "set DB + keys, then run",
+    symbols_deploy_desc_2: es ? "Usa el ícono de llave para poner la misma clave en la UI." : "Use the key icon to set the same key in the UI.",
+    symbols_keys_label: es ? "Claves mínimas:" : "Minimum keys:",
+    symbols_keys_optional: es ? "Opcional:" : "Optional:",
+    symbols_pairs_label: es ? "Pares Binance (USDT):" : "Binance pairs (USDT):",
+    symbols_tip: es ? "Copia un símbolo y pégalo en el campo del gráfico/cripto para ver precio y predicción. Todos son pares USDT (spot)." : "Copy a symbol and paste it into the chart/crypto field to see price and prediction. All are USDT spot pairs.",
+
+    api_key_title: es ? "Configurar API key" : "Set API key",
+    tree_title: es ? "Ver árbol de proyecto" : "View project tree",
+    symbols_title_btn: es ? "Pares y despliegue rápido" : "Symbols and quick deploy",
+    admin_refresh_title: es ? "Refrescar datos/modelos cripto (admin)" : "Refresh crypto data/models (admin)",
+    clear_logs_title: es ? "Limpiar logs" : "Clear logs",
+    cancel_all_title: es ? "Cancelar todo" : "Cancel all",
+    help_btn_title: es ? "Guía rápida de herramientas" : "Quick tools guide",
+    chat_side_show: es ? "Estado / Sesión" : "Status / Session",
+    chat_side_show_aria: es ? "Mostrar panel Estado/Sesión" : "Show Status/Session panel",
+    hide_panel_title: es ? "Ocultar panel" : "Hide panel",
+    copy_id_title: es ? "Copiar ID" : "Copy ID",
+    refresh_log_title: es ? "Actualizar log" : "Refresh log",
+    mode_web_title: es ? "Modo búsqueda web" : "Web search mode",
+    mode_url_title: es ? "Modo leer URL" : "Read URL mode",
+    mode_crypto_title: es ? "Modo cripto" : "Crypto mode",
+    mode_image_title: es ? "Analizar imagen" : "Analyze image",
+    layout_toggle_title: es ? "Ocultar paneles laterales" : "Hide side panels",
+    chart_symbol_aria: es ? "Símbolo cripto" : "Crypto symbol",
+    chart_refresh_title: es ? "Actualizar gráfico" : "Refresh chart",
+    chart_expand_title: es ? "Expandir/contraer gráfico" : "Expand/collapse chart",
+    chart_mode_hint_title: es ? "p>63% COMPRAR • p<37% VENDER • si no MANTENER" : "p>63% BUY • p<37% SELL • otherwise HOLD",
+    price_source_title: es ? "Fuente de precio" : "Price source",
+    crypto_context_title: es ? "Contexto cripto" : "Crypto context",
+    signal_confidence_aria: es ? "Confianza de la señal" : "Signal confidence",
+    compare_help_title: es ? "¿Cómo leer esta sección?" : "How to read this section?",
+    compare_refresh_title: es ? "Actualizar comparación" : "Refresh comparison",
+    preds_btn_title: es ? "Últimas predicciones" : "Latest predictions",
+    pnl_btn_title: es ? "P&L y trades" : "P&L and trades",
+    stats_btn_title: es ? "Estadísticas de predicciones" : "Prediction stats",
+    snapshot_btn_title: es ? "Ver snapshot del sistema" : "View system snapshot",
+    clear_crypto_title: es ? "Borrar historial cripto" : "Clear crypto history",
+    news_refresh_title: es ? "Refrescar noticias" : "Refresh news",
+    image_status_title: es ? "Estado" : "Status",
+    image_refresh_title: es ? "Recargar galería" : "Reload gallery",
+    refresh_tree_title: es ? "Recargar árbol" : "Reload tree",
+    upload_zip_title: es ? "Subir proyecto ZIP" : "Upload ZIP project",
+    clone_repo_title: es ? "Clonar repo" : "Clone repo",
+    delete_project_title: es ? "Eliminar proyecto" : "Delete project",
+    ingest_log_title: es ? "Ver log de ingesta" : "View ingest log",
+    files_expand_title: es ? "Expandir Archivos" : "Expand Files",
+    ingest_status_title: es ? "Estado de ingesta" : "Ingest status",
+    copy_content_title: es ? "Copiar contenido" : "Copy content",
+    refresh_list_title: es ? "Actualizar lista" : "Refresh list",
+    close_aria: es ? "Cerrar" : "Close",
   };
   Object.entries(map).forEach(([key, text]) => {
     document.querySelectorAll(`[data-i18n='${key}']`).forEach((el) => {
       el.textContent = text;
     });
   });
+  document.querySelectorAll("[data-i18n-title]").forEach((el) => {
+    const key = el.getAttribute("data-i18n-title");
+    if (!key || !map[key]) return;
+    el.setAttribute("title", map[key]);
+  });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+    const key = el.getAttribute("data-i18n-placeholder");
+    if (!key || !map[key]) return;
+    el.setAttribute("placeholder", map[key]);
+  });
+  document.querySelectorAll("[data-i18n-aria-label]").forEach((el) => {
+    const key = el.getAttribute("data-i18n-aria-label");
+    if (!key || !map[key]) return;
+    el.setAttribute("aria-label", map[key]);
+  });
   if (dom.sendBtn) dom.sendBtn.textContent = map.send_btn;
+  if (dom.msgInput) dom.msgInput.placeholder = es ? "Escribe tu mensaje..." : "Type your message...";
+  if (dom.projectList) dom.projectList.title = es ? "Proyectos cargados/clonados" : "Uploaded/cloned projects";
+  if (dom.imageSteps) {
+    dom.imageSteps.title = es
+      ? "Iteraciones de generación: más pasos, más detalle y más tiempo."
+      : "Generation iterations: more steps means more detail and more time.";
+  }
+  if (dom.imageSeed) {
+    dom.imageSeed.placeholder = es ? "aleatoria" : "random";
+    dom.imageSeed.title = es
+      ? "Controla la variación: misma seed reproduce un resultado parecido."
+      : "Controls variation: same seed reproduces a similar output.";
+  }
+  if (dom.buyBtn) dom.buyBtn.title = es ? "Comprar (simulado, educativo)" : "Buy (simulated, educational)";
+  if (dom.sellBtn) dom.sellBtn.title = es ? "Vender (simulado, educativo)" : "Sell (simulated, educational)";
+  if (dom.predictionCompareHelp) {
+    dom.predictionCompareHelp.title = es
+      ? "Predicción vs. realidad: precisión y Δ promedio. BUY si p>63%, SELL si p<37%, HOLD en medio."
+      : "Prediction vs actual: accuracy and avg Δ. BUY if p>63%, SELL if p<37%, HOLD otherwise.";
+  }
+  if (dom.statsBtn) {
+    dom.statsBtn.title = es
+      ? "Precisión y movimiento promedio; mira la barra para entender aciertos."
+      : "Accuracy and average move; check the bar to interpret performance.";
+  }
+  if (dom.predsBtn) {
+    dom.predsBtn.title = es
+      ? "Últimas predicciones: qué se predijo y qué ocurrió."
+      : "Recent predictions: what we predicted vs what happened.";
+  }
+  if (dom.pnlBtn) {
+    dom.pnlBtn.title = es
+      ? "P&L de trades simulados (educativos)."
+      : "P&L from simulated trades (educational).";
+  }
 
   // security note
   if (dom.securityNote) {
@@ -882,37 +1116,37 @@ function localizeUI() {
 function localizeHelp() {
   const es = state.lang === LANG.ES;
   const map = {
-    help_title: es ? "🧭 Guía rápida de AEGIS" : "🧭 AEGIS quick guide",
-    hint_title: es ? "💡 Guía breve" : "💡 Quick tips",
+    hint_title: es ? "Guía breve" : "Quick tips",
+    hint_mode_chat: es ? "Chat" : "Chat",
+    hint_mode_web: es ? "Web" : "Web",
+    hint_mode_url: es ? "URL" : "URL",
+    hint_mode_crypto: es ? "Cripto" : "Crypto",
+    hint_mode_image: es ? "Imagen" : "Image",
     hint_chat: es
-      ? "💬 Chat: preguntas generales, debugging local o instrucciones paso a paso."
-      : "💬 Chat: general questions, local debugging, step-by-step help.",
+      ? "Preguntas generales, debugging local o instrucciones paso a paso."
+      : "General questions, local debugging, and step-by-step help.",
     hint_web: es
-      ? "🌐 Web: agrega web: cuando necesites fuentes recientes o enlaces citables."
-      : "🌐 Web: prefix web: when you need fresh sources or citations.",
+      ? "Agrega web: cuando necesites fuentes recientes o enlaces citables."
+      : "Add web: when you need fresh sources or citable links.",
     hint_url: es
-      ? "🔗 URL: usa url:https://... para leer y resumir un enlace específico."
-      : "🔗 URL: use url:https://... to read and summarize a specific link.",
+      ? "Usa url:https://... para leer y resumir un enlace específico."
+      : "Use url:https://... to read and summarize a specific link.",
     hint_crypto: es
-      ? "🪙 Cripto: activa el panel para predicciones, trades simulados y métricas P&L."
-      : "🪙 Crypto: enable the panel for predictions, simulated trades, and P&L metrics.",
+      ? "Activa el panel para predicciones, trades simulados y métricas P&L."
+      : "Enable the panel for predictions, simulated trades, and P&L metrics.",
     hint_image: es
-      ? "🖼️ Imagen: sube capturas y obtén OCR para explicar errores o textos."
-      : "🖼️ Image: upload screenshots to OCR and explain errors or text.",
+      ? "Sube capturas y obtén OCR para explicar errores o textos."
+      : "Upload screenshots and get OCR to explain errors or text.",
   };
 
   for (const [key, text] of Object.entries(map)) {
     document.querySelectorAll(`[data-i18n='${key}']`).forEach((el) => {
-      if (key.startsWith("hint_") && el.querySelector("span:nth-child(2)")) {
+      if (key.startsWith("hint_") && !key.startsWith("hint_mode_") && el.querySelector("span:nth-child(2)")) {
         el.querySelector("span:nth-child(2)").textContent = text;
       } else {
         el.textContent = text;
       }
     });
-  }
-
-  if (dom.helpBtn) {
-    dom.helpBtn.title = es ? "Guía rápida de herramientas" : "Quick tools guide";
   }
 }
 
@@ -932,6 +1166,45 @@ function setPending(on) {
 
 function toggleFilesExpand() {
   document.body.classList.toggle("files-wide");
+}
+
+function toggleSidebarVisibility() {
+  state.sidebarVisible = !state.sidebarVisible;
+  localStorage.setItem("aegis_sidebar_visible", state.sidebarVisible ? "1" : "0");
+  applyPanelVisibility();
+}
+
+function toggleChartVisibility() {
+  state.chartVisible = !state.chartVisible;
+  localStorage.setItem("aegis_chart_visible", state.chartVisible ? "1" : "0");
+  applyPanelVisibility();
+}
+
+function applyPanelVisibility() {
+  const chartVisible = !!state.chartVisible;
+  const sidebarVisible = !!state.sidebarVisible;
+  const es = state.lang === LANG.ES;
+
+  if (dom.chartPanel) dom.chartPanel.classList.toggle("chart-hidden", !chartVisible);
+  if (dom.appSidebar) dom.appSidebar.classList.toggle("sidebar-hidden", !sidebarVisible);
+  document.body.classList.toggle("chart-off", !chartVisible);
+  document.body.classList.toggle("sidebar-off", !sidebarVisible);
+
+  if (dom.chartExpandBtn) {
+    dom.chartExpandBtn.innerHTML = chartVisible ? '<i class="fas fa-eye-slash"></i>' : '<i class="fas fa-eye"></i>';
+    dom.chartExpandBtn.title = chartVisible
+      ? (es ? "Ocultar panel cripto" : "Hide crypto panel")
+      : (es ? "Mostrar panel cripto" : "Show crypto panel");
+    dom.chartExpandBtn.setAttribute("aria-pressed", String(!chartVisible));
+  }
+
+  if (dom.filesExpandBtn) {
+    dom.filesExpandBtn.innerHTML = sidebarVisible ? '<i class="fas fa-eye-slash"></i>' : '<i class="fas fa-eye"></i>';
+    dom.filesExpandBtn.title = sidebarVisible
+      ? (es ? "Ocultar panel de archivos/repos" : "Hide files/repos panel")
+      : (es ? "Mostrar panel de archivos/repos" : "Show files/repos panel");
+    dom.filesExpandBtn.setAttribute("aria-pressed", String(!sidebarVisible));
+  }
 }
 
 function registerAbortController(controller) {
@@ -999,18 +1272,9 @@ async function fetchWithTimeout(url, opts = {}, { timeout = CHAT_MAX_TIMEOUT_MS,
     const id = setTimeout(() => controller.abort(), timeout);
     try {
       await ensureAccessToken();
-      const keyToUse = (() => {
-        try {
-          const u = new URL(url, location.origin);
-          const p = u.pathname || "";
-          if (p.startsWith("/files/") || p.startsWith("/tools/")) {
-            return state.filesApiKey || state.apiKey;
-          }
-          return state.apiKey;
-        } catch {
-          return state.apiKey;
-        }
-      })();
+      const scope = authScopeForUrl(url);
+      const useFilesKey = scope === "files";
+      const keyToUse = cleanKey(useFilesKey ? (state.filesApiKey || state.apiKey) : state.apiKey);
       const merged = { ...opts };
       merged.headers = {
         ...(opts.headers || {}),
@@ -1018,10 +1282,24 @@ async function fetchWithTimeout(url, opts = {}, { timeout = CHAT_MAX_TIMEOUT_MS,
         ...(state.accessToken ? { Authorization: `Bearer ${state.accessToken}` } : {}),
       };
       const res = await fetch(url, { ...merged, signal: controller.signal });
-      if ((res.status === 401 || res.status === 403) && await tryRefreshAccessToken()) {
-        // retry once immediately with new token (no extra backoff)
-        merged.headers.Authorization = state.accessToken ? `Bearer ${state.accessToken}` : undefined;
-        return await fetch(url, { ...merged, signal: controller.signal });
+      if (res.status === 401 || res.status === 403) {
+        if (await tryRefreshAccessToken()) {
+          // retry once immediately with new token (no extra backoff)
+          if (state.accessToken) merged.headers.Authorization = `Bearer ${state.accessToken}`;
+          else delete merged.headers.Authorization;
+          const retried = await fetch(url, { ...merged, signal: controller.signal });
+          if (retried.status === 401 || retried.status === 403) {
+            await markAuthFailure(url, retried, { scope, keyToUse });
+          } else if (retried.ok) {
+            clearAuthFailure();
+          }
+          return retried;
+        }
+        await markAuthFailure(url, res, { scope, keyToUse });
+        return res;
+      }
+      if (res.ok) {
+        clearAuthFailure();
       }
       return res;
     } catch (err) {
@@ -1031,6 +1309,80 @@ async function fetchWithTimeout(url, opts = {}, { timeout = CHAT_MAX_TIMEOUT_MS,
       clearTimeout(id);
       unregisterAbortController(controller);
     }
+  }
+}
+
+function authScopeForUrl(url) {
+  try {
+    const u = new URL(url, location.origin);
+    const p = u.pathname || "";
+    return p.startsWith("/files/") || p.startsWith("/tools/") || p.startsWith("/image/") ? "files" : "main";
+  } catch {
+    return "main";
+  }
+}
+
+async function responseDetailSafe(res) {
+  try {
+    const clone = res.clone();
+    const data = await clone.json();
+    if (typeof data?.detail === "string") return data.detail;
+    if (typeof data?.error?.message === "string") return data.error.message;
+    if (typeof data?.error === "string") return data.error;
+    return "";
+  } catch {
+    try {
+      const text = (await res.clone().text()).trim();
+      return text.slice(0, 140);
+    } catch {
+      return "";
+    }
+  }
+}
+
+async function markAuthFailure(url, res, { scope, keyToUse } = {}) {
+  const detailRaw = await responseDetailSafe(res);
+  const detail = (detailRaw || "").replace(/\s+/g, " ").trim().slice(0, 110);
+  const next = {
+    url: String(url || ""),
+    scope: scope || authScopeForUrl(url),
+    status: Number(res?.status || 401),
+    hasKey: !!cleanKey(keyToUse || ""),
+    hasBearer: !!(state.accessToken || ""),
+    detail,
+    ts: Date.now(),
+  };
+  const prev = state.authDiag?.lastError;
+  state.authDiag.failures = Number(state.authDiag?.failures || 0) + 1;
+  state.authDiag.lastError = next;
+  if (
+    !prev
+    || prev.status !== next.status
+    || prev.scope !== next.scope
+    || prev.detail !== next.detail
+  ) {
+    updateStatusCenter();
+  }
+}
+
+function clearAuthFailure() {
+  if (!state.authDiag) return;
+  state.authDiag.lastOkAt = Date.now();
+  if (state.authDiag.lastError) {
+    state.authDiag.lastError = null;
+    updateStatusCenter();
+  }
+}
+
+function authDebugForUrl(url) {
+  try {
+    const scope = authScopeForUrl(url);
+    const filesScope = scope === "files";
+    const key = cleanKey(filesScope ? (state.filesApiKey || state.apiKey) : state.apiKey);
+    const hasBearer = !!(state.accessToken || "");
+    return `${scope}:${key ? "key" : "no-key"},bearer:${hasBearer ? "yes" : "no"}`;
+  } catch {
+    return "unknown";
   }
 }
 
@@ -1099,13 +1451,14 @@ function tokenExpiresSoon() {
 }
 
 async function fetchNewAccessToken() {
-  if (!state.apiKey) return false;
+  const key = cleanKey(state.apiKey);
+  if (!key) return false;
   try {
     const res = await fetch(endpoints.authToken, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-API-Key": state.apiKey,
+        "X-API-Key": key,
       },
       body: JSON.stringify({ scopes: ["chat", "files", "crypto", "admin"], refresh: true }),
     });
@@ -1122,13 +1475,14 @@ async function fetchNewAccessToken() {
 }
 
 async function tryRefreshAccessToken() {
-  if (!state.refreshToken || !state.apiKey) return false;
+  const key = cleanKey(state.apiKey);
+  if (!state.refreshToken || !key) return false;
   try {
     const res = await fetch(endpoints.authRefresh, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-API-Key": state.apiKey,
+        "X-API-Key": key,
       },
       body: JSON.stringify({ refresh_token: state.refreshToken }),
     });
@@ -1477,6 +1831,126 @@ async function analyzeImage(file) {
   appendBubble(text, "bot", false);
 }
 
+/* ------------------------- IMAGE GENERATION (DEMO) ------------------------- */
+
+function setImageStatus(text, kind = "muted") {
+  if (!dom.imageStatus) return;
+  dom.imageStatus.textContent = text || "—";
+  const cls =
+    kind === "warn" ? "pill sell" :
+    kind === "success" ? "pill buy" :
+    "pill muted";
+  dom.imageStatus.className = cls;
+}
+
+async function generateImageFromUI() {
+  if (!dom.imagePrompt) return;
+  const prompt = dom.imagePrompt.value.trim();
+  const negative = dom.imageNegative?.value.trim() || "";
+  const steps = parseInt(dom.imageSteps?.value || "20", 10) || 20;
+  const seed = dom.imageSeed?.value ? parseInt(dom.imageSeed.value, 10) : null;
+  const apiKeyForImage = cleanKey(state.filesApiKey || state.apiKey);
+  if (!apiKeyForImage && !state.accessToken) {
+    setImageStatus(state.lang === LANG.ES ? "Falta API key (icono llave)." : "Missing API key (key icon).", "warn");
+    return;
+  }
+  if (!prompt) {
+    setImageStatus(state.lang === LANG.ES ? "Falta prompt" : "Prompt required", "warn");
+    return;
+  }
+  setImageStatus(state.lang === LANG.ES ? "Generando..." : "Generating...", "muted");
+  try {
+    const body = { prompt, negative_prompt: negative || undefined, steps, seed };
+    const res = await fetchWithTimeout(endpoints.imageGenerate, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    }, { timeout: 60000, retries: 0 });
+    const data = await safeJson(res);
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
+        const dbg = `auth=${authDebugForUrl(endpoints.imageGenerate)}`;
+        setImageStatus(
+          state.lang === LANG.ES
+            ? `API key inválida/faltante (usa el icono llave). ${dbg}`
+            : `Invalid/missing API key (use the key icon). ${dbg}`,
+          "warn"
+        );
+        return;
+      }
+      setImageStatus(data?.detail || data?.error || "Error", "warn");
+      return;
+    }
+    if (data?.fallback_used) {
+      const msg = state.lang === LANG.ES
+        ? `Fallback local (${data?.backend_error || "backend no disponible"})`
+        : `Local fallback (${data?.backend_error || "backend unavailable"})`;
+      setImageStatus(msg, "warn");
+    } else {
+      setImageStatus(state.lang === LANG.ES ? "Listo" : "Done", "success");
+    }
+    if (dom.imagePrompt) dom.imagePrompt.value = "";
+    loadRecentImages();
+  } catch (err) {
+    console.error(err);
+    setImageStatus("Error", "warn");
+  }
+}
+
+async function loadRecentImages() {
+  if (!dom.imageGallery) return;
+  try {
+    const res = await fetchWithTimeout(endpoints.imageRecent, {}, { timeout: 10000, retries: 0 });
+    const data = await safeJson(res);
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
+        const dbg = `auth=${authDebugForUrl(endpoints.imageRecent)}`;
+        setImageStatus(
+          state.lang === LANG.ES
+            ? `API key inválida/faltante (usa el icono llave). ${dbg}`
+            : `Invalid/missing API key (use the key icon). ${dbg}`,
+          "warn"
+        );
+        return;
+      }
+      setImageStatus(data?.detail || data?.error || "Error", "warn");
+      return;
+    }
+    renderImageGallery(Array.isArray(data) ? data : []);
+    setImageStatus(state.lang === LANG.ES ? "Listo" : "Ready", "muted");
+  } catch (err) {
+    console.error(err);
+    setImageStatus("Error", "warn");
+  }
+}
+
+function renderImageGallery(items) {
+  if (!dom.imageGallery) return;
+  dom.imageGallery.innerHTML = "";
+  if (!items.length) {
+    dom.imageGallery.textContent = state.lang === LANG.ES ? "Sin imágenes recientes." : "No recent images.";
+    return;
+  }
+  items.forEach((item) => {
+    const card = el("div", { class: "image-card" });
+    const path = item.path || item.image_path;
+    if (path && path.endsWith(".png")) {
+      const img = document.createElement("img");
+      img.src = `/${path}`;
+      img.alt = item.prompt || "generated";
+      card.appendChild(img);
+    }
+    const meta = el("div", { class: "image-meta", text: (item.prompt || "").slice(0, 80) });
+    card.appendChild(meta);
+    const modeTag = item?.fallback_used ? " • fallback" : (item?.backend_ok ? " • backend" : "");
+    const info = el("div", { class: "image-meta", text: `seed: ${item.seed ?? "rnd"} • steps: ${item.steps ?? "-"}${modeTag}` });
+    card.appendChild(info);
+    dom.imageGallery.appendChild(card);
+  });
+}
+
 /* ------------------------- CRYPTO: MODELS / PREDICT / TRADE ------------------------- */
 
 function setTradeStatus(text, isError = false) {
@@ -1714,11 +2188,34 @@ async function loadCryptoPrediction() {
     const px = data?.current_price ?? data?.price ?? "—";
     const probText = typeof prob === "number" ? `${(prob * 100).toFixed(1)}%` : "—";
 
+    state.lastPrediction = {
+      symbol,
+      horizon,
+      model,
+      prob,
+      px,
+      decision,
+      news_sentiment: data?.additional_info?.news_sentiment ?? null,
+      news_count: data?.additional_info?.n_news_used ?? null,
+      p_base: data?.additional_info?.probability_base ?? null,
+      p_final: prob,
+    };
+
     setTradeStatus(
       state.lang === LANG.ES
         ? `Señal: ${decision} • p=${probText} • px=${px}`
         : `Signal: ${decision} • p=${probText} • px=${px}`
     );
+    const priceSource = data?.additional_info?.price_source || data?.price_source || "demo";
+    const context = data?.additional_info?.context || null;
+    updateCryptoBadges({
+      priceSource,
+      model,
+      horizon,
+      probText,
+      px,
+      context,
+    });
   } catch {}
 }
 
@@ -1766,6 +2263,41 @@ function updateSignalBar(decision, prob) {
       ? `Confianza ${pct.toFixed(1)}% • Regla: BUY si >63%, SELL si <37%, HOLD en medio`
       : `Confidence ${pct.toFixed(1)}% • Rule: BUY if >63%, SELL if <37%, HOLD otherwise`
   );
+}
+
+function updateCryptoBadges({ priceSource, model, horizon, probText, px, context }) {
+  if (dom.priceSourceBadge) {
+    dom.priceSourceBadge.textContent = (priceSource || "demo").toUpperCase();
+    dom.priceSourceBadge.classList.toggle("pill-live", priceSource === "binance" || priceSource === "coingecko");
+    dom.priceSourceBadge.classList.toggle("pill-demo", !(priceSource === "binance" || priceSource === "coingecko"));
+    dom.priceSourceBadge.title = state.lang === LANG.ES
+      ? `Fuente de precio: ${priceSource || "demo"}`
+      : `Price source: ${priceSource || "demo"}`;
+  }
+  if (dom.cryptoContextPill) {
+    const sent = state.lastPrediction?.news_sentiment ?? null;
+    const newsCount = state.lastPrediction?.news_count ?? null;
+    const pBase = state.lastPrediction?.p_base;
+    const pFinal = state.lastPrediction?.p_final ?? null;
+    let txt = context || `${model || "ensemble"} • H=${horizon || "-"} • p=${probText || "—"} • px=${px ?? "—"}`;
+    if (pBase != null && pFinal != null && Math.abs(pFinal - pBase) > 0.005) {
+      txt += ` • p_adj ${formatProb(pBase)}→${formatProb(pFinal)}`;
+    }
+    dom.cryptoContextPill.textContent = txt;
+    if (sent !== null && dom.cryptoContextPill.querySelector) {
+      let badge = dom.cryptoContextPill.querySelector(".pill-sentiment");
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "pill-sentiment neutral";
+        dom.cryptoContextPill.appendChild(badge);
+      }
+      badge.classList.remove("pos", "neg", "neutral");
+      const cls = sent > 0.05 ? "pos" : sent < -0.05 ? "neg" : "neutral";
+      badge.classList.add(cls);
+      badge.textContent = `${sent > 0.05 ? "+" : sent < -0.05 ? "-" : "0"}${newsCount ? ` (${newsCount})` : ""}`;
+    }
+    dom.cryptoContextPill.title = txt;
+  }
 }
 
 function parseTradeCommand(text) {
@@ -2561,6 +3093,8 @@ function renderStatsPanel(data) {
   const avg = Number(data.avg_delta ?? data.avg ?? data.avg_move);
   const wins = Number(data.win_rate ?? data.wins);
   const count = Number(data.count ?? data.samples);
+  const accNews = Number(data.with_news_accuracy ?? NaN);
+  const accNoNews = Number(data.without_news_accuracy ?? NaN);
 
   const grid = el("div", { class: "kpi-grid" });
   const makeKpi = (label, value, hint, cls = "") => {
@@ -2575,6 +3109,8 @@ function renderStatsPanel(data) {
   if (Number.isFinite(wins)) grid.appendChild(makeKpi(es ? "Win rate" : "Win rate", `${(wins * 100).toFixed(1)}%`, es ? "Trades con Δ>0 para BUY / Δ<0 para SELL" : "BUY Δ>0, SELL Δ<0"));
   if (Number.isFinite(avg)) grid.appendChild(makeKpi("Δ avg", `${avg.toFixed(3)}%`, es ? "Movimiento promedio" : "Average move"));
   if (Number.isFinite(count)) grid.appendChild(makeKpi(es ? "Muestras" : "Samples", String(count), es ? "Predicciones evaluadas" : "Evaluated predictions"));
+  if (Number.isFinite(accNews)) grid.appendChild(makeKpi(es ? "Precisión con news" : "Accuracy w/news", `${(accNews * 100).toFixed(1)}%`, es ? "Predicciones con ajuste de noticias" : "Predictions with news adjustment"));
+  if (Number.isFinite(accNoNews)) grid.appendChild(makeKpi(es ? "Precisión sin news" : "Accuracy no news", `${(accNoNews * 100).toFixed(1)}%`, es ? "Predicciones sin noticias" : "Predictions without news"));
 
   if (!grid.childNodes.length) {
     dom.sourcesContent.appendChild(el("div", { class: "sources-empty", text: es ? "Sin datos de stats." : "No stats data." }));

@@ -30,15 +30,52 @@ from app.services.crypto_prediction_log import (
 )
 from app.services.crypto_trade_log import clear_trades, compute_pnl, list_trades, log_trade
 
-try:
-    import pandas as pd  # type: ignore
-except Exception:  # pragma: no cover
-    pd = None  # type: ignore
+_pd = None
+_meta_module = None
 
-try:
-    from app.core import meta as meta_module  # type: ignore
-except Exception:  # pragma: no cover
-    meta_module = None  # type: ignore
+
+def _upsert_news_items(symbol: str, items: List[dict], window_minutes: int = 120) -> int:
+    try:
+        from app.services.news_store import upsert_news_items
+
+        return upsert_news_items(symbol, items, window_minutes=window_minutes)
+    except Exception:
+        return 0
+
+
+def _fetch_recent_news(symbol: str, minutes: int = 90, limit: int = 12) -> List[dict]:
+    try:
+        from app.services.news_store import fetch_recent_news
+
+        return fetch_recent_news(symbol, minutes=minutes, limit=limit)
+    except Exception:
+        return []
+
+
+def _get_pandas():
+    global _pd
+    if _pd is not None:
+        return _pd
+    try:
+        import pandas as pd  # type: ignore
+
+        _pd = pd
+        return _pd
+    except Exception:  # pragma: no cover
+        return None
+
+
+def _get_meta_module():
+    global _meta_module
+    if _meta_module is not None:
+        return _meta_module
+    try:
+        from app.core import meta as meta_mod  # type: ignore
+
+        _meta_module = meta_mod
+        return _meta_module
+    except Exception:  # pragma: no cover
+        return None
 
 router = APIRouter(prefix="/crypto", tags=["crypto"], dependencies=[Depends(require_api_key)])
 logger = logging.getLogger(__name__)
@@ -96,6 +133,9 @@ def _coingecko_spot_price(symbol: str) -> Optional[float]:
 
 def _binance_spot_price(symbol: str) -> Optional[float]:
     pair = symbol.upper().strip()
+    # best-effort: si no trae quote, intenta agregar USDT
+    if not pair.endswith(("USDT", "BUSD", "USDC", "FDUSD", "TUSD", "BTC", "ETH")):
+        pair = f"{pair}USDT"
     now = time.time()
     if PRICE_CACHE_TTL > 0:
         with _price_lock:
@@ -136,6 +176,52 @@ def _binance_spot_price(symbol: str) -> Optional[float]:
         if source:
             _price_source[pair] = source
     return price_val
+
+
+# ---------------------------------------------------------------------------
+# Light sentiment for news (offline-safe keyword heuristic)
+# ---------------------------------------------------------------------------
+
+POS_WORDS = {
+    "rise",
+    "surge",
+    "bull",
+    "gain",
+    "positive",
+    "beat",
+    "record",
+    "upgrade",
+    "approve",
+    "strong",
+    "growth",
+}
+
+NEG_WORDS = {
+    "fall",
+    "drop",
+    "bear",
+    "loss",
+    "negative",
+    "miss",
+    "hack",
+    "ban",
+    "lawsuit",
+    "fine",
+    "weak",
+    "decline",
+}
+
+
+def _sentiment_score(text: str | None) -> float:
+    if not text:
+        return 0.0
+    t = text.lower()
+    pos = sum(w in t for w in POS_WORDS)
+    neg = sum(w in t for w in NEG_WORDS)
+    if pos == 0 and neg == 0:
+        return 0.0
+    score = (pos - neg) / max(1, pos + neg)
+    return max(-0.25, min(0.25, score))
 
 
 def _binance_signed_request(
@@ -282,6 +368,7 @@ def predict(req: PredictRequest) -> PredictResponse:
         raise HTTPException(status_code=400, detail="Unsupported model")
 
     live_price = _binance_spot_price(sym)
+    price_source = _price_source.get(sym, None)
     price_source = _price_source.get(sym, "demo" if live_price is None else "binance")
     digest = int(hashlib.sha256(f"{sym}:{req.horizon_minutes}".encode()).hexdigest(), 16)
     base = 100 + (digest % 500)
@@ -290,6 +377,7 @@ def predict(req: PredictRequest) -> PredictResponse:
 
     rng = random.Random(digest ^ 0xABCDEF)
     p_up = max(0.05, min(0.95, rng.random()))
+    p_base = p_up  # guardamos la prob. antes de cualquier ajuste
     delta = (rng.random() - 0.5) * 2.0
     predicted = round(current * (1 + delta * 0.01), 2)
 
@@ -317,7 +405,35 @@ def predict(req: PredictRequest) -> PredictResponse:
         decision = "BUY" if p_up > 0.63 else "SELL" if p_up < 0.37 else "HOLD"
 
     news_payload = fetch_crypto_news(sym)
-    news_items = news_payload.get("items", [])[:3] if news_payload else []
+    news_items = news_payload.get("items", [])[:6] if news_payload else []
+
+    # persist news (dedupe by hash)
+    try:
+        _upsert_news_items(sym, news_items, window_minutes=180)
+    except Exception:
+        logger.debug("Failed to upsert news", exc_info=True)
+
+    # fetch a recent window for sentiment/adjustment (DB, deduped)
+    try:
+        recent_news = _fetch_recent_news(sym, minutes=90, limit=12)
+    except Exception:
+        recent_news = []
+
+    if recent_news:
+        news_items = recent_news
+
+    # Ajuste por sentimiento de noticias (ligero y seguro)
+    news_sentiment = None
+    n_news_used = 0
+    if news_items:
+        sentiments = [_sentiment_score((n.get("title") or "") + " " + (n.get("summary") or "")) for n in news_items]
+        sentiments = [s for s in sentiments if s is not None]
+        n_news_used = len(sentiments)
+        if n_news_used >= 1:
+            news_sentiment = sum(sentiments) / n_news_used
+            p_up = max(0.05, min(0.95, p_up + news_sentiment * 0.08))
+            predicted = round(current * (1 + (p_up - 0.5) * 0.02), 2)
+            decision = "BUY" if p_up > 0.63 else "SELL" if p_up < 0.37 else "HOLD"
 
     log_id: Optional[str] = None
     if req.save:
@@ -327,9 +443,13 @@ def predict(req: PredictRequest) -> PredictResponse:
                 "horizon_minutes": req.horizon_minutes,
                 "model": requested_model,
                 "probability_up": p_up,
+                "probability_base": p_base,
                 "decision": decision,
                 "current_price": current,
+                "price_source": _price_source.get(sym, None),
                 "news": news_items,
+                "news_sentiment": news_sentiment,
+                "n_news_used": n_news_used,
                 "ts": int(time.time()),
             }
         )
@@ -355,11 +475,15 @@ def predict(req: PredictRequest) -> PredictResponse:
                         "horizon_minutes": req.horizon_minutes,
                         "decision": decision,
                         "probability_up": p_up,
+                        "probability_base": p_base,
                         "model": requested_model,
                         "predicted_price": current,
                         "actual_price": live,
                         "delta_pct": delta_pct,
                         "hit": hit,
+                        "price_source": _price_source.get(sym, None),
+                        "news_sentiment": news_sentiment,
+                        "n_news_used": n_news_used,
                     }
                 )
             except Exception:
@@ -384,6 +508,7 @@ def predict(req: PredictRequest) -> PredictResponse:
             "news_provider": news_payload.get("provider") if news_payload else None,
             "log_id": log_id,
             "price_source": price_source,
+            "news_sentiment": news_sentiment,
         },
         news=news_items,
     )
@@ -732,6 +857,8 @@ def live_enriched_snapshot(
     symbols: str = Query("bitcoin:BTCUSDT,ethereum:ETHUSDT", description="coingecko_id:binance_pair"),
     save_to_csv: bool = Query(False),
 ) -> Dict[str, Any]:
+    pd = _get_pandas()
+    meta_module = _get_meta_module()
     specs: List[str] = [s.strip() for s in symbols.split(",") if s.strip()]
     if not specs:
         raise HTTPException(status_code=400, detail="No valid symbols provided.")

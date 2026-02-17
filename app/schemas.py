@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 
 class Language(str, Enum):
@@ -27,11 +27,12 @@ class ChatRequest(BaseModel):
     )
     lang: Optional[Language] = Field(None, description="'es' or 'en' (optional)")
 
-    @validator("conversation_id")
-    def validate_conv_id(cls, v: Optional[str], values: Dict[str, Any]) -> Optional[str]:
+    @field_validator("conversation_id")
+    @classmethod
+    def validate_conv_id(cls, v: Optional[str], info: ValidationInfo) -> Optional[str]:
         if not v:
             return None
-        if not values.get("use_existing"):
+        if not (info.data or {}).get("use_existing"):
             return None
         try:
             uuid.UUID(str(v))
@@ -39,18 +40,18 @@ class ChatRequest(BaseModel):
         except Exception as exc:  # noqa: BLE001
             raise ValueError("conversation_id must be a valid UUID string") from exc
 
-    class Config:
-        use_enum_values = True
-        anystr_strip_whitespace = True
-        str_strip_whitespace = True
-        validate_assignment = True
-        schema_extra = {
+    model_config = ConfigDict(
+        use_enum_values=True,
+        str_strip_whitespace=True,
+        validate_assignment=True,
+        json_schema_extra={
             "example": {
                 "message": "¿Cuánto vale un dólar hoy?",
                 "conversation_id": None,
                 "lang": "es",
             }
-        }
+        },
+    )
 
 
 class ChatResponse(BaseModel):
@@ -65,7 +66,8 @@ class ChatResponse(BaseModel):
         None, description="Optional list of search sources [{'title','snippet','link'}]"
     )
 
-    @validator("conversation_id")
+    @field_validator("conversation_id")
+    @classmethod
     def validate_conv_id_resp(cls, v: Optional[str]) -> Optional[str]:
         if not v:
             return None
@@ -75,11 +77,10 @@ class ChatResponse(BaseModel):
         except Exception as exc:  # noqa: BLE001
             raise ValueError("conversation_id must be a valid UUID string") from exc
 
-    class Config:
-        anystr_strip_whitespace = True
-        str_strip_whitespace = True
-        validate_assignment = True
-        schema_extra = {
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        validate_assignment=True,
+        json_schema_extra={
             "example": {
                 "response": "Hoy el dólar está en X COP. (Fuente: ejemplo.com)",
                 "conversation_id": "23b7afdb-1acc-4c9b-befc-add6df189070",
@@ -92,7 +93,8 @@ class ChatResponse(BaseModel):
                     }
                 ],
             }
-        }
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

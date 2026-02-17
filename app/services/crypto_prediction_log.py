@@ -136,11 +136,22 @@ def recent_stats(limit: int = 100) -> Dict[str, Any]:
         for m, v in per_model.items()
     }
 
+    with_news = [o for o in outs if o.get("news_sentiment") is not None]
+    without_news = [o for o in outs if o.get("news_sentiment") is None]
+
+    def _acc(xs):
+        hits_local = [x for x in xs if x.get("hit") is True]
+        return len(hits_local) / len(xs) if xs else None
+
     return {
         "count": len(outs),
         "accuracy": acc,
         "avg_delta_pct": avg_delta,
         "per_model": per_model_stats,
+        "with_news_accuracy": _acc(with_news),
+        "without_news_accuracy": _acc(without_news),
+        "with_news_count": len(with_news),
+        "without_news_count": len(without_news),
     }
 
 

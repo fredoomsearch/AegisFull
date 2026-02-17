@@ -27,9 +27,6 @@ from app.api.files import router as files_router
 from app.db.base import engine, init_db
 from app.services.web_search import start_background_warmup
 
-import app.db.models  # noqa: F401  # register models
-
-
 logger = logging.getLogger("aegis.main")
 if not logger.handlers:
     logging.basicConfig(
@@ -195,6 +192,13 @@ if UI_DIR.exists():
 else:
     logger.warning("[main] UI_DIR does not exist: %s", UI_DIR)
 
+# Serve data/ (for generated images/logs) read-only
+DATA_DIR = BASE_DIR / "data"
+if DATA_DIR.exists():
+    app.mount("/data", StaticFiles(directory=str(DATA_DIR), html=False), name="data-static")
+else:
+    logger.warning("[main] DATA_DIR does not exist: %s", DATA_DIR)
+
 FAVICON_PATH = UI_DIR / "urlimg.png"
 
 
@@ -265,6 +269,8 @@ def on_startup() -> None:
     if DISABLE_DB:
         logger.info("[main] DB init skipped (AEGIS_DISABLE_DB=1).")
     else:
+        import app.db.models  # noqa: F401  # register models lazily
+
         logger.info("[main] Initializing DB...")
         init_db(engine)
         logger.info("[main] Database ready.")

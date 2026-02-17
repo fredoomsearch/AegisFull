@@ -15,11 +15,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import URL, make_url
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.core.config import settings
 from app.db.models import Base  # side-effect import to register models
 
 logger = logging.getLogger(__name__)
+DISABLE_DB = (os.getenv("AEGIS_DISABLE_DB", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 # ---------------------------------------------------------
@@ -30,6 +32,9 @@ def _build_database_url() -> str:
     raw = (os.getenv("DATABASE_URL") or settings.DB_URL or "").strip()
     if raw:
         return raw
+    if DISABLE_DB:
+        # Keep imports/startup working in no-DB mode (local demos, smoke tests).
+        return "sqlite+pysqlite:///:memory:"
 
     host = os.getenv("POSTGRES_HOST") or os.getenv("PGHOST") or ""
     db = os.getenv("POSTGRES_DB") or os.getenv("PGDATABASE") or ""
@@ -55,29 +60,38 @@ def _build_database_url() -> str:
 def _engine_params(db_url: str) -> tuple[URL, dict[str, Any]]:
     url_obj = make_url(db_url)
     backend = url_obj.get_backend_name()
-    if backend not in {"postgresql", "postgres"}:
-        raise ValueError(f"Unsupported backend '{backend}'. Only PostgreSQL URLs are allowed.")
-
     engine_kwargs: dict[str, Any] = {
         "future": True,
-        "pool_pre_ping": True,
         "echo": (os.getenv("SQL_ECHO") or "").lower() in {"1", "true", "yes", "on"},
     }
 
-    pool_size = int(os.getenv("AEGIS_DB_POOL_SIZE", "5") or "5")
-    max_overflow = int(os.getenv("AEGIS_DB_MAX_OVERFLOW", "10") or "10")
-    pool_timeout = int(os.getenv("AEGIS_DB_POOL_TIMEOUT", "30") or "30")
-    pool_recycle = int(os.getenv("AEGIS_DB_POOL_RECYCLE", "1800") or "1800")
+    if backend in {"postgresql", "postgres"}:
+        engine_kwargs["pool_pre_ping"] = True
+        pool_size = int(os.getenv("AEGIS_DB_POOL_SIZE", "5") or "5")
+        max_overflow = int(os.getenv("AEGIS_DB_MAX_OVERFLOW", "10") or "10")
+        pool_timeout = int(os.getenv("AEGIS_DB_POOL_TIMEOUT", "30") or "30")
+        pool_recycle = int(os.getenv("AEGIS_DB_POOL_RECYCLE", "1800") or "1800")
 
-    engine_kwargs.update(
-        {
-            "pool_size": pool_size,
-            "max_overflow": max_overflow,
-            "pool_timeout": pool_timeout,
-            "pool_recycle": pool_recycle,
-        }
+        engine_kwargs.update(
+            {
+                "pool_size": pool_size,
+                "max_overflow": max_overflow,
+                "pool_timeout": pool_timeout,
+                "pool_recycle": pool_recycle,
+            }
+        )
+        return url_obj, engine_kwargs
+
+    if backend == "sqlite" and DISABLE_DB:
+        engine_kwargs["connect_args"] = {"check_same_thread": False}
+        if (url_obj.database or "").strip() in {"", ":memory:"}:
+            # Single in-memory connection shared across sessions.
+            engine_kwargs["poolclass"] = StaticPool
+        return url_obj, engine_kwargs
+
+    raise ValueError(
+        f"Unsupported backend '{backend}'. Only PostgreSQL is allowed unless AEGIS_DISABLE_DB=1."
     )
-    return url_obj, engine_kwargs
 
 
 DATABASE_URL: str = _build_database_url()

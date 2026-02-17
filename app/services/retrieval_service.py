@@ -13,8 +13,9 @@ import hashlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
-from threading import Event, Lock, Thread
+from threading import Event, RLock, Thread
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -72,7 +73,9 @@ META_FILE = INDEX_DIR / "metadata.json"
 
 _index: Any = None
 _meta: Dict[str, Any] = {"ids": [], "meta": {}}
-_state_lock = Lock()
+# Re-entrant: add_documents() can call _save_index() while already holding the lock.
+_state_lock = RLock()
+_state_loaded = False
 
 
 def _ensure_index_dir() -> None:
@@ -173,19 +176,15 @@ def _create_index():
 
 
 def _load_index() -> None:
-    global _index, _meta
+    global _index, _meta, _state_loaded
     with _state_lock:
-        if _index is not None:
+        if _state_loaded:
             return
 
         _ensure_index_dir()
-        if faiss is None:
-            logger.debug("_load_index skipped: faiss not available")
-            return
 
-        if INDEX_FILE.exists() and META_FILE.exists():
+        if META_FILE.exists():
             try:
-                _index = faiss.read_index(str(INDEX_FILE))
                 with META_FILE.open("r", encoding="utf-8") as f:
                     loaded_meta = json.load(f)
                 ids = loaded_meta.get("ids") or []
@@ -196,11 +195,21 @@ def _load_index() -> None:
                 _meta = {"ids": ids, "meta": meta_map}
                 if dim is not None:
                     _meta["dim"] = dim
-                logger.info(
-                    "Loaded FAISS index (%d vectors, dim=%s)",
-                    len(ids),
-                    dim or "unknown",
-                )
+                logger.info("Loaded retrieval metadata (%d chunks, dim=%s)", len(ids), dim or "unknown")
+            except Exception as e:  # noqa: BLE001
+                logger.exception("Failed to load retrieval metadata; will recreate. %s", e)
+                _meta = {"ids": [], "meta": {}}
+
+        if faiss is None:
+            _index = None
+            _state_loaded = True
+            logger.info("FAISS unavailable; retrieval running in lexical-only mode.")
+            return
+
+        if INDEX_FILE.exists():
+            try:
+                _index = faiss.read_index(str(INDEX_FILE))
+                logger.info("Loaded FAISS index from %s", INDEX_FILE)
                 try:
                     idx_dim = _index.d  # type: ignore[attr-defined]
                 except Exception:
@@ -212,9 +221,11 @@ def _load_index() -> None:
                         idx_dim,
                         target_dim,
                     )
+                _state_loaded = True
                 return
             except Exception as e:  # noqa: BLE001
-                logger.exception("Failed to load FAISS index/metadata; will recreate. %s", e)
+                logger.exception("Failed to load FAISS index; will recreate. %s", e)
+                _index = None
 
         dim = _current_dim()
         if dim is None:
@@ -222,7 +233,7 @@ def _load_index() -> None:
                 "EMBEDDING_DIM not set; deferring FAISS index init until embeddings are available."
             )
             _index = None
-            _meta = {"ids": [], "meta": {}}
+            _state_loaded = True
             return
 
         try:
@@ -233,23 +244,23 @@ def _load_index() -> None:
                 e,
             )
             _index = None
-            _meta = {"ids": [], "meta": {}}
+            _state_loaded = True
             return
 
-        _meta = {"ids": [], "meta": {}}
+        if not isinstance(_meta, dict):
+            _meta = {"ids": [], "meta": {}}
         _meta["dim"] = int(dim)
         logger.info("Initialized empty FAISS index and metadata.")
+        _state_loaded = True
 
 
 def _save_index() -> None:
     global _index, _meta
     with _state_lock:
-        if _index is None or faiss is None:
-            logger.debug("_save_index: index not initialized or faiss missing")
-            return
         try:
             _ensure_index_dir()
-            faiss.write_index(_index, str(INDEX_FILE))
+            if _index is not None and faiss is not None:
+                faiss.write_index(_index, str(INDEX_FILE))
             dim = _current_dim()
             if dim is not None:
                 _meta["dim"] = int(dim)
@@ -292,20 +303,127 @@ def chunk_text(text: str, chunk_size: int = 1200, overlap: int = 200) -> List[st
     return chunks
 
 
+def _is_path_like_query(text: str) -> bool:
+    t = (text or "").lower()
+    if not t:
+        return False
+    if "/" in text or "\\" in text:
+        return True
+    if "data/uploads" in t or "path" in t or "ruta" in t or "archivo" in t or "file" in t:
+        return True
+    if re.search(r"\b[\w.-]+\.(py|js|ts|tsx|jsx|md|txt|json|yml|yaml|html|css|sql|ini|toml)\b", t):
+        return True
+    return False
+
+
+def _lexical_path_matches(
+    text: str,
+    ids: List[str],
+    meta_map: Dict[str, Dict[str, str]],
+    top_k: int,
+) -> List[dict]:
+    """
+    Fallback retrieval for direct path/file questions.
+    Useful when user asks "what is inside /data/uploads/...".
+    """
+    q = (text or "").strip().lower()
+    if not q:
+        return []
+
+    tokens = [tok for tok in re.split(r"[^a-zA-Z0-9_./-]+", q) if len(tok) >= 3]
+    scored: List[Tuple[float, dict]] = []
+    for cid in ids:
+        m = meta_map.get(cid) or {}
+        src = (m.get("source") or "").lower()
+        body = (m.get("text") or "").lower()
+        if not src:
+            continue
+
+        score = 0.0
+        if q in src:
+            score += 100.0
+        for tok in tokens:
+            if tok in src:
+                score += 6.0
+            elif tok in body:
+                score += 1.0
+        if score <= 0:
+            continue
+        scored.append(
+            (
+                score,
+                {
+                    "source": m.get("source"),
+                    "text": m.get("text"),
+                    "score": float(score),
+                },
+            )
+        )
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [row for _, row in scored[: max(1, top_k)]]
+
+
+def _lexical_text_matches(
+    text: str,
+    ids: List[str],
+    meta_map: Dict[str, Dict[str, str]],
+    top_k: int,
+) -> List[dict]:
+    q = (text or "").strip().lower()
+    if not q:
+        return []
+
+    tokens = [tok for tok in re.split(r"[^a-zA-Z0-9_./-]+", q) if len(tok) >= 2]
+    scored: List[Tuple[float, dict]] = []
+    for cid in ids:
+        m = meta_map.get(cid) or {}
+        src = (m.get("source") or "").lower()
+        body = (m.get("text") or "").lower()
+        if not src and not body:
+            continue
+
+        score = 0.0
+        if q and q in body:
+            score += 40.0
+        if q and q in src:
+            score += 30.0
+        for tok in tokens:
+            if tok in src:
+                score += 4.0
+            if tok in body:
+                score += 2.0
+        if score <= 0:
+            continue
+        scored.append(
+            (
+                score,
+                {
+                    "source": m.get("source"),
+                    "text": m.get("text"),
+                    "score": float(score),
+                },
+            )
+        )
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [row for _, row in scored[: max(1, top_k)]]
+
+
 def add_documents(docs: List[Tuple[str, str]]) -> int:
     global _index, _meta, EMBEDDING_DIM
-
-    if faiss is None:
-        raise RuntimeError("faiss not installed; cannot add documents")
 
     _load_index()
 
     to_embed: List[str] = []
     metas: List[Tuple[str, Dict[str, str]]] = []
     existing_meta: Dict[str, Dict[str, str]] = _meta.get("meta", {})  # type: ignore[assignment]
+    duplicate_count = 0
+    empty_count = 0
 
     for source, text in docs:
         if not text:
+            empty_count += 1
             continue
         for chunk in chunk_text(text):
             if not chunk:
@@ -313,13 +431,36 @@ def add_documents(docs: List[Tuple[str, str]]) -> int:
             chunk_sha = hashlib.sha1(chunk.encode("utf-8")).hexdigest()
             chunk_id = hashlib.sha1((str(source) + chunk_sha).encode("utf-8")).hexdigest()
             if chunk_id in existing_meta:
+                duplicate_count += 1
                 continue
             metas.append((chunk_id, {"source": str(source), "text": chunk, "sha": chunk_sha}))
-            to_embed.append(chunk)
+            # Include source path tokens in embedding text so path/file queries
+            # (e.g. "what is in data/uploads/.../app/api.py") can retrieve it.
+            to_embed.append(f"SOURCE_PATH: {source}\n{chunk}")
 
     if not to_embed:
-        logger.debug("add_documents: nothing to add (all duplicates or no content)")
+        logger.info(
+            "add_documents: nothing to add (duplicates=%d, empty_docs=%d, incoming_docs=%d)",
+            duplicate_count,
+            empty_count,
+            len(docs),
+        )
         return 0
+
+    if faiss is None or np is None:
+        with _state_lock:
+            ids_list: List[str] = _meta.setdefault("ids", [])  # type: ignore[assignment]
+            meta_map: Dict[str, Dict[str, str]] = _meta.setdefault("meta", {})  # type: ignore[assignment]
+            for cid, m in metas:
+                ids_list.append(cid)
+                meta_map[cid] = m
+            _save_index()
+        logger.info(
+            "add_documents: added %d chunks in lexical-only mode (total=%d)",
+            len(metas),
+            len(_meta.get("ids", [])),
+        )
+        return len(metas)
 
     if EMBED_BATCH_SIZE <= 0:
         vectors = _embed_texts_safe(to_embed)
@@ -424,20 +565,38 @@ def add_documents(docs: List[Tuple[str, str]]) -> int:
 def query(text: str, top_k: int = 6) -> List[dict]:
     global _index, _meta, EMBEDDING_DIM
 
-    if faiss is None:
-        logger.debug("query: faiss not available; returning [].")
-        return []
     if not text:
         return []
 
     _load_index()
-    if _index is None:
-        logger.debug("query: index not initialized; returning [].")
-        return []
+
+    with _state_lock:
+        ids: List[str] = _meta.get("ids", [])  # type: ignore[assignment]
+        meta_map: Dict[str, Dict[str, str]] = _meta.get("meta", {})  # type: ignore[assignment]
+        if not ids:
+            return []
+
+        lexical_first: List[dict] = _lexical_text_matches(text, ids, meta_map, top_k=top_k)
+        if _is_path_like_query(text):
+            lexical_path = _lexical_path_matches(text, ids, meta_map, top_k=top_k)
+            merged_lex: List[dict] = []
+            seen_keys: set[tuple[str, str]] = set()
+            for row in lexical_path + lexical_first:
+                key = ((row.get("source") or ""), (row.get("text") or ""))
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                merged_lex.append(row)
+                if len(merged_lex) >= top_k:
+                    break
+            lexical_first = merged_lex
+
+        if faiss is None or np is None or _index is None:
+            return lexical_first[:top_k]
 
     vectors = _embed_texts_safe([text])
     if not vectors:
-        return []
+        return lexical_first[:top_k]
 
     try:
         dim_from_vecs = len(vectors[0])
@@ -453,39 +612,79 @@ def query(text: str, top_k: int = 6) -> List[dict]:
         qv = _normalize(vectors)
     except Exception:  # noqa: BLE001
         logger.exception("query: normalization failed")
-        return []
+        return lexical_first[:top_k]
 
     with _state_lock:
+        ids = _meta.get("ids", [])  # type: ignore[assignment]
+        meta_map = _meta.get("meta", {})  # type: ignore[assignment]
+
         try:
             D, I = _index.search(qv, top_k)  # type: ignore[call-arg]
         except Exception:  # noqa: BLE001
             logger.exception("FAISS search failed in query()")
-            return []
+            return lexical_first
 
         results: List[dict] = []
-        ids: List[str] = _meta.get("ids", [])  # type: ignore[assignment]
-        meta_map: Dict[str, Dict[str, str]] = _meta.get("meta", {})  # type: ignore[assignment]
-        if not ids:
-            return []
 
         try:
             distances = D[0].tolist()
             indices = I[0].tolist()
         except Exception:  # noqa: BLE001
             logger.exception("query: unexpected FAISS search output shape")
-            return []
+            return lexical_first[:top_k]
+
+        seen: set[tuple[str, str]] = set()
+        for row in lexical_first:
+            key = ((row.get("source") or ""), (row.get("text") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(row)
+            if len(results) >= top_k:
+                return results[:top_k]
 
         for dist, idx in zip(distances, indices):
             if idx < 0 or idx >= len(ids):
                 continue
             cid = ids[idx]
             m = meta_map.get(cid, {})
-            results.append(
-                {
-                    "source": m.get("source"),
-                    "text": m.get("text"),
-                    "score": float(dist),
-                }
-            )
+            row = {
+                "source": m.get("source"),
+                "text": m.get("text"),
+                "score": float(dist),
+            }
+            key = ((row.get("source") or ""), (row.get("text") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(row)
+            if len(results) >= top_k:
+                break
 
-    return results
+    return results[:top_k]
+
+
+def get_retrieval_status() -> dict:
+    _load_index()
+    with _state_lock:
+        ids = _meta.get("ids", []) if isinstance(_meta, dict) else []
+        dim = _meta.get("dim") if isinstance(_meta, dict) else None
+        vectors = 0
+        if _index is not None and faiss is not None:
+            try:
+                vectors = int(_index.ntotal)  # type: ignore[attr-defined]
+            except Exception:
+                vectors = 0
+        mode = "faiss" if (_index is not None and faiss is not None and np is not None) else "lexical"
+        return {
+            "mode": mode,
+            "faiss_available": faiss is not None,
+            "numpy_available": np is not None,
+            "index_file": str(INDEX_FILE),
+            "meta_file": str(META_FILE),
+            "index_exists": INDEX_FILE.exists(),
+            "meta_exists": META_FILE.exists(),
+            "chunks": len(ids) if isinstance(ids, list) else 0,
+            "vectors": vectors,
+            "dim": int(dim) if isinstance(dim, int) else (int(dim) if str(dim).isdigit() else None),
+        }

@@ -7,7 +7,7 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence
+from typing import Any, Iterable, List, Optional, Sequence, Union
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +65,6 @@ if not EMBED_LOCAL_ONLY and not _EMBED_LOCAL_ONLY_RAW and EMBED_CACHE_DIR:
         EMBED_LOCAL_ONLY = True
 
 _model_lock = threading.Lock()
-from typing import Optional, Union
-
-from typing import Any
 _model: Optional[Union[Any, str]] = None
 EMBEDDING_DIM: int | None = None
 _LAST_EMBED_MODE = "unloaded"
@@ -80,10 +77,6 @@ def _set_status(mode: str, error: Optional[str] = None) -> None:
     if error:
         _LAST_EMBED_ERROR = error
 
-
-from typing import Union
-
-from typing import Any
 
 def _load_model() -> Any:
     global _model, EMBEDDING_DIM
@@ -230,8 +223,6 @@ def embed_texts(texts: Iterable[str]) -> List[List[float]]:
         _set_status("hash", str(exc))
         return [_normalize(_hash_embed(t, dim)) for t in texts_list]
 
-
-from typing import Any
 
 def _encode_with_timeout(
     model: Any,

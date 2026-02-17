@@ -18,6 +18,12 @@ from pydantic import BaseModel, Field
 
 from app.api.deps import require_files_api_key
 from app.services.job_manager import get_job, list_jobs, serialize_job, start_job
+from app.services.upload_inspector import (
+    format_upload_summary,
+    inspect_upload_tree,
+    remember_last_upload,
+    resolve_upload_path,
+)
 
 router = APIRouter(prefix="/files", tags=["files"], dependencies=[Depends(require_files_api_key)])
 
@@ -237,6 +243,8 @@ async def upload_zip(
     except Exception:
         raise HTTPException(status_code=400, detail="Corrupt or invalid zip")
 
+    remember_last_upload(dest, source="upload-zip")
+
     return {
         "status": "ok",
         "project_id": project_id,
@@ -291,6 +299,7 @@ async def clone_repo(payload: CloneRequest) -> Dict[str, Any]:
                 shutil.rmtree(dest, ignore_errors=True)
                 raise HTTPException(status_code=413, detail=f"Repo too large ({size_mb} MB). Increase max_mb or use smaller depth.")
             _av_scan_path(dest)
+            remember_last_upload(dest, source="clone")
             return {"status": "ok", "project_id": project_id, "path": str(dest), "branch_used": branch}
 
     # Attempt 2: clone without specifying branch (lets git choose default)
@@ -310,6 +319,7 @@ async def clone_repo(payload: CloneRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=413, detail=f"Repo too large ({size_mb} MB). Increase max_mb or use smaller depth.")
 
     _av_scan_path(dest)
+    remember_last_upload(dest, source="clone")
 
     return {"status": "ok", "project_id": project_id, "path": str(dest), "branch_used": used}
 
@@ -383,6 +393,24 @@ async def ingest_path(body: IngestRequest) -> Dict[str, Any]:
         if "timed out" in msg:
             raise HTTPException(status_code=504, detail=msg) from exc
         raise HTTPException(status_code=500, detail=msg) from exc
+
+
+@router.get("/describe")
+async def describe_upload(
+    path: str = Query(..., min_length=3),
+    sample_limit: int = Query(60, ge=5, le=300),
+) -> Dict[str, Any]:
+    resolved = resolve_upload_path(path)
+    if resolved is None:
+        raise HTTPException(status_code=400, detail="Invalid upload path")
+    info = inspect_upload_tree(resolved, sample_limit=sample_limit)
+    return {
+        "status": "ok",
+        "path": str(resolved),
+        "summary_es": format_upload_summary(info, lang="es"),
+        "summary_en": format_upload_summary(info, lang="en"),
+        "info": info,
+    }
 
 
 @router.get("/ingest/status")

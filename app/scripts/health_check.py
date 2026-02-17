@@ -7,6 +7,10 @@ import tempfile
 from pathlib import Path
 from typing import Tuple
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 
 def _print_status(name: str, ok: bool, detail: str = "") -> bool:
     status = "ok" if ok else "fail"

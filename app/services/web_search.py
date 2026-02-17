@@ -58,12 +58,12 @@ PROVIDER_ORDER = [
     p.strip()
     for p in (
         os.getenv("AEGIS_SEARCH_PROVIDERS")
-        or "ddgs,qwant_html,startpage_html,brave_html,ddg_html,ddg_json"
+        or "brave_html,ddgs,startpage_html,ddg_html,ddg_json"
     ).split(",")
     if p.strip()
 ]
 if not PROVIDER_ORDER:
-    PROVIDER_ORDER = ["ddgs", "ddg_html", "ddg_json"]
+    PROVIDER_ORDER = ["brave_html", "ddgs", "startpage_html", "ddg_html", "ddg_json"]
 
 WARMUP_ON_START = os.getenv("AEGIS_SEARCH_WARMUP_ON_START", "1").lower() in {
     "1",

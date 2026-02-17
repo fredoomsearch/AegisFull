@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import time
 from typing import Optional, Sequence
 
 from fastapi import Header, HTTPException, Request
@@ -36,13 +35,28 @@ def _load_keys_from_env(*env_vars: str) -> set[str]:
     return keys
 
 
-def _extract_key(x_api_key: Optional[str], authorization: Optional[str]) -> str:
-    provided = (x_api_key or "").strip()
-    if not provided and authorization:
-        auth = authorization.strip()
-        if auth.lower().startswith("bearer "):
-            provided = auth.split(" ", 1)[1].strip()
-    return provided
+def _first_csv_token(raw: Optional[str]) -> str:
+    """
+    Browsers/proxies may merge duplicate headers into comma-separated values.
+    Keep only the first credential token.
+    """
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    return value.split(",", 1)[0].strip().strip("\"'")
+
+
+def _extract_api_key(x_api_key: Optional[str]) -> str:
+    return _first_csv_token(x_api_key)
+
+
+def _extract_bearer_token(authorization: Optional[str]) -> str:
+    auth = _first_csv_token(authorization)
+    if not auth:
+        return ""
+    if auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1].strip()
+    return ""
 
 
 def _is_local_request(request: Request) -> bool:
@@ -51,11 +65,6 @@ def _is_local_request(request: Request) -> bool:
     except Exception:
         host = ""
     return host in LOCALHOSTS
-
-
-def _assert_allowed(provided: str, allowed: set[str]) -> None:
-    if not provided or provided not in allowed:
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
 def _normalize_scopes(scopes: Optional[Sequence[str] | str]) -> list[str]:
@@ -98,6 +107,7 @@ def _require_key(
     *,
     allowed_envs: tuple[str, ...],
     required_scope: Optional[str] = None,
+    misconfig_detail: str = "Server auth misconfigured: set AEGIS_API_KEY or set AEGIS_AUTH_MODE=off",
 ) -> None:
     """
     API key guard.
@@ -123,27 +133,34 @@ def _require_key(
     if mode == "local" and _is_local_request(request):
         return
 
-    # 4) If auth is ON but no keys exist -> that's a misconfiguration
-    #    We fail CLOSED (secure) instead of accidentally exposing the API.
-    if mode == "on" and not allowed:
+    # 4) If auth is ON but there are no static keys and no JWT secret, fail closed.
+    #    If JWT secret exists, allow JWT-only auth mode.
+    if mode == "on" and not allowed and not JWT_SECRET:
         if _is_local_request(request):
             return
         raise HTTPException(
             status_code=500,
-            detail="Server auth misconfigured: set AEGIS_API_KEY or set AEGIS_AUTH_MODE=off",
+            detail=misconfig_detail,
         )
 
-    # 5) Otherwise, require a valid key
-    provided = _extract_key(x_api_key, authorization)
+    # 5) Otherwise, require a valid key/token
+    api_key = _extract_api_key(x_api_key)
+    bearer_token = _extract_bearer_token(authorization)
 
     # Accept raw API key
-    if provided and allowed and provided in allowed:
+    if allowed and ((api_key and api_key in allowed) or (bearer_token and bearer_token in allowed)):
         return
 
-    # Accept JWT with scope
-    payload = _decode_jwt_token(provided, required_scope=required_scope)
+    # Accept JWT with scope (Authorization bearer token preferred).
+    payload = _decode_jwt_token(bearer_token, required_scope=required_scope)
     if payload:
         return
+
+    # Compatibility: allow JWT passed via X-API-Key.
+    if api_key and api_key != bearer_token:
+        payload = _decode_jwt_token(api_key, required_scope=required_scope)
+        if payload:
+            return
 
     raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
@@ -159,6 +176,7 @@ async def require_api_key(
         authorization,
         allowed_envs=("AEGIS_API_KEY",),
         required_scope=None,
+        misconfig_detail="Server auth misconfigured: set AEGIS_API_KEY or set AEGIS_AUTH_MODE=off",
     )
 
 
@@ -175,32 +193,14 @@ async def require_files_api_key(
       - AEGIS_API_KEY  = fallback keys
       - AEGIS_AUTH_MODE = on | off | local
     """
-    mode = AUTH_MODE
-
-    if mode == "off":
-        return
-
-    allowed = _load_keys_from_env("FILES_API_KEY", "AEGIS_API_KEY")
-
-    if mode == "local" and _is_local_request(request):
-        return
-
-    if mode == "on" and not allowed:
-        if _is_local_request(request):
-            return
-        raise HTTPException(
-            status_code=500,
-            detail="Server auth misconfigured: set FILES_API_KEY/AEGIS_API_KEY or set AEGIS_AUTH_MODE=off",
-        )
-
-    provided = _extract_key(x_api_key, authorization)
-
-    if provided and allowed and provided in allowed:
-        return
-    payload = _decode_jwt_token(provided, required_scope="files")
-    if payload:
-        return
-    raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    _require_key(
+        request,
+        x_api_key,
+        authorization,
+        allowed_envs=("FILES_API_KEY", "AEGIS_API_KEY"),
+        required_scope="files",
+        misconfig_detail="Server auth misconfigured: set FILES_API_KEY/AEGIS_API_KEY or set AEGIS_AUTH_MODE=off",
+    )
 
 
 def require_scope(scope: str):
@@ -215,6 +215,7 @@ def require_scope(scope: str):
             authorization,
             allowed_envs=("AEGIS_API_KEY",),
             required_scope=scope,
+            misconfig_detail="Server auth misconfigured: set AEGIS_API_KEY or set AEGIS_AUTH_MODE=off",
         )
     return _dep
 
@@ -227,92 +228,11 @@ async def require_admin_scope(
     """
     Admin guard: accepts ADMIN_API_KEY or JWT with scope=admin.
     """
-    # If auth disabled, allow.
-    if AUTH_MODE == "off":
-        return
-
-    allowed = _load_keys_from_env("ADMIN_API_KEY", "AEGIS_API_KEY")
-    if AUTH_MODE == "local" and _is_local_request(request):
-        return
-
-    provided = _extract_key(x_api_key, authorization)
-    if provided and allowed and provided in allowed:
-        return
-
-    payload = _decode_jwt_token(provided, required_scope="admin")
-    if payload:
-        return
-
-    raise HTTPException(status_code=401, detail="Invalid or missing admin credential")
-
-
-
-
-
-# How to run it (real-life commands)
-# ✅ Production / “don’t expose my API”
-# export AEGIS_AUTH_MODE=on
-# export AEGIS_API_KEY="prod_super_secret_key"
-# uvicorn main:app --host 0.0.0.0 --port 8000
-# ✅ Local dev (no auth at all)
-# export AEGIS_AUTH_MODE=off
-# unset AEGIS_API_KEY
-# uvicorn main:app --reload
-# ✅ Best dev option (you won’t lock yourself out)
-# Local requests can skip the key, but remote must have it:
-# export AEGIS_AUTH_MODE=local
-# export AEGIS_API_KEY="devkey123"
-
-# TEST ALL MODES
-
-# reuse test:
-
-# # 1) AUTH OFF (no key required)
-# export AEGIS_AUTH_MODE=off
-# unset AEGIS_API_KEY
-# curl -s http://localhost:8000/healthz
-# curl -s -X POST http://localhost:8000/chat \
-#   -H "Content-Type: application/json" \
-#   -d '{"message":"hello","lang":"en","mode":"general"}'
-# # 2) AUTH LOCAL (localhost bypass, remote requires key)
-# export AEGIS_AUTH_MODE=local
-# export AEGIS_API_KEY="devkey123"
-
-# # localhost (no key) - should work
-# curl -s -X POST http://localhost:8000/chat \
-#   -H "Content-Type: application/json" \
-#   -d '{"message":"hello","lang":"en","mode":"general"}'
-
-# # with key (also works)
-# curl -s -X POST http://localhost:8000/chat \
-#   -H "Content-Type: application/json" \
-#   -H "X-API-Key: devkey123" \
-#   -d '{"message":"hello","lang":"en","mode":"general"}'
-# # 3) AUTH ON (key required everywhere)
-# export AEGIS_AUTH_MODE=on
-# export AEGIS_API_KEY="prod_super_secret_key"
-
-# # without key -> should fail
-# curl -s -X POST http://localhost:8000/chat \
-#   -H "Content-Type: application/json" \
-#   -d '{"message":"hello","lang":"en","mode":"general"}'
-
-# # with key -> should work
-# curl -s -X POST http://localhost:8000/chat \
-#   -H "Content-Type: application/json" \
-#   -H "X-API-Key: prod_super_secret_key" \
-#   -d '{"message":"hello","lang":"en","mode":"general"}'
-# # 4) Conversation reuse test
-# # First call gets conversation_id
-# RESP=$(curl -s -X POST http://localhost:8000/chat \
-#   -H "Content-Type: application/json" \
-#   -d '{"message":"first","lang":"en","mode":"general"}')
-# echo "$RESP"
-
-# # Extract conversation_id (manual copy) and reuse:
-# curl -s -X POST http://localhost:8000/chat \
-#   -H "Content-Type: application/json" \
-#   -d '{"message":"second","lang":"en","mode":"general","conversation_id":"<paste-id>","use_existing":true}'
-# If curl works but the UI still hangs at “Typing…”, the LLM might be slow or stuck. Try:
-
-# export AEGIS_FAST_MODE=1 then restart uvicorn.
+    _require_key(
+        request,
+        x_api_key,
+        authorization,
+        allowed_envs=("ADMIN_API_KEY", "AEGIS_API_KEY"),
+        required_scope="admin",
+        misconfig_detail="Server auth misconfigured: set ADMIN_API_KEY/AEGIS_API_KEY or set AEGIS_AUTH_MODE=off",
+    )
