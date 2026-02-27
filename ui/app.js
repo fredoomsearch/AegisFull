@@ -174,6 +174,8 @@ function cacheDom() {
   dom.convEventsRefresh = document.getElementById("convEventsRefresh");
 
   dom.apiKeyBtn = document.getElementById("apiKeyBtn");
+  dom.showCryptoPanelBtn = document.getElementById("showCryptoPanelBtn");
+  dom.showFilesPanelBtn = document.getElementById("showFilesPanelBtn");
   dom.cancelAllBtn = document.getElementById("cancelAllBtn");
   dom.clearLogsBtn = document.getElementById("clearLogsBtn");
   dom.helpBtn = document.getElementById("helpBtn");
@@ -416,6 +418,8 @@ function wireUI() {
 
     appendBubble(state.lang === LANG.ES ? "API key actualizada." : "API key updated.", "bot");
   });
+  dom.showCryptoPanelBtn?.addEventListener("click", showCryptoPanelFromToolbar);
+  dom.showFilesPanelBtn?.addEventListener("click", showFilesPanelFromToolbar);
 
   // tabs
   dom.tabButtons?.forEach((b) => {
@@ -1004,6 +1008,8 @@ function localizeUI() {
     symbols_tip: es ? "Copia un símbolo y pégalo en el campo del gráfico/cripto para ver precio y predicción. Todos son pares USDT (spot)." : "Copy a symbol and paste it into the chart/crypto field to see price and prediction. All are USDT spot pairs.",
 
     api_key_title: es ? "Configurar API key" : "Set API key",
+    show_crypto_panel_title: es ? "Mostrar panel cripto" : "Show crypto panel",
+    show_files_panel_title: es ? "Mostrar panel de archivos/repos" : "Show files/repos panel",
     tree_title: es ? "Ver árbol de proyecto" : "View project tree",
     symbols_title_btn: es ? "Pares y despliegue rápido" : "Symbols and quick deploy",
     admin_refresh_title: es ? "Refrescar datos/modelos cripto (admin)" : "Refresh crypto data/models (admin)",
@@ -1168,6 +1174,29 @@ function toggleFilesExpand() {
   document.body.classList.toggle("files-wide");
 }
 
+function showCryptoPanelFromToolbar() {
+  if (state.layoutCollapsed) {
+    state.layoutCollapsed = false;
+    localStorage.setItem("aegis_layout_collapsed", "0");
+    applyLayoutCollapsed();
+  }
+  state.chartVisible = true;
+  localStorage.setItem("aegis_chart_visible", "1");
+  applyPanelVisibility();
+}
+
+function showFilesPanelFromToolbar() {
+  if (state.layoutCollapsed) {
+    state.layoutCollapsed = false;
+    localStorage.setItem("aegis_layout_collapsed", "0");
+    applyLayoutCollapsed();
+  }
+  state.sidebarVisible = true;
+  localStorage.setItem("aegis_sidebar_visible", "1");
+  applyPanelVisibility();
+  activateTab("files");
+}
+
 function toggleSidebarVisibility() {
   state.sidebarVisible = !state.sidebarVisible;
   localStorage.setItem("aegis_sidebar_visible", state.sidebarVisible ? "1" : "0");
@@ -1204,6 +1233,15 @@ function applyPanelVisibility() {
       ? (es ? "Ocultar panel de archivos/repos" : "Hide files/repos panel")
       : (es ? "Mostrar panel de archivos/repos" : "Show files/repos panel");
     dom.filesExpandBtn.setAttribute("aria-pressed", String(!sidebarVisible));
+  }
+
+  if (dom.showCryptoPanelBtn) {
+    dom.showCryptoPanelBtn.classList.toggle("active", !chartVisible);
+    dom.showCryptoPanelBtn.setAttribute("aria-pressed", String(!chartVisible));
+  }
+  if (dom.showFilesPanelBtn) {
+    dom.showFilesPanelBtn.classList.toggle("active", !sidebarVisible);
+    dom.showFilesPanelBtn.setAttribute("aria-pressed", String(!sidebarVisible));
   }
 }
 

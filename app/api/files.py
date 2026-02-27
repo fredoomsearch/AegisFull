@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
 import re
 import shutil
@@ -26,6 +27,7 @@ from app.services.upload_inspector import (
 )
 
 router = APIRouter(prefix="/files", tags=["files"], dependencies=[Depends(require_files_api_key)])
+logger = logging.getLogger(__name__)
 
 UPLOAD_ROOT = Path(os.getenv("FILES_UPLOAD_ROOT", "data/uploads")).resolve()
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
@@ -36,6 +38,7 @@ INGEST_LOG_DIR = Path(os.getenv("FILES_INGEST_LOG_DIR", "logs")).resolve()
 ALLOWED_HOSTS = {"github.com", "gitlab.com", "bitbucket.org"}
 FILES_AV_SCAN = os.getenv("FILES_AV_SCAN", "1") != "0"
 FILES_AV_TIMEOUT = int(os.getenv("FILES_AV_TIMEOUT", "15"))
+FILES_AV_FAIL_OPEN = os.getenv("FILES_AV_FAIL_OPEN", "1") != "0"
 
 _SAFE_NAME = re.compile(r"[^a-zA-Z0-9._-]+")
 _SAFE_BRANCH = re.compile(r"^[A-Za-z0-9._\-/]+$")
@@ -131,26 +134,33 @@ def _dir_size_mb(path: Path) -> int:
     return int(total / (1024 * 1024))
 
 
-def _av_scan_path(path: Path) -> None:
+def _av_scan_error_or_open(status: str, detail: str) -> str:
+    if FILES_AV_FAIL_OPEN:
+        logger.warning("AV scan fail-open (%s): %s", status, detail)
+        return f"fail-open:{status}"
+    raise HTTPException(status_code=400, detail=detail)
+
+
+def _av_scan_path(path: Path) -> str:
     """
     Run a lightweight AV scan (clamdscan/clamscan) on the given path.
     Skips silently if disabled or scanner not found.
     Raises HTTPException on infection or scanner failure.
     """
     if not FILES_AV_SCAN:
-        return
+        return "disabled"
     if not path.exists():
-        return
+        return "missing"
 
     scanner = shutil.which("clamdscan") or shutil.which("clamscan")
     if not scanner:
-        return
+        return "scanner-not-found"
 
     size_mb = _dir_size_mb(path)
     # If already too large per upload caps, we would have rejected earlier.
     # Avoid long scans on unexpectedly large trees.
     if size_mb > (MAX_UPLOAD_BYTES // (1024 * 1024) * 2):  # heuristic guard
-        raise HTTPException(status_code=400, detail="AV scan skipped: tree too large")
+        return _av_scan_error_or_open("tree-too-large", "AV scan skipped: tree too large")
 
     cmd = [scanner, "--infected", "--no-summary", str(path)]
     if "clamdscan" in scanner:
@@ -166,18 +176,18 @@ def _av_scan_path(path: Path) -> None:
             check=False,
         )
     except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=400, detail="AV scan timed out")
+        return _av_scan_error_or_open("timeout", "AV scan timed out")
     except Exception:
         # Do not block if scanner crashes; treat as failed scan.
-        raise HTTPException(status_code=400, detail="AV scan failed")
+        return _av_scan_error_or_open("failed", "AV scan failed")
 
     # clamscan/clamdscan: 0=clean, 1=infected, 2=error
     output = (res.stdout or "").strip()
     if res.returncode == 0:
-        return
+        return "clean"
     if res.returncode == 1:
         raise HTTPException(status_code=400, detail=f"Malware detected: {output or 'infected'}")
-    raise HTTPException(status_code=400, detail=f"AV scan error: {output or 'scan error'}")
+    return _av_scan_error_or_open("scan-error", f"AV scan error: {output or 'scan error'}")
 
 
 # ============================================================================
@@ -237,7 +247,7 @@ async def upload_zip(
                     target.parent.mkdir(parents=True, exist_ok=True)
                     with zf.open(member) as src, open(target, "wb") as out:
                         shutil.copyfileobj(src, out)
-        _av_scan_path(dest)
+        av_status = _av_scan_path(dest)
     except HTTPException:
         raise
     except Exception:
@@ -249,6 +259,7 @@ async def upload_zip(
         "status": "ok",
         "project_id": project_id,
         "path": str(dest),
+        "av_status": av_status,
         "hint": "Now call /files/ingest with this path.",
     }
 
@@ -298,9 +309,15 @@ async def clone_repo(payload: CloneRequest) -> Dict[str, Any]:
             if size_mb > payload.max_mb:
                 shutil.rmtree(dest, ignore_errors=True)
                 raise HTTPException(status_code=413, detail=f"Repo too large ({size_mb} MB). Increase max_mb or use smaller depth.")
-            _av_scan_path(dest)
+            av_status = _av_scan_path(dest)
             remember_last_upload(dest, source="clone")
-            return {"status": "ok", "project_id": project_id, "path": str(dest), "branch_used": branch}
+            return {
+                "status": "ok",
+                "project_id": project_id,
+                "path": str(dest),
+                "branch_used": branch,
+                "av_status": av_status,
+            }
 
     # Attempt 2: clone without specifying branch (lets git choose default)
     if dest.exists():
@@ -318,10 +335,16 @@ async def clone_repo(payload: CloneRequest) -> Dict[str, Any]:
         shutil.rmtree(dest, ignore_errors=True)
         raise HTTPException(status_code=413, detail=f"Repo too large ({size_mb} MB). Increase max_mb or use smaller depth.")
 
-    _av_scan_path(dest)
+    av_status = _av_scan_path(dest)
     remember_last_upload(dest, source="clone")
 
-    return {"status": "ok", "project_id": project_id, "path": str(dest), "branch_used": used}
+    return {
+        "status": "ok",
+        "project_id": project_id,
+        "path": str(dest),
+        "branch_used": used,
+        "av_status": av_status,
+    }
 
 
 @router.post("/ingest")

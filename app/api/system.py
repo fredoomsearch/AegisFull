@@ -152,6 +152,51 @@ def _env_snapshot() -> Dict[str, Any]:
     return out
 
 
+def _security_snapshot() -> Dict[str, Any]:
+    auth_mode = (os.getenv("AEGIS_AUTH_MODE", "on") or "on").strip().lower()
+    cors_raw = (os.getenv("AEGIS_CORS_ORIGINS", "*") or "*").strip()
+    cors_origins = [o.strip() for o in cors_raw.split(",") if o.strip()] or ["*"]
+    cors_wildcard = "*" in cors_origins
+    cors_creds_raw = (os.getenv("AEGIS_CORS_ALLOW_CREDENTIALS", "auto") or "auto").strip().lower()
+    secure_headers = (os.getenv("AEGIS_SECURE_HEADERS", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+    hsts_seconds_raw = (os.getenv("AEGIS_HSTS_SECONDS", "0") or "0").strip()
+    try:
+        hsts_seconds = int(hsts_seconds_raw)
+    except Exception:
+        hsts_seconds = 0
+
+    weak_tokens = {"my-secret-key", "changeme", "change-me", "dev", "test", "password"}
+    weak_keys: List[str] = []
+    for env_name in ("AEGIS_API_KEY", "FILES_API_KEY", "ADMIN_API_KEY"):
+        raw = (os.getenv(env_name) or "").strip()
+        if not raw:
+            continue
+        if any(k.strip().lower() in weak_tokens for k in raw.split(",") if k.strip()):
+            weak_keys.append(env_name)
+
+    risks: List[str] = []
+    if auth_mode != "on":
+        risks.append(f"auth_mode={auth_mode}")
+    if cors_wildcard:
+        risks.append("cors_wildcard")
+    if not secure_headers:
+        risks.append("secure_headers_disabled")
+    if hsts_seconds <= 0:
+        risks.append("hsts_disabled")
+    risks.extend([f"weak_key:{k}" for k in weak_keys])
+
+    return {
+        "auth_mode": auth_mode,
+        "cors_origins": cors_origins,
+        "cors_allow_credentials": cors_creds_raw,
+        "cors_wildcard": cors_wildcard,
+        "secure_headers_enabled": secure_headers,
+        "hsts_seconds": hsts_seconds,
+        "weak_keys": weak_keys,
+        "risks": risks,
+    }
+
+
 @router.get("/snapshot")
 async def system_snapshot() -> Dict[str, Any]:
     """
@@ -173,6 +218,7 @@ async def system_snapshot() -> Dict[str, Any]:
         "embeddings": emb,
         "retrieval": retrieval,
         "image": image,
+        "security": _security_snapshot(),
         "predictions": preds,
         "stats": stats,
         "pnl": pnl,
@@ -200,6 +246,7 @@ async def readyz() -> Dict[str, Any]:
             "retrieval": retrieval_ok,
             "image": image_ok,
         },
+        "security": _security_snapshot(),
         "embeddings": emb,
         "retrieval": retrieval,
         "image": image,

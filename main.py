@@ -41,6 +41,13 @@ DISABLE_DB = os.getenv("AEGIS_DISABLE_DB", "0").lower() in {"1", "true", "yes", 
 TRUST_PROXY = os.getenv("AEGIS_TRUST_PROXY", "0").lower() in {"1", "true", "yes", "on"}
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _git_sha_cached() -> str:
     try:
         return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], timeout=1).decode().strip()
@@ -59,14 +66,40 @@ app.include_router(api_router)
 # CORS
 _cors_origins_raw = os.getenv("AEGIS_CORS_ORIGINS", "*")
 _cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()] or ["*"]
+_cors_has_wildcard = "*" in _cors_origins
+_cors_creds_raw = (os.getenv("AEGIS_CORS_ALLOW_CREDENTIALS", "auto") or "auto").strip().lower()
+if _cors_creds_raw == "auto":
+    _cors_allow_credentials = not _cors_has_wildcard
+elif _cors_creds_raw in {"1", "true", "yes", "on"}:
+    _cors_allow_credentials = True
+elif _cors_creds_raw in {"0", "false", "no", "off"}:
+    _cors_allow_credentials = False
+else:
+    logger.warning(
+        "Invalid AEGIS_CORS_ALLOW_CREDENTIALS=%r. Using auto mode.",
+        _cors_creds_raw,
+    )
+    _cors_allow_credentials = not _cors_has_wildcard
+
+if _cors_allow_credentials and _cors_has_wildcard:
+    logger.warning(
+        "CORS wildcard with credentials is unsafe/invalid. Forcing allow_credentials=False. "
+        "Set AEGIS_CORS_ORIGINS to explicit origins for credentialed CORS."
+    )
+    _cors_allow_credentials = False
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_credentials=True,
+    allow_credentials=_cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+SECURE_HEADERS_ENABLED = _env_bool("AEGIS_SECURE_HEADERS", True)
+HSTS_SECONDS = int(os.getenv("AEGIS_HSTS_SECONDS", "0"))
+HSTS_INCLUDE_SUBDOMAINS = _env_bool("AEGIS_HSTS_INCLUDE_SUBDOMAINS", True)
+HSTS_PRELOAD = _env_bool("AEGIS_HSTS_PRELOAD", False)
 
 # Rate limiting
 RATE_LIMIT = int(os.getenv("AEGIS_RATE_LIMIT_PER_MINUTE", "120"))
@@ -167,6 +200,23 @@ async def add_trace_and_rate_limit(request: Request, call_next):
 
     response = await call_next(request)
     response.headers["X-Request-ID"] = trace_id
+    if SECURE_HEADERS_ENABLED:
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
+
+    if HSTS_SECONDS > 0:
+        req_scheme = request.url.scheme
+        if req_scheme != "https":
+            req_scheme = (request.headers.get("x-forwarded-proto") or req_scheme).split(",")[0].strip().lower()
+        if req_scheme == "https":
+            hsts = f"max-age={HSTS_SECONDS}"
+            if HSTS_INCLUDE_SUBDOMAINS:
+                hsts += "; includeSubDomains"
+            if HSTS_PRELOAD:
+                hsts += "; preload"
+            response.headers.setdefault("Strict-Transport-Security", hsts)
     return response
 
 
@@ -264,6 +314,29 @@ def _warm_llm_once() -> None:
         logger.warning("[main] LLM warm-up skipped (backend not ready).", exc_info=True)
 
 
+def _log_security_posture() -> None:
+    auth_mode = (os.getenv("AEGIS_AUTH_MODE", "on") or "on").strip().lower()
+    if auth_mode in {"off", "local"}:
+        logger.warning(
+            "[security] AEGIS_AUTH_MODE=%s. Use 'on' in production and avoid local bypass behind proxies.",
+            auth_mode,
+        )
+    if _cors_has_wildcard:
+        logger.warning(
+            "[security] AEGIS_CORS_ORIGINS includes '*'. Set explicit origins in production."
+        )
+    if HSTS_SECONDS <= 0:
+        logger.info("[security] HSTS disabled (AEGIS_HSTS_SECONDS=0). Enable behind HTTPS reverse proxy.")
+    weak_tokens = {"my-secret-key", "changeme", "change-me", "dev", "test", "password"}
+    for env_name in ("AEGIS_API_KEY", "FILES_API_KEY", "ADMIN_API_KEY"):
+        raw = (os.getenv(env_name) or "").strip()
+        if not raw:
+            continue
+        keys = [k.strip() for k in raw.split(",") if k.strip()]
+        if any(k.lower() in weak_tokens for k in keys):
+            logger.warning("[security] %s contains weak default-like credential(s). Rotate before production.", env_name)
+
+
 @app.on_event("startup")
 def on_startup() -> None:
     if DISABLE_DB:
@@ -275,6 +348,7 @@ def on_startup() -> None:
         init_db(engine)
         logger.info("[main] Database ready.")
     logger.info("[main] %s", _clamav_status())
+    _log_security_posture()
     if LLM_WARMUP_ON_START:
         _warm_llm_once()
     start_background_warmup()

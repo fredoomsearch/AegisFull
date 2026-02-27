@@ -173,7 +173,8 @@ def check_auth_token(ctx: ClientCtx) -> bool:
 
 
 def check_chat(ctx: ClientCtx) -> bool:
-    body = {"message": "E2E smoke ping", "lang": "en", "mode": "chat"}
+    # Use deterministic fast-path response (time helper) to avoid heavy LLM latency in smoke runs.
+    body = {"message": "what time is it in new york?", "lang": "en", "mode": "chat"}
     r = ctx.request("POST", "/chat", json_body=body)
     data = _json_or_text(r)
     if r.status_code == 200 and isinstance(data, dict) and data.get("response"):

@@ -10,7 +10,7 @@ pip install --upgrade pip && pip install -r requirements.txt
 ```  
 Ubuntu OCR deps: `sudo apt update && sudo apt install -y tesseract-ocr tesseract-ocr-spa tesseract-ocr-eng`
 
-2) Database + keys (same shell you will run uvicorn)  
+2) Database + keys (same shell where you will start Aegis)  
 ```bash
 # stop uvicorn if running
 docker run --name aegis-postgres -p 5432:5432 \
@@ -54,16 +54,20 @@ export BINANCE_LIVE=1
 export BINANCE_API_KEY="wS58t0PEQX4szcC0zHEfNQwpAvEwhshvMyItIzOPmtvE25bV5KieXgsJXdwLrlBV"
 export BINANCE_API_SECRET="v49yE62yFVcXoSgw53ehsgdJHiXWeN7CpbHbpbZWxpoKyxWBxOuu2qA7KRVOgzET"
 
-# RUN THIS CONFG FROM ROUTE /Documents/whioutoKn/models/ComfyUI
 # 7) Image generation (ComfyUI)
+# run these in models/ComfyUI
 source .venv/bin/activate
 export AEGIS_IMAGE_CKPT="sd_turbo.safetensors"
 export AEGIS_IMAGE_TIMEOUT=60
 python main.py --listen 127.0.0.1 --port 8188
 
+# 8) Run backend with automatic gates (recommended)
+./start_aegis.sh
+# For stricter security gate:
+./start_aegis.sh --strict-security
 
-# 8) Run backend
-uvicorn main:app --reload
+# (Optional) run plain server without gates
+# uvicorn main:app --reload
 
 ```
 Verify embeddings load (optional):
@@ -75,11 +79,42 @@ PY
 ```
 
 3) (Optional) disable auth locally: `export AEGIS_AUTH_MODE=off`  
-4) Run backend: `uvicorn main:app --reload`  
+4) Run backend: `./start_aegis.sh`  
 5) Open `http://127.0.0.1:8000` and enter the same key in the UI prompt (`my-secret-key`). UI assets live under `/ui/*`.
 
 ---
-## 2) Crypto refresh (lightning icon)
+## 2) Auto preflight + E2E gate (new)
+- Preferred launcher: `./start_aegis.sh` (loads `.env`, activates `venv`, runs all gates, then starts uvicorn).
+- Script: `app/scripts/start_with_preflight.py`
+- What it does:
+  - Security pre-check (auth mode/keys/basic posture).
+  - In-process preflight E2E before opening the server.
+  - Starts uvicorn.
+  - Runs host-level E2E (`app/scripts/e2e_flow_check.py`) against the running server.
+  - Calls `/system/readyz` and blocks startup if not ready.
+- If any gate fails, server is stopped and exit code is non-zero.
+
+Examples:
+```bash
+# one command startup
+./start_aegis.sh
+
+# strict gate, production-like
+python app/scripts/start_with_preflight.py \
+  --host 127.0.0.1 --port 8000 \
+  --api-key my-secret-key \
+  --files-api-key my-secret-key \
+  --strict-security
+
+# skip only post-start E2E (faster local loop)
+python app/scripts/start_with_preflight.py \
+  --skip-post-e2e \
+  --api-key my-secret-key \
+  --files-api-key my-secret-key
+```
+
+---
+## 3) Crypto refresh (lightning icon)
 - 403 “ADMIN_API_KEY not configured” = uvicorn did **not** see the env var; export before starting uvicorn.
 - Trigger refresh:
 ```bash
@@ -100,8 +135,7 @@ curl "http://127.0.0.1:8000/files/ingest/log?job_id=<job>&tail=200" \
 ```
 - Files/Jobs/Logs stay visible during refresh; admin logs stream into Sources under the chart.
 
----
-## 3) Curl cheats
+## 4) Curl cheats
 - Health: `curl -s http://127.0.0.1:8000/healthz`
 - Simple chat:
 ```bash
@@ -119,8 +153,7 @@ curl -s -X POST http://127.0.0.1:8000/fetch_url \
 ```
 - Auth off: `export AEGIS_AUTH_MODE=off` and omit `X-API-Key`.
 
----
-## 4) Key features
+## 5) Key features
 - Local LLM: WizardCoder 7B (`.gguf`) via `llama.cpp`; optional OpenAI fallback.
 - Embeddings for RAG: MiniLM (`sentence-transformers/all-MiniLM-L6-v2`, 384-dim) turns your files into vectors; it is independent from the main LLM.
 - Chat with memory: PostgreSQL + summarization.
@@ -131,8 +164,7 @@ curl -s -X POST http://127.0.0.1:8000/fetch_url \
 - UI: chat/web/url/image/crypto modes, chart + buy/sell, key prompt, sources/logs/stats/P&L/predictions, files/ingest tab with job list + job logs, upload/clone/delete, cancel controls.
 - Ops: Dockerfile, docker-compose, Nginx, Prometheus, CI.
 
----
-## 5) Architecture (where to look)
+## 6) Architecture (where to look)
 - Frontend: `ui/index.html`, `ui/app.js`, `ui/styles.css`
 - API: `app/api/chat.py`, `app/api/crypto.py`, `app/api/toolssupport.py`, `app/api/files.py`, `app/api/data.py`, `app/api/notifications.py`, `app/core/admin.py`
 - LLM: `app/llm_client_offload.py`, `app/models/llm_utils.py`, `app/models/llm_client.py`
@@ -143,8 +175,7 @@ curl -s -X POST http://127.0.0.1:8000/fetch_url \
 - Crypto: `app/services/crypto_*`, `app/scripts/fetch_market_data.py`, `app/scripts/train_models.py`
 - Infra: `main.py`, Docker/Nginx, monitoring, CI.
 
----
-## 6) Configuration (env)
+## 7) Configuration (env)
 Copy `.env.example` to `.env`, then set:
 ```
 # LLM
@@ -206,10 +237,20 @@ AEGIS_RATE_LIMIT_PER_MINUTE=120
 AEGIS_RATE_LIMITS=/files/ingest=10,/files/upload-zip=20
 AEGIS_MAX_IMAGE_BYTES=5242880
 AEGIS_CORS_ORIGINS=http://localhost:8000
+AEGIS_CORS_ALLOW_CREDENTIALS=auto
+AEGIS_SECURE_HEADERS=1
+AEGIS_HSTS_SECONDS=0
+AEGIS_HSTS_INCLUDE_SUBDOMAINS=1
+AEGIS_HSTS_PRELOAD=0
 TOOLS_BLOCK_NETS=127.,10.,192.168.
 AEGIS_CONV_EVENTS_MAX=200
 AEGIS_CONV_EVENTS_TTL=3600
 AEGIS_CONV_EVENTS_INCLUDE_TEXT=0
+
+# Files AV scan behavior
+FILES_AV_SCAN=1
+FILES_AV_TIMEOUT=15
+FILES_AV_FAIL_OPEN=1   # local dev convenience; use 0 in stricter environments
 
 # Crypto external features (reddit/orderbook)
 AEGIS_CRYPTO_EXTERNAL_FEATURES=1   # set 0 to disable
