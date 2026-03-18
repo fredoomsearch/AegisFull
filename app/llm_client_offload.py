@@ -15,15 +15,30 @@ import re
 import threading
 import time
 from typing import Any, Dict, List, Optional 
-
-try:  # pragma: no cover
-    from llama_cpp import Llama  # type: ignore
-except Exception:  # noqa: BLE001
-    Llama = None  # type: ignore
-
 from app.tools import sanitize_messages
 
 logger = logging.getLogger(__name__)
+_llama_class: Any = None
+_llama_import_attempted = False
+_llama_import_error: str | None = None
+
+# Avoid tokenizer fork warnings/deadlocks under multi-process/worker flows.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+
+def _get_llama_class() -> Any:
+    global _llama_class, _llama_import_attempted, _llama_import_error
+    if _llama_import_attempted:
+        return _llama_class
+    _llama_import_attempted = True
+    try:  # pragma: no cover
+        from llama_cpp import Llama as _ImportedLlama  # type: ignore
+
+        _llama_class = _ImportedLlama
+    except Exception as exc:  # noqa: BLE001
+        _llama_class = None
+        _llama_import_error = str(exc)
+    return _llama_class
 
 # ============================================================
 # ENV / CONFIG
@@ -44,7 +59,6 @@ if _raw_concurrency:
 else:
     # Default to single-flight generation; WizardCoder + llama.cpp doesn't love concurrent calls.
     LLM_CONCURRENCY = 1
-
 
 def _get_int_env(name: str, default: int, fast_default: Optional[int] = None) -> int:
     raw = os.getenv(name)
@@ -72,20 +86,39 @@ def _get_float_env(name: str, default: float, fast_default: Optional[float] = No
         return default
 
 
+# Queue wait budget before returning "model busy".
+# 0 means block until a slot is available.
+LLM_QUEUE_WAIT_SECONDS = max(
+    0.0,
+    _get_float_env("AEGIS_LLM_QUEUE_WAIT_SECONDS", 45.0, fast_default=20.0),
+)
+LLM_STALL_BUSY_AFTER_SECONDS = max(
+    0.0,
+    _get_float_env("AEGIS_LLM_STALL_BUSY_AFTER_SECONDS", 90.0, fast_default=30.0),
+)
+
+
 # ============================================================
 # STATUS
 # ============================================================
 
 def llm_status() -> Dict[str, Any]:
+    model_exists = os.path.exists(MODEL_PATH)
+    llama_class = _get_llama_class()
     return {
         "model_path": MODEL_PATH,
+        "model_exists": model_exists,
         "ctx": AEGIS_LLAMA_CTX,
         "threads": AEGIS_LLAMA_THREADS,
         "gpu_layers": AEGIS_N_GPU_LAYERS,
         "batch": AEGIS_LLAMA_BATCH,
         "max_new_tokens": MAX_NEW_TOKENS,
         "loaded": _llama is not None,
-        "available": Llama is not None,
+        "available": llama_class is not None,
+        "import_error": _llama_import_error,
+        "status": "ready" if (llama_class is not None and model_exists and _llama is not None) else (
+            "configured" if (llama_class is not None and model_exists) else "error"
+        ),
     }
 
 
@@ -99,8 +132,10 @@ def _get_llama() -> Any:
     if _llama is not None:
         return _llama
 
-    if Llama is None:
-        raise RuntimeError("llama-cpp-python is not installed.")
+    llama_class = _get_llama_class()
+    if llama_class is None:
+        detail = _llama_import_error or "llama-cpp-python is not installed."
+        raise RuntimeError(detail)
 
     with _llama_lock:
         if _llama is not None:
@@ -118,7 +153,7 @@ def _get_llama() -> Any:
             AEGIS_LLAMA_BATCH,
         )
 
-        _llama = Llama(
+        _llama = llama_class(
             model_path=MODEL_PATH,
             n_ctx=AEGIS_LLAMA_CTX,
             n_threads=AEGIS_LLAMA_THREADS,
@@ -203,83 +238,29 @@ AEGIS_LLAMA_THREADS = _get_int_env("AEGIS_LLAMA_THREADS", 16, fast_default=4)
 AEGIS_N_GPU_LAYERS = _get_int_env("AEGIS_N_GPU_LAYERS", 32, fast_default=0)
 AEGIS_LLAMA_BATCH = _get_int_env("AEGIS_LLAMA_BATCH", 512, fast_default=128)
 MAX_NEW_TOKENS = _get_int_env("AEGIS_MAX_NEW_TOKENS", 1800, fast_default=256)
-# Disable backend timeouts by default; set LLM_MAX_CALL_SECONDS>0 to cap.
+# Hard timeout is disabled by default for llama.cpp safety.
+# A timed-out worker cannot be safely cancelled and may keep generating in the
+# background, which risks concurrent calls and GGML assertions.
 MAX_CALL_SECONDS = _get_float_env("LLM_MAX_CALL_SECONDS", 0.0, fast_default=0.0)
 AEGIS_FAST_MODE = FAST_MODE
 AEGIS_LLM_CONCURRENCY = LLM_CONCURRENCY
-_TIMEOUT_SENTINEL = "__AEGIS_LLM_TIMEOUT__"
+AEGIS_LLM_QUEUE_WAIT_SECONDS = LLM_QUEUE_WAIT_SECONDS
+AEGIS_LLM_STALL_BUSY_AFTER_SECONDS = LLM_STALL_BUSY_AFTER_SECONDS
 
 # Single shared llama instance
 _llama: Optional[Any] = None
 _llama_lock = threading.Lock()
+_llama_infer_lock = threading.Lock()
 _llm_semaphore = threading.Semaphore(LLM_CONCURRENCY) if LLM_CONCURRENCY else None
+_timeout_disabled_warned = False
+_active_generation_lock = threading.Lock()
+_active_generations: Dict[int, float] = {}
 
 # If the model still tries to roleplay a transcript, strip those prefixes.
 _PREFIX_STRIP_RE = re.compile(r"(?im)^\s*(aegis|assistant|user)\s*:\s*")
 # ============================================================
 # LOW-LEVEL CALL
 # ============================================================
-
-
-
-# This function is the low-level bridge between our FastAPI app and the local WizardCoder model. It takes the already-sanitized conversation (messages), runs them through _format_wizardcoder to build the [INST] … [/INST] prompt, and then calls the shared llama_cpp.Llama instance with the desired sampling settings (max_tokens, temperature, top_p, plus optional stop tokens). Any tuning of inference behavior—stricter temperature, different stop sequences, or logging—happens here before the generated text is returned upstream.
-
-
-# En esa llamada intervienen varios “números” con funciones distintas:
-
-# max_tokens
-
-# Máximo de tokens nuevos que puede generar el modelo en esa respuesta. Cuanto más alto, más larga (y lenta) la salida; reducirlo evita timeouts. Ej.: 1500/2000.
-# temperature (0.2)
-
-# Controla qué tan “creativa” es la respuesta. Valores bajos (0.1–0.3) obligan al modelo a elegir tokens de mayor probabilidad, volviéndose muy determinista y técnico (ideal para código). Temperaturas altas (>0.7) lo hacen más variado pero también menos preciso.
-# top_p (0.95)
-
-# “Nucleus sampling”: el modelo sólo considera tokens cuya suma de probabilidades alcance el 95 %. Bajarlo (0.8) lo vuelve más conservador; subirlo lo hace más libre.
-# stop tokens
-
-# Lista de secuencias donde se corta la generación (por defecto ["</s>", "<|endoftext|>", "[/INST]"]). Garantizan que no siga escribiendo cuando termina el bloque de instrucción.
-# AEGIS_LLAMA_CTX (3072)
-
-# Longitud máxima del prompt (contexto) que el modelo puede ver de una vez. Afecta memoria y la capacidad de recordar mensajes largos.
-# AEGIS_LLAMA_THREADS (8)
-
-# Número de hilos CPU usados por llama.cpp. Súbelo si tienes más núcleos para acelerar la inferencia.
-# AEGIS_N_GPU_LAYERS (32)
-
-# Cuántas capas del modelo se ejecutan en GPU. Cuantas más capas en GPU, más rápidez (si tienes VRAM suficiente). Valores altos sólo aplican si cuentas con GPU compatible.
-# AEGIS_LLAMA_BATCH (512)
-# En esa llamada intervienen varios “números” con funciones distintas:
-
-# max_tokens
-
-# Máximo de tokens nuevos que puede generar el modelo en esa respuesta. Cuanto más alto, más larga (y lenta) la salida; reducirlo evita timeouts. Ej.: 1500/2000.
-# temperature (0.2)
-
-# Controla qué tan “creativa” es la respuesta. Valores bajos (0.1–0.3) obligan al modelo a elegir tokens de mayor probabilidad, volviéndose muy determinista y técnico (ideal para código). Temperaturas altas (>0.7) lo hacen más variado pero también menos preciso.
-# top_p (0.95)
-
-# “Nucleus sampling”: el modelo sólo considera tokens cuya suma de probabilidades alcance el 95 %. Bajarlo (0.8) lo vuelve más conservador; subirlo lo hace más libre.
-# stop tokens
-
-# Lista de secuencias donde se corta la generación (por defecto ["</s>", "<|endoftext|>", "[/INST]"]). Garantizan que no siga escribiendo cuando termina el bloque de instrucción.
-# AEGIS_LLAMA_CTX (3072)
-
-# Longitud máxima del prompt (contexto) que el modelo puede ver de una vez. Afecta memoria y la capacidad de recordar mensajes largos.
-# AEGIS_LLAMA_THREADS (8)
-
-# Número de hilos CPU usados por llama.cpp. Súbelo si tienes más núcleos para acelerar la inferencia.
-# AEGIS_N_GPU_LAYERS (32)
-
-# Cuántas capas del modelo se ejecutan en GPU. Cuantas más capas en GPU, más rápidez (si tienes VRAM suficiente). Valores altos sólo aplican si cuentas con GPU compatible.
-# AEGIS_LLAMA_BATCH (512)
-
-# Tamaño de lote interno para procesar tokens. Lotes grandes mejoran throughput pero consumen más RAM.
-# Todos esos parámetros se combinan: primero se arma el prompt (ya “limpio”), luego _call_llama_chat lo envía a llama.cpp con max_tokens/temperature/top_p/stop. Mientras tanto, los env vars (CTX, THREADS, GPU_LAYERS, BATCH) determinan cómo está configurado el modelo residente en memoria, influyendo en velocidad y coste de cada llamada.
-
-# Tamaño de lote interno para procesar tokens. Lotes grandes mejoran throughput pero consumen más RAM.
-# Todos esos parámetros se combinan: primero se arma el prompt (ya “limpio”), luego _call_llama_chat lo envía a llama.cpp con max_tokens/temperature/top_p/stop. Mientras tanto, los env vars (CTX, THREADS, GPU_LAYERS, BATCH) determinan cómo está configurado el modelo residente en memoria, influyendo en velocidad y coste de cada llamada.
-
 def _call_llama_chat(
     messages: List[Dict[str, str]],
     max_tokens: int,
@@ -295,15 +276,25 @@ def _call_llama_chat(
     # Keep stops minimal.
     stop_tokens = stop or ["</s>", "<|endoftext|>", "[/INST]"]
 
-    result = llm(  # type: ignore[call-arg]
-        prompt,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        repeat_penalty=1.1,
-        stop=stop_tokens,
-    )
+    # llama.cpp invocations must stay single-flight per process.
+    with _llama_infer_lock:
+        result = llm(  # type: ignore[call-arg]
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            repeat_penalty=1.1,
+            stop=stop_tokens,
+        )
     return _postprocess(_extract_text(result))
+
+
+def _oldest_active_generation_age() -> float:
+    with _active_generation_lock:
+        if not _active_generations:
+            return 0.0
+        oldest_started = min(_active_generations.values())
+    return max(0.0, time.perf_counter() - oldest_started)
 
 
 def _call_llama_chat_with_timeout(
@@ -313,33 +304,16 @@ def _call_llama_chat_with_timeout(
     top_p: float = 0.95,
     stop: Optional[List[str]] = None,
 ) -> str:
-    # No backend timeout when MAX_CALL_SECONDS<=0.
-    if not MAX_CALL_SECONDS or MAX_CALL_SECONDS <= 0:
-        return _call_llama_chat(messages, max_tokens, temperature, top_p, stop)
-
-    result: dict[str, object] = {"text": "", "error": None}
-    done = threading.Event()
-
-    def _worker() -> None:
-        try:
-            result["text"] = _call_llama_chat(messages, max_tokens, temperature, top_p, stop)
-        except Exception as exc:  # noqa: BLE001
-            result["error"] = exc
-        finally:
-            done.set()
-
-    thread = threading.Thread(target=_worker, daemon=True)
-    thread.start()
-    if not done.wait(MAX_CALL_SECONDS):
+    # Unsafe timeout mode disabled: there is no safe cancellation primitive for
+    # an in-flight llama.cpp generation in this process model.
+    global _timeout_disabled_warned
+    if MAX_CALL_SECONDS and MAX_CALL_SECONDS > 0 and not _timeout_disabled_warned:
         logger.warning(
-            "[llm_offload] hard timeout after %.2fs (limit=%.2fs)",
-            MAX_CALL_SECONDS,
+            "[llm_offload] LLM_MAX_CALL_SECONDS=%.2f requested, but hard timeout is disabled for llama.cpp safety.",
             MAX_CALL_SECONDS,
         )
-        return _TIMEOUT_SENTINEL
-    if result["error"] is not None:
-        raise result["error"]  # type: ignore[misc]
-    return str(result.get("text") or "")
+        _timeout_disabled_warned = True
+    return _call_llama_chat(messages, max_tokens, temperature, top_p, stop)
 
 
 # ============================================================
@@ -360,7 +334,7 @@ def generate_response(
     else:
         max_tokens = min(int(max_new_tokens), MAX_NEW_TOKENS)
 
-    if Llama is None:
+    if _get_llama_class() is None:
         logger.error("llama-cpp-python missing; cannot generate response.")
         return (
             "Local LLM backend is not available (llama-cpp-python missing). "
@@ -369,15 +343,35 @@ def generate_response(
 
     acquired = False
     if _llm_semaphore is not None:
-        if not _llm_semaphore.acquire(blocking=False):
+        if LLM_STALL_BUSY_AFTER_SECONDS > 0 and _oldest_active_generation_age() >= LLM_STALL_BUSY_AFTER_SECONDS:
+            logger.warning(
+                "[llm_offload] refusing queued request because an active generation exceeded %.2fs",
+                LLM_STALL_BUSY_AFTER_SECONDS,
+            )
+            return (
+                "The local model is busy with a long-running request. "
+                "Please retry in a moment."
+            )
+        wait_started = time.perf_counter()
+        if LLM_QUEUE_WAIT_SECONDS > 0:
+            acquired = _llm_semaphore.acquire(timeout=LLM_QUEUE_WAIT_SECONDS)
+        else:
+            _llm_semaphore.acquire()
+            acquired = True
+        queue_wait_s = time.perf_counter() - wait_started
+        if not acquired:
             return (
                 "The local model is busy. "
                 "Please retry in a moment or reduce concurrent requests."
             )
-        acquired = True
+        if queue_wait_s >= 0.25:
+            logger.info("[llm_offload] queued %.2fs before generation slot", queue_wait_s)
 
     try:
         start = time.perf_counter()
+        generation_key = threading.get_ident()
+        with _active_generation_lock:
+            _active_generations[generation_key] = start
 
         text = ""
         try:
@@ -390,12 +384,6 @@ def generate_response(
         except Exception as exc:  # noqa: BLE001
             logger.exception("[llm_offload] llama.cpp error: %s", exc)
             text = ""
-
-        if text == _TIMEOUT_SENTINEL:
-            return (
-                "The local model took too long to respond. "
-                "Try again or reduce max tokens / context size."
-            )
 
         duration = time.perf_counter() - start
 
@@ -432,6 +420,8 @@ def generate_response(
 
         return text
     finally:
+        with _active_generation_lock:
+            _active_generations.pop(threading.get_ident(), None)
         if acquired and _llm_semaphore is not None:
             try:
                 _llm_semaphore.release()

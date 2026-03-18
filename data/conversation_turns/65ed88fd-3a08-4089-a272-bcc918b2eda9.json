@@ -1,0 +1,169 @@
+[
+  {
+    "turn_id": "78cccb809c18",
+    "created_at": 1773826613452,
+    "finished_at": 1773826620302,
+    "status": "success",
+    "mode": "web",
+    "source_plan": "web_only",
+    "active_project_id": null,
+    "user_message": "web: what is the capital of japan?",
+    "items": [
+      {
+        "item_id": "1d42cec380b6",
+        "ts": 1773826613452,
+        "kind": "plan",
+        "status": "ok",
+        "payload": {
+          "mode": "web",
+          "source_plan": "web_only",
+          "force_web": true,
+          "current_task": "what is the capital of japan?",
+          "current_subtask": "web: what is the capital of japan?",
+          "next_step": "web: what is the capital of japan?",
+          "next_tool": "web_search",
+          "missing_evidence": [],
+          "tool_candidates": [
+            "web_search"
+          ],
+          "tool_risks": {
+            "web_search": "safe"
+          },
+          "approval_required": [],
+          "actions": [],
+          "next_action": null,
+          "llm_required": true,
+          "steps": [
+            "web_search",
+            "llm_synthesis"
+          ],
+          "routing_confidence": 0.9500000000000001,
+          "ambiguous_route": false
+        }
+      },
+      {
+        "item_id": "4ff385060c45",
+        "ts": 1773826613452,
+        "kind": "source_selection",
+        "status": "ok",
+        "payload": {
+          "source_plan": "web_only",
+          "next_tool": "web_search",
+          "tool_candidates": [
+            "web_search"
+          ],
+          "llm_required": true
+        }
+      },
+      {
+        "item_id": "b7a347fcd00a",
+        "ts": 1773826613453,
+        "kind": "tool_call",
+        "status": "ok",
+        "payload": {
+          "tool": "web_search",
+          "query": "what is the capital of"
+        }
+      },
+      {
+        "item_id": "e94828344800",
+        "ts": 1773826620251,
+        "kind": "replan",
+        "status": "ok",
+        "payload": {
+          "reason": "web_search",
+          "next_step": "web: what is the capital of japan?",
+          "next_tool": "llm_synthesis",
+          "missing_evidence": [],
+          "recent_tool_failures": []
+        }
+      },
+      {
+        "item_id": "143dd885970e",
+        "ts": 1773826620251,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "tool": "web_search",
+          "query": "what is the capital of",
+          "source": "stale-cache",
+          "provider": "brave_html",
+          "results": 2
+        }
+      },
+      {
+        "item_id": "fec0f170a424",
+        "ts": 1773826620254,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "tool": "evidence_only",
+          "response": "Collected evidence without synthesis:\n\n[1] dc.gov\nContent from https://dc.gov/:\n| DC Skip to main content Search form X Search Residents New Resident Resources Public Safety Public Works, Sanitation and Utilities Emergency Preparedness Social Services Health and Human Services Transportation and Motor Vehicles Parks and Recreation Government Budget District Agencies Grants and Funding DC Council Laws, Regulations and Courts Open Government Official Documents and Records Tickets and Fines Visitors Arts and Culture Media and Communications Getting Around the District Sports, Parks and Recreation History and Tourism Tours, Travel and Accommodation Education District Public Charter Schools Deputy Mayor for Education DC Public Schools District Public Charter School Board District School Closures Higher Education District School Calendars State Board of Education District School Profiles State Superintendent of Education Jobs American Job Center Training and Professional Certification Appointed Positions Unemployment Compensation District Government Jobs Seniors Employment Service Job Seeker Resources Youth Services Online Services 311 Service Request Online Feedback, Complaints and A..."
+        }
+      },
+      {
+        "item_id": "a52aacb6fe8b",
+        "ts": 1773826620301,
+        "kind": "replan",
+        "status": "ok",
+        "payload": {
+          "reason": "evidence_only",
+          "next_step": "web: what is the capital of japan?",
+          "next_tool": "web_search",
+          "missing_evidence": [],
+          "recent_tool_failures": []
+        }
+      }
+    ],
+    "assistant_message": "Collected evidence without synthesis:\n\n[1] dc.gov\nContent from https://dc.gov/:\n| DC Skip to main content Search form X Search Residents New Resident Resources Public Safety Public Works, Sanitation and Utilities Emergency Preparedness Social Services Health and Human Services Transportation and Motor Vehicles Parks and Recreation Government Budget District Agencies Grants and Funding DC Council Laws, Regulations and Courts Open Government Official Documents and Records Tickets and Fines Visitors Arts and Culture Media and Communications Getting Around the District Sports, Parks and Recreation History and Tourism Tours, Travel and Accommodation Education District Public Charter Schools Deputy Mayor for Education DC Public Schools District Public Charter School Board District School Closures Higher Education District School Calendars State Board of Education District School Profiles State Superintendent of Education Jobs American Job Center Training and Professional Certification Appointed Positions Unemployment Compensation District Government Jobs Seniors Employment Service Job Seeker Resources Youth Services Online Services 311 Service Request Online Feedback, Complaints and A...",
+    "response_context": {
+      "source_plan": "web_only",
+      "source_origin": [
+        "web"
+      ],
+      "active_project_id": null,
+      "effective_tool": "evidence_only",
+      "effective_tool_status": "ok",
+      "effective_tool_output": "Collected evidence without synthesis:\n\n[1] dc.gov\nContent from https://dc.gov/:\n| DC Skip to main content Search form X Search Residents New Resident Resources Public Safety Public Works, Sanitation and Utilities Emergency Preparedness Social Services Health and Human Services Transportation and Motor Vehicles Parks and Recreation Government Budget District Agencies Grants and Funding DC Council Laws, Regulations and Courts Open Government Official Documents and Records Tickets and Fines Visitors Arts and Culture Media and Communications Getting Around the District Sports, Parks and Recreation History and Tourism Tours, Travel and Accommodation Education District Public Charter Schools Deputy Mayor for Education DC Public Schools District Public Charter School Board District School Closures Higher Education District School Calendars State Board of Education District School Profiles State Superintendent of Education Jobs American Job Center Training and Professional Certification App...",
+      "web_query": "what is the capital of",
+      "web_status": "stale-cache",
+      "web_source": "stale-cache",
+      "web_provider": "brave_html",
+      "web_results": 4,
+      "web_attempted": true,
+      "using_live_web": false,
+      "using_cached_web": false,
+      "using_stale_cache": true,
+      "data_notice": "Live web was unavailable; using stored web cache.",
+      "architecture_summary": "",
+      "current_task": null,
+      "current_subtask": "web: what is the capital of japan?",
+      "current_file_focus": null,
+      "current_symbol_focus": null,
+      "last_artifact": "what is the capital of japan?",
+      "last_artifact_kind": "api_endpoint",
+      "current_artifact_focus": "what is the capital of japan?",
+      "recent_tool_failures": [],
+      "web_findings": [
+        "dc.gov",
+        "Wikipedia en.wikipedia.org › wiki  › Washington,_D.C. Washington, D.C. - Wikipedia"
+      ],
+      "next_step": "web: what is the capital of japan?",
+      "next_tool": "web_search",
+      "missing_evidence": [],
+      "tool_candidates": [
+        "web_search"
+      ],
+      "tool_risks": {
+        "web_search": "safe"
+      },
+      "approval_required": [],
+      "actions": [],
+      "next_action": null,
+      "llm_required": true,
+      "routing_confidence": 0.9500000000000001,
+      "ambiguous_route": false,
+      "pending_approval": null
+    }
+  }
+]

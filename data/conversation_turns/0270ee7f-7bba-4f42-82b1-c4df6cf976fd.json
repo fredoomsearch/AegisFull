@@ -1,0 +1,128 @@
+[
+  {
+    "turn_id": "4d1fe009ef50",
+    "created_at": 1773824836611,
+    "finished_at": 1773824836614,
+    "status": "success",
+    "mode": "tool",
+    "source_plan": "local_only",
+    "active_project_id": "proj_213c38",
+    "user_message": "[execute_tool] project_files",
+    "items": [
+      {
+        "item_id": "8fa4dae8ea57",
+        "ts": 1773824836612,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "tool": "project_files",
+          "args": {
+            "project_id": "proj_213c38",
+            "q": "app",
+            "limit": 10
+          }
+        }
+      },
+      {
+        "item_id": "4e3f47ce6092",
+        "ts": 1773824836612,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "tool": "project_files"
+        }
+      },
+      {
+        "item_id": "75ffcf4c670f",
+        "ts": 1773824836613,
+        "kind": "replan",
+        "status": "ok",
+        "payload": {
+          "reason": "project_files:success",
+          "next_step": "",
+          "next_tool": null,
+          "missing_evidence": [],
+          "recent_tool_failures": []
+        }
+      }
+    ],
+    "assistant_message": "tool executed",
+    "response_context": {
+      "source_plan": "local_only",
+      "source_origin": [
+        "local"
+      ],
+      "active_project_id": "proj_213c38",
+      "effective_tool": "project_files",
+      "effective_tool_status": "ok",
+      "effective_tool_output": "proj_213c38",
+      "web_query": "",
+      "web_status": "not-used",
+      "web_source": "none",
+      "web_provider": "",
+      "web_results": 0,
+      "web_attempted": false,
+      "using_live_web": false,
+      "using_cached_web": false,
+      "using_stale_cache": false,
+      "data_notice": "Respondiendo con datos locales del proyecto.",
+      "architecture_summary": "",
+      "current_task": null,
+      "current_subtask": null,
+      "current_file_focus": null,
+      "current_symbol_focus": null,
+      "last_artifact": null,
+      "last_artifact_kind": null,
+      "current_artifact_focus": null,
+      "recent_tool_failures": [],
+      "web_findings": [],
+      "next_step": null,
+      "next_tool": null,
+      "missing_evidence": [],
+      "tool_candidates": [
+        "project_manifest",
+        "project_symbols",
+        "project_excerpt"
+      ],
+      "tool_risks": {
+        "project_manifest": "safe",
+        "project_symbols": "safe",
+        "project_excerpt": "safe"
+      },
+      "approval_required": [],
+      "actions": [
+        {
+          "tool": "project_manifest",
+          "risk": "safe",
+          "label_en": "Show project summary",
+          "label_es": "Resumen del proyecto",
+          "args": {}
+        },
+        {
+          "tool": "project_symbols",
+          "risk": "safe",
+          "label_en": "Search symbols",
+          "label_es": "Buscar símbolos",
+          "args": {}
+        }
+      ],
+      "next_action": {
+        "tool": "project_manifest",
+        "risk": "safe",
+        "label_en": "Show project summary",
+        "label_es": "Resumen del proyecto",
+        "args": {}
+      },
+      "llm_required": false,
+      "routing_confidence": 0.95,
+      "ambiguous_route": false,
+      "pending_approval": null,
+      "continue_available": false,
+      "planner_loop": {
+        "phase": "execute",
+        "state": "completed",
+        "tool": "project_files"
+      }
+    }
+  }
+]

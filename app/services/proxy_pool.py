@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""
+Outbound proxy pool helper for web providers.
+
+Why this module exists:
+- Rotate configured proxies and expose safe fallback to direct requests.
+"""
+
 import os
 import time
 from contextlib import contextmanager

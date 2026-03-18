@@ -8,6 +8,9 @@ Responsibilities:
   - Provide a small, reusable EmailService class.
   - Support plain-text and HTML emails.
   - Optional template rendering from the `templates/` directory.
+
+Why this module exists:
+  - Isolate notification transport concerns from API/business logic.
 """
 
 import logging
@@ -202,7 +205,14 @@ class EmailService:
             server.send_message(msg, from_addr=self.from_email, to_addrs=list(recipients))
 
 
-email_service = EmailService()
+_email_service: EmailService | None = None
+
+
+def get_email_service() -> EmailService:
+    global _email_service
+    if _email_service is None:
+        _email_service = EmailService()
+    return _email_service
 
 
 def send_email(
@@ -216,7 +226,7 @@ def send_email(
     """
     Convenience wrapper around email_service.send_email.
     """
-    return email_service.send_email(
+    return get_email_service().send_email(
         to=to,
         subject=subject,
         html_body=html_body,

@@ -1,0 +1,180 @@
+[
+  {
+    "turn_id": "e83d6564d111",
+    "created_at": 1773823398451,
+    "finished_at": 1773823398452,
+    "status": "success",
+    "mode": "chat",
+    "source_plan": "local_only",
+    "active_project_id": "whioutoKn",
+    "user_message": "what time is it in new york?",
+    "items": [
+      {
+        "item_id": "23a539856362",
+        "ts": 1773823398451,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "tool": "quick_time",
+          "response": "En new york son las 2026-03-18 04:43:18 (America/New_York)."
+        }
+      }
+    ],
+    "assistant_message": "En new york son las 2026-03-18 04:43:18 (America/New_York).",
+    "response_context": {
+      "source_plan": "local_only",
+      "source_origin": [
+        "local"
+      ],
+      "active_project_id": "whioutoKn",
+      "effective_tool": null,
+      "effective_tool_status": null,
+      "effective_tool_output": null,
+      "web_query": "",
+      "web_status": "not-used",
+      "web_source": "none",
+      "web_provider": "",
+      "web_results": 0,
+      "web_attempted": false,
+      "using_live_web": false,
+      "using_cached_web": false,
+      "using_stale_cache": false,
+      "data_notice": "Respondiendo con datos locales del proyecto.",
+      "architecture_summary": "Capas detectadas: backend, frontend, auth, database, tests, infra, serverless, ci, monitoring, ai_rag, image, crypto, security\nDirectorios principales: models (758), logs (271), artifacts (236), data (96), app (93), tmp (8)\nEntrypoints probables: main.py\nConfigs/infra: pytest.ini, Dockerfile, nginx/nginx.conf, models/ComfyUI/alembic.ini, models/ComfyUI/pytest.ini",
+      "current_task": null,
+      "current_subtask": "what time is it in new york?",
+      "current_file_focus": null,
+      "current_symbol_focus": null,
+      "last_artifact": null,
+      "last_artifact_kind": null,
+      "current_artifact_focus": null,
+      "recent_tool_failures": [],
+      "web_findings": [],
+      "next_step": "what time is it in new york?",
+      "next_tool": null,
+      "missing_evidence": [],
+      "tool_candidates": [],
+      "tool_risks": {},
+      "approval_required": [],
+      "actions": [],
+      "next_action": null,
+      "llm_required": true,
+      "routing_confidence": 0.0,
+      "ambiguous_route": false,
+      "pending_approval": null,
+      "project_summary": "Proyecto activo: whioutoKn\nArchivos: 1817 | Carpetas: 285 | Chunks: 13339\nLenguajes: python (640), json (207), yaml (39), markdown (32), shell (8), sql (3)\nFrameworks: -\nEntrypoints: main.py\nArchivos clave: README.MD, pyproject.toml, main.py, Dockerfile, data/tmp_test_proj/app.py, models/embeddings/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/README.md, models/ComfyUI/alembic.ini, models/ComfyUI/manager_requirements.txt\nCapas detectadas: backend, frontend, auth, database, tests, infra, serverless, ci, monitoring, ai_rag, image, crypto, security\nDirectorios principales: models (758), logs (271), artifacts (236), data (96), app (93), tmp (8)\nEntrypoints probables: main.py\nConfigs/infra: pytest.ini, Dockerfile, nginx/nginx.conf, models/ComfyUI/alembic.ini, models/ComfyUI/pytest.ini",
+      "architecture": {
+        "layers": [
+          "backend",
+          "frontend",
+          "auth",
+          "database",
+          "tests",
+          "infra",
+          "serverless",
+          "ci",
+          "monitoring",
+          "ai_rag",
+          "image",
+          "crypto",
+          "security"
+        ],
+        "top_dirs": [
+          {
+            "name": "models",
+            "count": 758
+          },
+          {
+            "name": "logs",
+            "count": 271
+          },
+          {
+            "name": "artifacts",
+            "count": 236
+          },
+          {
+            "name": "data",
+            "count": 96
+          },
+          {
+            "name": "app",
+            "count": 93
+          },
+          {
+            "name": "tmp",
+            "count": 8
+          },
+          {
+            "name": "ui",
+            "count": 5
+          },
+          {
+            "name": ".pytest_cache",
+            "count": 5
+          },
+          {
+            "name": "nginx",
+            "count": 1
+          },
+          {
+            "name": ".github",
+            "count": 1
+          }
+        ],
+        "backend": true,
+        "frontend": true,
+        "auth": true,
+        "database": true,
+        "tests": true,
+        "infra": true,
+        "serverless": true,
+        "ci": true,
+        "monitoring": true,
+        "ai_rag": true,
+        "image": true,
+        "crypto": true,
+        "security": true,
+        "entrypoints": [
+          "main.py"
+        ],
+        "config_files": [
+          "pytest.ini",
+          "Dockerfile",
+          "nginx/nginx.conf",
+          "models/ComfyUI/alembic.ini",
+          "models/ComfyUI/pytest.ini"
+        ],
+        "key_files": [
+          "README.MD",
+          "pyproject.toml",
+          "main.py",
+          "Dockerfile",
+          "data/tmp_test_proj/app.py",
+          "models/embeddings/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/README.md",
+          "models/ComfyUI/alembic.ini",
+          "models/ComfyUI/manager_requirements.txt",
+          "models/ComfyUI/pyproject.toml",
+          "models/ComfyUI/requirements.txt",
+          "models/ComfyUI/server.py",
+          "models/ComfyUI/main.py"
+        ]
+      },
+      "entrypoints": [
+        "main.py"
+      ],
+      "dependencies": [
+        "pyproject.toml",
+        "models/ComfyUI/pyproject.toml",
+        "models/ComfyUI/requirements.txt",
+        "models/ComfyUI/tests-unit/requirements.txt"
+      ],
+      "configs": [
+        "pytest.ini",
+        "Dockerfile",
+        "nginx/nginx.conf",
+        "models/ComfyUI/alembic.ini",
+        "models/ComfyUI/pytest.ini"
+      ]
+    }
+  }
+]

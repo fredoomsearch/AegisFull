@@ -1,0 +1,358 @@
+[
+  {
+    "turn_id": "791fbd8360d6",
+    "created_at": 1773819072623,
+    "finished_at": 1773819072631,
+    "status": "success",
+    "mode": "agent",
+    "source_plan": "local_only",
+    "active_project_id": "proj_d45009",
+    "user_message": "what files are in this project?",
+    "items": [
+      {
+        "item_id": "c0c924edbc08",
+        "ts": 1773819072623,
+        "kind": "run_start",
+        "status": "ok",
+        "payload": {
+          "max_iterations": 3,
+          "max_total_tool_calls": 8,
+          "max_tool_retries": 1,
+          "tool_retry_backoff_ms": 150
+        }
+      },
+      {
+        "item_id": "0cf51ddd4265",
+        "ts": 1773819072624,
+        "kind": "plan",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "plan": {
+            "mode": "agent",
+            "source_plan": "local_only",
+            "force_web": false,
+            "current_task": "",
+            "current_subtask": "",
+            "next_step": "",
+            "next_tool": "project_files",
+            "missing_evidence": [],
+            "tool_candidates": [
+              "project_manifest",
+              "project_files",
+              "project_symbols",
+              "project_excerpt"
+            ],
+            "tool_risks": {
+              "project_manifest": "safe",
+              "project_files": "safe",
+              "project_symbols": "safe",
+              "project_excerpt": "safe"
+            },
+            "approval_required": [],
+            "actions": [
+              {
+                "tool": "project_files",
+                "risk": "safe",
+                "label_en": "List files",
+                "label_es": "Listar archivos",
+                "args": {}
+              },
+              {
+                "tool": "project_manifest",
+                "risk": "safe",
+                "label_en": "Show project summary",
+                "label_es": "Resumen del proyecto",
+                "args": {}
+              },
+              {
+                "tool": "project_symbols",
+                "risk": "safe",
+                "label_en": "Search symbols",
+                "label_es": "Buscar símbolos",
+                "args": {}
+              }
+            ],
+            "next_action": {
+              "tool": "project_files",
+              "risk": "safe",
+              "label_en": "List files",
+              "label_es": "Listar archivos",
+              "args": {}
+            },
+            "llm_required": false,
+            "steps": [
+              "project_manifest",
+              "project_files_symbols"
+            ],
+            "routing_confidence": 1.0,
+            "ambiguous_route": false
+          }
+        }
+      },
+      {
+        "item_id": "359720232e9a",
+        "ts": 1773819072624,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "6bbcdaeed4f8",
+        "ts": 1773819072624,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "5ec4fd9ef0e2",
+        "ts": 1773819072625,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "1a972c2bee08",
+        "ts": 1773819072625,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_files"
+        }
+      },
+      {
+        "item_id": "5fde44b65c81",
+        "ts": 1773819072625,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_files"
+        }
+      },
+      {
+        "item_id": "387c1721f68d",
+        "ts": 1773819072626,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_files"
+        }
+      },
+      {
+        "item_id": "e0d8c8d71126",
+        "ts": 1773819072626,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_symbols"
+        }
+      },
+      {
+        "item_id": "852e0a7dc59b",
+        "ts": 1773819072626,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_symbols",
+          "q": "",
+          "count": 1
+        }
+      },
+      {
+        "item_id": "81837857074b",
+        "ts": 1773819072627,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_symbols"
+        }
+      },
+      {
+        "item_id": "e31a57fd21e4",
+        "ts": 1773819072627,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_excerpt"
+        }
+      },
+      {
+        "item_id": "d33f4bcdbd6c",
+        "ts": 1773819072627,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_excerpt",
+          "path": ""
+        }
+      },
+      {
+        "item_id": "52b509c44bd5",
+        "ts": 1773819072628,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_excerpt"
+        }
+      },
+      {
+        "item_id": "5a569e1fde09",
+        "ts": 1773819072628,
+        "kind": "evidence",
+        "status": "ok",
+        "payload": {
+          "origin": "manifest",
+          "kind": "summary",
+          "project_id": "proj_d45009",
+          "title": "project manifest summary",
+          "text": "Active project: proj_d45009\nFiles: 1 | Dirs: 0 | Chunks: 1\nLanguages: python (1)\nFrameworks: -\nEntrypoints: app.py\nKey files: app.py\nDetected layers: -\nTop directories: -\nLikely entrypoints: app.py\nConfig/infra files: -",
+          "meta": {},
+          "iteration": 1
+        }
+      },
+      {
+        "item_id": "5e1c70c57aad",
+        "ts": 1773819072629,
+        "kind": "evidence",
+        "status": "ok",
+        "payload": {
+          "origin": "manifest",
+          "kind": "files",
+          "project_id": "proj_d45009",
+          "title": "project files (summary)",
+          "text": "Project files:\n- app.py",
+          "meta": {
+            "prefix": ""
+          },
+          "iteration": 1
+        }
+      },
+      {
+        "item_id": "24168d03880f",
+        "ts": 1773819072629,
+        "kind": "evidence",
+        "status": "ok",
+        "payload": {
+          "origin": "local",
+          "kind": "symbols",
+          "project_id": "proj_d45009",
+          "title": "symbol matches (all)",
+          "text": "- login @ app.py",
+          "meta": {
+            "q": "",
+            "count": 1
+          },
+          "iteration": 1
+        }
+      },
+      {
+        "item_id": "fd628c890dc1",
+        "ts": 1773819072630,
+        "kind": "run_stop",
+        "status": "ok",
+        "payload": {
+          "reason": "plan_satisfied",
+          "iteration": 1,
+          "total_tool_calls": 4
+        }
+      }
+    ],
+    "assistant_message": "Active project: proj_d45009\nFiles: 1 | Dirs: 0 | Chunks: 1\nLanguages: python (1)\nFrameworks: -\nEntrypoints: app.py\nKey files: app.py\nDetected layers: -\nTop directories: -\nLikely entrypoints: app.py\nConfig/infra files: -\n\nProject files:\n- app.py\n\n- login @ app.py",
+    "response_context": {
+      "plan": {
+        "mode": "agent",
+        "source_plan": "local_only",
+        "force_web": false,
+        "current_task": "",
+        "current_subtask": "",
+        "next_step": "",
+        "next_tool": "project_files",
+        "missing_evidence": [],
+        "tool_candidates": [
+          "project_manifest",
+          "project_files",
+          "project_symbols",
+          "project_excerpt"
+        ],
+        "tool_risks": {
+          "project_manifest": "safe",
+          "project_files": "safe",
+          "project_symbols": "safe",
+          "project_excerpt": "safe"
+        },
+        "approval_required": [],
+        "actions": [
+          {
+            "tool": "project_files",
+            "risk": "safe",
+            "label_en": "List files",
+            "label_es": "Listar archivos",
+            "args": {}
+          },
+          {
+            "tool": "project_manifest",
+            "risk": "safe",
+            "label_en": "Show project summary",
+            "label_es": "Resumen del proyecto",
+            "args": {}
+          },
+          {
+            "tool": "project_symbols",
+            "risk": "safe",
+            "label_en": "Search symbols",
+            "label_es": "Buscar símbolos",
+            "args": {}
+          }
+        ],
+        "next_action": {
+          "tool": "project_files",
+          "risk": "safe",
+          "label_en": "List files",
+          "label_es": "Listar archivos",
+          "args": {}
+        },
+        "llm_required": false,
+        "steps": [
+          "project_manifest",
+          "project_files_symbols"
+        ],
+        "routing_confidence": 1.0,
+        "ambiguous_route": false
+      },
+      "iterations": 1,
+      "evidence_count": 3,
+      "web_meta": {},
+      "active_project_id": "proj_d45009",
+      "planner_loop": {
+        "phase": "verify",
+        "state": "completed",
+        "max_iterations": 3,
+        "max_total_tool_calls": 8,
+        "max_tool_retries": 1,
+        "tool_retry_backoff_ms": 150,
+        "budget_exhausted": false,
+        "total_tool_calls": 4,
+        "iterations_completed": 1,
+        "stop_reason": "plan_satisfied"
+      }
+    }
+  }
+]

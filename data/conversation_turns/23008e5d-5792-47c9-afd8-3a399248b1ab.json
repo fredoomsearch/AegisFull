@@ -1,0 +1,328 @@
+[
+  {
+    "turn_id": "5a847d26b654",
+    "created_at": 1773819072817,
+    "finished_at": 1773819072823,
+    "status": "success",
+    "mode": "agent",
+    "source_plan": "local_only",
+    "active_project_id": "proj_4a91bb",
+    "user_message": "continue analysis",
+    "items": [
+      {
+        "item_id": "19be84e977b7",
+        "ts": 1773819072817,
+        "kind": "run_start",
+        "status": "ok",
+        "payload": {
+          "max_iterations": 3,
+          "max_total_tool_calls": 20,
+          "max_tool_retries": 1,
+          "tool_retry_backoff_ms": 150
+        }
+      },
+      {
+        "item_id": "886885a76d4f",
+        "ts": 1773819072818,
+        "kind": "plan",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "plan": {
+            "mode": "agent",
+            "source_plan": "local_only",
+            "force_web": false,
+            "current_task": "review project",
+            "current_subtask": "collect manifest evidence",
+            "next_step": "collect more evidence",
+            "next_tool": "project_manifest",
+            "missing_evidence": [
+              "extra_local_confirmation"
+            ],
+            "tool_candidates": [
+              "project_manifest"
+            ],
+            "tool_risks": {
+              "project_manifest": "safe"
+            },
+            "approval_required": [],
+            "actions": [
+              {
+                "tool": "project_manifest",
+                "risk": "safe",
+                "args": {}
+              }
+            ],
+            "next_action": {
+              "tool": "project_manifest",
+              "risk": "safe",
+              "args": {}
+            },
+            "llm_required": false,
+            "steps": [
+              "project_manifest"
+            ]
+          }
+        }
+      },
+      {
+        "item_id": "fec7c6203b45",
+        "ts": 1773819072819,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "73a1be7111a2",
+        "ts": 1773819072819,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "5c0b7e33ff51",
+        "ts": 1773819072819,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "3fbe3132e75a",
+        "ts": 1773819072819,
+        "kind": "evidence",
+        "status": "ok",
+        "payload": {
+          "origin": "manifest",
+          "kind": "summary",
+          "project_id": "proj_4a91bb",
+          "title": "project manifest summary",
+          "text": "Active project: proj_4a91bb\nFiles: 1 | Dirs: 0 | Chunks: 1\nLanguages: python (1)\nFrameworks: -\nEntrypoints: app.py\nKey files: app.py\nDetected layers: -\nTop directories: -\nLikely entrypoints: app.py\nConfig/infra files: -",
+          "meta": {},
+          "iteration": 1
+        }
+      },
+      {
+        "item_id": "2089efbc9c23",
+        "ts": 1773819072820,
+        "kind": "plan",
+        "status": "ok",
+        "payload": {
+          "iteration": 2,
+          "plan": {
+            "mode": "agent",
+            "source_plan": "local_only",
+            "force_web": false,
+            "current_task": "review project",
+            "current_subtask": "collect manifest evidence",
+            "next_step": "collect more evidence",
+            "next_tool": "project_manifest",
+            "missing_evidence": [
+              "extra_local_confirmation"
+            ],
+            "tool_candidates": [
+              "project_manifest"
+            ],
+            "tool_risks": {
+              "project_manifest": "safe"
+            },
+            "approval_required": [],
+            "actions": [
+              {
+                "tool": "project_manifest",
+                "risk": "safe",
+                "args": {}
+              }
+            ],
+            "next_action": {
+              "tool": "project_manifest",
+              "risk": "safe",
+              "args": {}
+            },
+            "llm_required": false,
+            "steps": [
+              "project_manifest"
+            ]
+          }
+        }
+      },
+      {
+        "item_id": "d8cb8aac8a58",
+        "ts": 1773819072820,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "iteration": 2,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "2c0454307bb6",
+        "ts": 1773819072820,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "iteration": 2,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "e5ec187720cd",
+        "ts": 1773819072821,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "iteration": 2,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "07684218f990",
+        "ts": 1773819072821,
+        "kind": "plan",
+        "status": "ok",
+        "payload": {
+          "iteration": 3,
+          "plan": {
+            "mode": "agent",
+            "source_plan": "local_only",
+            "force_web": false,
+            "current_task": "review project",
+            "current_subtask": "collect manifest evidence",
+            "next_step": "collect more evidence",
+            "next_tool": "project_manifest",
+            "missing_evidence": [
+              "extra_local_confirmation"
+            ],
+            "tool_candidates": [
+              "project_manifest"
+            ],
+            "tool_risks": {
+              "project_manifest": "safe"
+            },
+            "approval_required": [],
+            "actions": [
+              {
+                "tool": "project_manifest",
+                "risk": "safe",
+                "args": {}
+              }
+            ],
+            "next_action": {
+              "tool": "project_manifest",
+              "risk": "safe",
+              "args": {}
+            },
+            "llm_required": false,
+            "steps": [
+              "project_manifest"
+            ]
+          }
+        }
+      },
+      {
+        "item_id": "f6d4ca6d1c9c",
+        "ts": 1773819072822,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "iteration": 3,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "4fa79724856e",
+        "ts": 1773819072822,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "iteration": 3,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "050b7a16c427",
+        "ts": 1773819072822,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "iteration": 3,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "e33fd0c410ad",
+        "ts": 1773819072823,
+        "kind": "run_stop",
+        "status": "ok",
+        "payload": {
+          "reason": "max_iterations_reached",
+          "iteration": 3,
+          "total_tool_calls": 3
+        }
+      }
+    ],
+    "assistant_message": "Active project: proj_4a91bb\nFiles: 1 | Dirs: 0 | Chunks: 1\nLanguages: python (1)\nFrameworks: -\nEntrypoints: app.py\nKey files: app.py\nDetected layers: -\nTop directories: -\nLikely entrypoints: app.py\nConfig/infra files: -",
+    "response_context": {
+      "plan": {
+        "mode": "agent",
+        "source_plan": "local_only",
+        "force_web": false,
+        "current_task": "review project",
+        "current_subtask": "collect manifest evidence",
+        "next_step": "collect more evidence",
+        "next_tool": "project_manifest",
+        "missing_evidence": [
+          "extra_local_confirmation"
+        ],
+        "tool_candidates": [
+          "project_manifest"
+        ],
+        "tool_risks": {
+          "project_manifest": "safe"
+        },
+        "approval_required": [],
+        "actions": [
+          {
+            "tool": "project_manifest",
+            "risk": "safe",
+            "args": {}
+          }
+        ],
+        "next_action": {
+          "tool": "project_manifest",
+          "risk": "safe",
+          "args": {}
+        },
+        "llm_required": false,
+        "steps": [
+          "project_manifest"
+        ]
+      },
+      "iterations": 3,
+      "evidence_count": 1,
+      "web_meta": {},
+      "active_project_id": "proj_4a91bb",
+      "planner_loop": {
+        "phase": "verify",
+        "state": "completed",
+        "max_iterations": 3,
+        "max_total_tool_calls": 20,
+        "max_tool_retries": 1,
+        "tool_retry_backoff_ms": 150,
+        "budget_exhausted": false,
+        "total_tool_calls": 3,
+        "iterations_completed": 3,
+        "stop_reason": "max_iterations_reached"
+      }
+    }
+  }
+]

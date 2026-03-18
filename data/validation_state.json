@@ -1,0 +1,69 @@
+{
+  "last_updated_ms": 1773826651463,
+  "flows": {
+    "startup_gate": {
+      "status": "passed",
+      "detail": "startup-gates-passed",
+      "started_at_ms": 1773826523477,
+      "finished_at_ms": 1773826651463,
+      "updated_at_ms": 1773826651463,
+      "steps": {
+        "host-prereq": {
+          "status": "passed",
+          "detail": "ok",
+          "updated_at_ms": 1773826523477
+        },
+        "pytest-smoke": {
+          "status": "passed",
+          "detail": "ok",
+          "updated_at_ms": 1773826530805
+        },
+        "agent-evals": {
+          "status": "passed",
+          "detail": "ok",
+          "updated_at_ms": 1773826532224
+        },
+        "preflight-e2e": {
+          "status": "skipped",
+          "detail": "AEGIS_ENABLE_INPROCESS_E2E=0",
+          "updated_at_ms": 1773826532224
+        },
+        "healthz": {
+          "status": "passed",
+          "detail": "ok",
+          "updated_at_ms": 1773826549271
+        },
+        "host-e2e": {
+          "status": "passed",
+          "detail": "ok",
+          "updated_at_ms": 1773826604821
+        },
+        "readyz": {
+          "status": "passed",
+          "detail": "readyz ready=true",
+          "updated_at_ms": 1773826604836
+        },
+        "ui-contract": {
+          "status": "passed",
+          "detail": "ok",
+          "updated_at_ms": 1773826605000
+        },
+        "hard-contract": {
+          "status": "passed",
+          "detail": "ok",
+          "updated_at_ms": 1773826645872
+        },
+        "no-loop-stress": {
+          "status": "passed",
+          "detail": "ok",
+          "updated_at_ms": 1773826646688
+        },
+        "browser-smoke": {
+          "status": "passed",
+          "detail": "ok",
+          "updated_at_ms": 1773826651463
+        }
+      }
+    }
+  }
+}

@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+"""
+Web-search runtime state store (sqlite-backed).
+
+Why this module exists:
+- Track provider quotas/cooldowns deterministically.
+- Persist web/url/robots caches across process restarts.
+"""
+
 import hashlib
 import json
 import os
@@ -28,6 +36,7 @@ _lock = threading.RLock()
 
 
 def _ensure_db() -> None:
+    """Initialize sqlite schema for provider usage/cache/proxy tables."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(STATE_DB) as conn:
         conn.execute(
@@ -235,6 +244,7 @@ def cache_key(query: str, num_results: int, lang: str | None = None) -> str:
 
 
 def get_cached_results(query: str, num_results: int, lang: str | None = None) -> list[dict] | None:
+    """Fetch fresh cached search results by query key (or None)."""
     key = cache_key(query, num_results, lang=lang)
     now = _now()
     with _lock, _conn() as conn:
@@ -257,6 +267,31 @@ def get_cached_results(query: str, num_results: int, lang: str | None = None) ->
         return None
 
 
+def get_cached_results_meta(query: str, num_results: int, lang: str | None = None, *, allow_stale: bool = False) -> dict | None:
+    key = cache_key(query, num_results, lang=lang)
+    now = _now()
+    with _lock, _conn() as conn:
+        row = conn.execute(
+            """
+            SELECT provider, fetched_at, expires_at
+            FROM web_cache WHERE query_hash=?
+            """,
+            (key,),
+        ).fetchone()
+    if not row:
+        return None
+    provider, fetched_at, expires_at = row
+    stale = bool(expires_at and float(expires_at) < now)
+    if stale and not allow_stale:
+        return None
+    return {
+        "provider": str(provider or ""),
+        "fetched_at": float(fetched_at or 0.0),
+        "expires_at": float(expires_at or 0.0),
+        "stale": stale,
+    }
+
+
 def set_cached_results(
     query: str,
     num_results: int,
@@ -265,6 +300,7 @@ def set_cached_results(
     ttl_seconds: float,
     lang: str | None = None,
 ) -> None:
+    """Persist search results payload with explicit TTL expiry."""
     key = cache_key(query, num_results, lang=lang)
     now = _now()
     payload = json.dumps(results)
@@ -477,3 +513,48 @@ def mark_proxy_failure(name: str, cooldown_seconds: float) -> None:
             (cooldown_until, name),
         )
         conn.commit()
+
+
+def provider_snapshot(providers: Sequence[str]) -> list[dict]:
+    items = [str(provider).strip() for provider in providers if str(provider).strip()]
+    if not items:
+        return []
+    placeholders = ",".join("?" for _ in items)
+    now = _now()
+    grouped: dict[str, list[dict]] = {name: [] for name in items}
+    with _lock, _conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT provider, window_seconds, window_start, call_count, error_count, cooldown_until
+            FROM provider_usage
+            WHERE provider IN ({placeholders})
+            ORDER BY provider ASC, window_seconds ASC
+            """,
+            tuple(items),
+        ).fetchall()
+    for provider, window_seconds, window_start, call_count, error_count, cooldown_until in rows:
+        grouped.setdefault(provider, []).append(
+            {
+                "window_seconds": int(window_seconds or 0),
+                "window_start": float(window_start or 0.0),
+                "call_count": int(call_count or 0),
+                "error_count": int(error_count or 0),
+                "cooldown_until": float(cooldown_until or 0.0),
+                "cooling_down": bool(cooldown_until and float(cooldown_until) > now),
+            }
+        )
+
+    snapshot: list[dict] = []
+    for provider in items:
+        windows = grouped.get(provider) or []
+        cooldown_until = max((float(item.get("cooldown_until") or 0.0) for item in windows), default=0.0)
+        snapshot.append(
+            {
+                "provider": provider,
+                "status": "cooldown" if cooldown_until > now else "ready",
+                "cooldown_until": cooldown_until,
+                "cooling_down": cooldown_until > now,
+                "windows": windows,
+            }
+        )
+    return snapshot

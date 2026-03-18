@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""
+In-process health event accumulator.
+
+Why this module exists:
+- Keep lightweight health/error counters for snapshot diagnostics.
+"""
+
 import json
 import os
 import threading
@@ -32,4 +39,3 @@ def snapshot() -> dict:
             "counters": dict(_counters),
             "recent_errors": list(_errors),
         }
-

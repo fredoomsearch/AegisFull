@@ -1,0 +1,328 @@
+[
+  {
+    "turn_id": "ff7e0a80b264",
+    "created_at": 1773823259750,
+    "finished_at": 1773823259757,
+    "status": "success",
+    "mode": "agent",
+    "source_plan": "local_only",
+    "active_project_id": "proj_cd2fab",
+    "user_message": "continue analysis",
+    "items": [
+      {
+        "item_id": "9d85afa62b6b",
+        "ts": 1773823259751,
+        "kind": "run_start",
+        "status": "ok",
+        "payload": {
+          "max_iterations": 3,
+          "max_total_tool_calls": 20,
+          "max_tool_retries": 1,
+          "tool_retry_backoff_ms": 150
+        }
+      },
+      {
+        "item_id": "d872c1b84d98",
+        "ts": 1773823259752,
+        "kind": "plan",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "plan": {
+            "mode": "agent",
+            "source_plan": "local_only",
+            "force_web": false,
+            "current_task": "review project",
+            "current_subtask": "collect manifest evidence",
+            "next_step": "collect more evidence",
+            "next_tool": "project_manifest",
+            "missing_evidence": [
+              "extra_local_confirmation"
+            ],
+            "tool_candidates": [
+              "project_manifest"
+            ],
+            "tool_risks": {
+              "project_manifest": "safe"
+            },
+            "approval_required": [],
+            "actions": [
+              {
+                "tool": "project_manifest",
+                "risk": "safe",
+                "args": {}
+              }
+            ],
+            "next_action": {
+              "tool": "project_manifest",
+              "risk": "safe",
+              "args": {}
+            },
+            "llm_required": false,
+            "steps": [
+              "project_manifest"
+            ]
+          }
+        }
+      },
+      {
+        "item_id": "984f126e80f2",
+        "ts": 1773823259752,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "4e67b8acc300",
+        "ts": 1773823259752,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "084c2252ceaa",
+        "ts": 1773823259753,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "262ecc98f59d",
+        "ts": 1773823259753,
+        "kind": "evidence",
+        "status": "ok",
+        "payload": {
+          "origin": "manifest",
+          "kind": "summary",
+          "project_id": "proj_cd2fab",
+          "title": "project manifest summary",
+          "text": "Active project: proj_cd2fab\nFiles: 1 | Dirs: 0 | Chunks: 1\nLanguages: python (1)\nFrameworks: -\nEntrypoints: app.py\nKey files: app.py\nDetected layers: -\nTop directories: -\nLikely entrypoints: app.py\nConfig/infra files: -",
+          "meta": {},
+          "iteration": 1
+        }
+      },
+      {
+        "item_id": "69af205533ee",
+        "ts": 1773823259753,
+        "kind": "plan",
+        "status": "ok",
+        "payload": {
+          "iteration": 2,
+          "plan": {
+            "mode": "agent",
+            "source_plan": "local_only",
+            "force_web": false,
+            "current_task": "review project",
+            "current_subtask": "collect manifest evidence",
+            "next_step": "collect more evidence",
+            "next_tool": "project_manifest",
+            "missing_evidence": [
+              "extra_local_confirmation"
+            ],
+            "tool_candidates": [
+              "project_manifest"
+            ],
+            "tool_risks": {
+              "project_manifest": "safe"
+            },
+            "approval_required": [],
+            "actions": [
+              {
+                "tool": "project_manifest",
+                "risk": "safe",
+                "args": {}
+              }
+            ],
+            "next_action": {
+              "tool": "project_manifest",
+              "risk": "safe",
+              "args": {}
+            },
+            "llm_required": false,
+            "steps": [
+              "project_manifest"
+            ]
+          }
+        }
+      },
+      {
+        "item_id": "f55f84f420d2",
+        "ts": 1773823259753,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "iteration": 2,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "c55cbbe17098",
+        "ts": 1773823259754,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "iteration": 2,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "fa9e16acd440",
+        "ts": 1773823259754,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "iteration": 2,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "61e17601e634",
+        "ts": 1773823259755,
+        "kind": "plan",
+        "status": "ok",
+        "payload": {
+          "iteration": 3,
+          "plan": {
+            "mode": "agent",
+            "source_plan": "local_only",
+            "force_web": false,
+            "current_task": "review project",
+            "current_subtask": "collect manifest evidence",
+            "next_step": "collect more evidence",
+            "next_tool": "project_manifest",
+            "missing_evidence": [
+              "extra_local_confirmation"
+            ],
+            "tool_candidates": [
+              "project_manifest"
+            ],
+            "tool_risks": {
+              "project_manifest": "safe"
+            },
+            "approval_required": [],
+            "actions": [
+              {
+                "tool": "project_manifest",
+                "risk": "safe",
+                "args": {}
+              }
+            ],
+            "next_action": {
+              "tool": "project_manifest",
+              "risk": "safe",
+              "args": {}
+            },
+            "llm_required": false,
+            "steps": [
+              "project_manifest"
+            ]
+          }
+        }
+      },
+      {
+        "item_id": "7d0fc71fec07",
+        "ts": 1773823259755,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "iteration": 3,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "0ed1e0d31766",
+        "ts": 1773823259755,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "iteration": 3,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "9c7ff4157fa1",
+        "ts": 1773823259756,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "iteration": 3,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "838229915f4f",
+        "ts": 1773823259756,
+        "kind": "run_stop",
+        "status": "ok",
+        "payload": {
+          "reason": "max_iterations_reached",
+          "iteration": 3,
+          "total_tool_calls": 3
+        }
+      }
+    ],
+    "assistant_message": "Active project: proj_cd2fab\nFiles: 1 | Dirs: 0 | Chunks: 1\nLanguages: python (1)\nFrameworks: -\nEntrypoints: app.py\nKey files: app.py\nDetected layers: -\nTop directories: -\nLikely entrypoints: app.py\nConfig/infra files: -",
+    "response_context": {
+      "plan": {
+        "mode": "agent",
+        "source_plan": "local_only",
+        "force_web": false,
+        "current_task": "review project",
+        "current_subtask": "collect manifest evidence",
+        "next_step": "collect more evidence",
+        "next_tool": "project_manifest",
+        "missing_evidence": [
+          "extra_local_confirmation"
+        ],
+        "tool_candidates": [
+          "project_manifest"
+        ],
+        "tool_risks": {
+          "project_manifest": "safe"
+        },
+        "approval_required": [],
+        "actions": [
+          {
+            "tool": "project_manifest",
+            "risk": "safe",
+            "args": {}
+          }
+        ],
+        "next_action": {
+          "tool": "project_manifest",
+          "risk": "safe",
+          "args": {}
+        },
+        "llm_required": false,
+        "steps": [
+          "project_manifest"
+        ]
+      },
+      "iterations": 3,
+      "evidence_count": 1,
+      "web_meta": {},
+      "active_project_id": "proj_cd2fab",
+      "planner_loop": {
+        "phase": "verify",
+        "state": "completed",
+        "max_iterations": 3,
+        "max_total_tool_calls": 20,
+        "max_tool_retries": 1,
+        "tool_retry_backoff_ms": 150,
+        "budget_exhausted": false,
+        "total_tool_calls": 3,
+        "iterations_completed": 3,
+        "stop_reason": "max_iterations_reached"
+      }
+    }
+  }
+]

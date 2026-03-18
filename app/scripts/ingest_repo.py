@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
+import re
 import sys
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -54,7 +56,9 @@ else:
     cpu_count = os.cpu_count() or 1
     _apply_thread_env(max(1, cpu_count - 1))
 
-from app.services.retrieval_service import add_documents  # noqa: E402
+from app.services.retrieval_service import add_documents, count_project_chunks, remove_project_documents  # noqa: E402
+from app.services.project_ingest_state import load_project_ingest_state, save_project_ingest_state  # noqa: E402
+from app.services.project_manifest import save_project_manifest  # noqa: E402
 
 DEFAULT_EXTS = {
     ".py",
@@ -114,7 +118,57 @@ EXCLUDED_DIRS = {
 
 EXCLUDED_FILES = {
     "aegis.db",
+    ".aegis_manifest.json",
+    ".aegis_ingest_state.json",
 }
+
+CODE_EXTS = {
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".go",
+    ".rs",
+    ".java",
+    ".kt",
+    ".php",
+    ".swift",
+    ".dart",
+    ".sh",
+}
+
+LANG_BY_EXT = {
+    ".py": "python",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".go": "go",
+    ".rs": "rust",
+    ".java": "java",
+    ".kt": "kotlin",
+    ".php": "php",
+    ".swift": "swift",
+    ".dart": "dart",
+    ".sh": "shell",
+}
+
+CODE_SYMBOL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(", re.MULTILINE),
+    re.compile(r"^\s*class\s+([A-Za-z_]\w*)\b", re.MULTILINE),
+    re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(", re.MULTILINE),
+    re.compile(r"^\s*(?:export\s+)?class\s+([A-Za-z_$][\w$]*)\b", re.MULTILINE),
+    re.compile(r"^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(", re.MULTILINE),
+    re.compile(r"^\s*func\s+([A-Za-z_]\w*)\s*\(", re.MULTILINE),
+    re.compile(r"^\s*fn\s+([A-Za-z_]\w*)\s*\(", re.MULTILINE),
+    re.compile(r"^\s*(?:public|private|protected|internal|open|final|suspend|inline|\s)*\s*fun\s+([A-Za-z_]\w*)\s*\(", re.MULTILINE),
+    re.compile(r"^\s*(?:public|private|protected|internal|open|final|\s)*\s*class\s+([A-Za-z_]\w*)\b", re.MULTILINE),
+)
+
+CODE_WINDOW_LINES = max(40, int(os.getenv("AEGIS_CODE_WINDOW_LINES", "80")))
+CODE_WINDOW_OVERLAP = max(10, int(os.getenv("AEGIS_CODE_WINDOW_OVERLAP", "20")))
+MAX_SYMBOLS_PER_FILE = max(10, int(os.getenv("AEGIS_INGEST_MAX_SYMBOLS_PER_FILE", "80")))
 
 
 def _iter_files(root: Path) -> Iterable[Path]:
@@ -243,21 +297,186 @@ def _read_text(path: Path) -> str:
         return ""
 
 
-def ingest(root: Path, max_files: int, max_file_bytes: int, max_total_bytes: int) -> int:
+def _language_for_path(path: Path) -> str:
+    return LANG_BY_EXT.get(path.suffix.lower(), "text")
+
+
+def _file_text_sha(text: str) -> str:
+    return hashlib.sha1((text or "").encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _build_document_doc(
+    *,
+    project_id: str,
+    rel_path: str,
+    text: str,
+    file_sha: str,
+    language: str,
+    chunk_type: str = "document",
+    symbol: Optional[str] = None,
+    line_start: Optional[int] = None,
+    line_end: Optional[int] = None,
+    prechunked: bool = False,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "project_id": project_id,
+        "rel_path": rel_path,
+        "source": f"{project_id}/{rel_path}",
+        "text": text,
+        "file_sha": file_sha,
+        "language": language,
+        "chunk_type": chunk_type,
+        "prechunked": prechunked,
+    }
+    if symbol:
+        payload["symbol"] = symbol
+    if line_start is not None:
+        payload["line_start"] = int(line_start)
+    if line_end is not None:
+        payload["line_end"] = int(line_end)
+    return payload
+
+
+def _collect_symbol_boundaries(text: str) -> List[Tuple[Optional[str], int, int]]:
+    matches: List[Tuple[Optional[str], int, int]] = []
+    seen: set[Tuple[Optional[str], int]] = set()
+    for pattern in CODE_SYMBOL_PATTERNS:
+        for match in pattern.finditer(text):
+            symbol = match.group(1).strip() if match.groups() else None
+            line_start = text.count("\n", 0, match.start()) + 1
+            key = (symbol, line_start)
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append((symbol, line_start, match.start()))
+    matches.sort(key=lambda item: item[1])
+    return matches[:MAX_SYMBOLS_PER_FILE]
+
+
+def _build_code_docs(project_id: str, rel_path: str, text: str, language: str) -> List[Dict[str, Any]]:
+    file_sha = _file_text_sha(text)
+    lines = text.splitlines()
+    total_lines = len(lines)
+    docs: List[Dict[str, Any]] = []
+
+    if total_lines <= 0:
+        return docs
+
+    module_end = min(total_lines, max(CODE_WINDOW_LINES, 120))
+    module_text = "\n".join(lines[:module_end]).strip()
+    if module_text:
+        docs.append(
+            _build_document_doc(
+                project_id=project_id,
+                rel_path=rel_path,
+                text=module_text,
+                file_sha=file_sha,
+                language=language,
+                chunk_type="module",
+                line_start=1,
+                line_end=module_end,
+                prechunked=True,
+            )
+        )
+
+    boundaries = _collect_symbol_boundaries(text)
+    for idx, (symbol, line_start, _) in enumerate(boundaries):
+        next_line = boundaries[idx + 1][1] - 1 if idx + 1 < len(boundaries) else total_lines
+        line_end = min(total_lines, max(line_start, next_line))
+        symbol_text = "\n".join(lines[line_start - 1 : line_end]).strip()
+        if not symbol_text:
+            continue
+        docs.append(
+            _build_document_doc(
+                project_id=project_id,
+                rel_path=rel_path,
+                text=symbol_text,
+                file_sha=file_sha,
+                language=language,
+                chunk_type="symbol",
+                symbol=symbol,
+                line_start=line_start,
+                line_end=line_end,
+                prechunked=True,
+            )
+        )
+
+    step = max(1, CODE_WINDOW_LINES - CODE_WINDOW_OVERLAP)
+    start_line = 1
+    while start_line <= total_lines:
+        end_line = min(total_lines, start_line + CODE_WINDOW_LINES - 1)
+        window_text = "\n".join(lines[start_line - 1 : end_line]).strip()
+        if window_text:
+            docs.append(
+                _build_document_doc(
+                    project_id=project_id,
+                    rel_path=rel_path,
+                    text=window_text,
+                    file_sha=file_sha,
+                    language=language,
+                    chunk_type="window",
+                    line_start=start_line,
+                    line_end=end_line,
+                    prechunked=True,
+                )
+            )
+        if end_line >= total_lines:
+            break
+        start_line += step
+
+    return docs
+
+
+def _build_generic_doc(project_id: str, rel_path: str, text: str, language: str) -> Dict[str, Any]:
+    return _build_document_doc(
+        project_id=project_id,
+        rel_path=rel_path,
+        text=text,
+        file_sha=_file_text_sha(text),
+        language=language,
+        chunk_type="document",
+        prechunked=False,
+    )
+
+
+def _build_file_docs(project_id: str, rel_path: str, path: Path, text: str) -> List[Dict[str, Any]]:
+    language = _language_for_path(path)
+    if path.suffix.lower() in CODE_EXTS:
+        docs = _build_code_docs(project_id, rel_path, text, language)
+        if docs:
+            return docs
+    return [_build_generic_doc(project_id, rel_path, text, language)]
+
+
+def ingest(
+    root: Path,
+    max_files: int,
+    max_file_bytes: int,
+    max_total_bytes: int,
+    *,
+    project_id: str | None = None,
+    manifest_out: Path | None = None,
+) -> int:
     """Walk files, chunk text, embed, and write to the FAISS index."""
-    docs: List[Tuple[str, str]] = []
+    project_key = (project_id or root.name).strip() or root.name
+    previous_state = load_project_ingest_state(root)
+    previous_hashes = previous_state.get("file_hashes") if isinstance(previous_state.get("file_hashes"), dict) else {}
+    previous_hashes = {str(k): str(v) for k, v in previous_hashes.items()}
+
+    docs: List[Dict[str, Any]] = []
     manifest_lines: List[str] = []
+    current_hashes: Dict[str, str] = {}
     total_bytes = 0
     scanned_files = 0
     ingested_files = 0
-    last_report = 0
     total_added = 0
-    embedding_started = False
+    total_removed = 0
     skipped_ext = 0
     skipped_large = 0
     skipped_empty = 0
     skipped_quota = 0
     manifest_truncated = False
+    changed_paths: set[str] = set()
 
     for path in _iter_files(root):
         if not path.is_file():
@@ -296,60 +515,104 @@ def ingest(root: Path, max_files: int, max_file_bytes: int, max_total_bytes: int
             skipped_empty += 1
             continue
 
-        # Namespace sources by ingest root folder to avoid cross-project collisions
-        # when different uploads share the same relative paths (e.g. app/api.py).
-        source = f"{root.name}/{rel}"
-        docs.append((source, text))
+        text_sha = _file_text_sha(text)
+        current_hashes[rel] = text_sha
         total_bytes += size
         ingested_files += 1
-        if ingested_files - last_report >= 200:
-            print(f"[ingest] scanned={scanned_files} kept={ingested_files} bytes={total_bytes}", flush=True)
-            last_report = ingested_files
 
-        if DEFAULT_BATCH_FILES > 0 and len(docs) >= DEFAULT_BATCH_FILES:
-            if not embedding_started:
-                print("[ingest] embedding + indexing...", flush=True)
-                embedding_started = True
-            total_added += add_documents(docs)
-            docs.clear()
+        if previous_hashes.get(rel) == text_sha:
+            continue
 
-    if manifest_lines:
-        summary_lines = [
-            f"ROOT_PATH: {root}",
-            f"SCANNED_FILES: {scanned_files}",
-            f"INGESTED_TEXT_FILES: {ingested_files}",
-            f"SKIPPED_EXT: {skipped_ext}",
-            f"SKIPPED_FILE_SIZE: {skipped_large}",
-            f"SKIPPED_EMPTY: {skipped_empty}",
-            f"SKIPPED_QUOTA_OR_LIMIT: {skipped_quota}",
-            "",
-            "FILE_INVENTORY (REL_PATH<TAB>SIZE_BYTES):",
-            *manifest_lines,
-        ]
-        if manifest_truncated:
-            summary_lines.append(f"... (manifest truncated at {DEFAULT_MANIFEST_MAX_FILES} files)")
-        docs.append((f"{root.name}/__manifest__/files.tsv", "\n".join(summary_lines)))
+        changed_paths.add(rel)
+        docs.extend(_build_file_docs(project_key, rel, path, text))
 
-    if not docs and total_added == 0:
+    deleted_paths = set(previous_hashes) - set(current_hashes)
+
+    summary_lines = [
+        f"ROOT_PATH: {root}",
+        f"PROJECT_ID: {project_key}",
+        f"SCANNED_FILES: {scanned_files}",
+        f"INGESTED_TEXT_FILES: {ingested_files}",
+        f"CHANGED_FILES: {len(changed_paths)}",
+        f"DELETED_FILES: {len(deleted_paths)}",
+        f"SKIPPED_EXT: {skipped_ext}",
+        f"SKIPPED_FILE_SIZE: {skipped_large}",
+        f"SKIPPED_EMPTY: {skipped_empty}",
+        f"SKIPPED_QUOTA_OR_LIMIT: {skipped_quota}",
+        "",
+        "FILE_INVENTORY (REL_PATH<TAB>SIZE_BYTES):",
+        *manifest_lines,
+    ]
+    if manifest_truncated:
+        summary_lines.append(f"... (manifest truncated at {DEFAULT_MANIFEST_MAX_FILES} files)")
+
+    docs.append(
+        _build_document_doc(
+            project_id=project_key,
+            rel_path="__manifest__/files.tsv",
+            text="\n".join(summary_lines),
+            file_sha=_file_text_sha("\n".join(summary_lines)),
+            language="manifest",
+            chunk_type="manifest",
+            prechunked=False,
+        )
+    )
+
+    rel_paths_to_refresh = set(changed_paths) | set(deleted_paths) | {"__manifest__/files.tsv"}
+    if rel_paths_to_refresh:
+        total_removed = remove_project_documents(project_key, rel_paths=rel_paths_to_refresh)
+
+    print(
+        f"[ingest] collected text_files={ingested_files} changed={len(changed_paths)} "
+        f"deleted={len(deleted_paths)} bytes={total_bytes}",
+        flush=True,
+    )
+    print("[ingest] embedding + indexing...", flush=True)
+    total_added = add_documents(docs)
+
+    total_chunks = count_project_chunks(project_key)
+
+    if not current_hashes and total_chunks == 0:
         print("No files ingested (nothing matched filters or root is empty).")
-        return 0
 
-    if docs:
-        print(f"[ingest] collected text_files={ingested_files} bytes={total_bytes}", flush=True)
-        if not embedding_started:
-            print("[ingest] embedding + indexing...", flush=True)
-            embedding_started = True
-        total_added += add_documents(docs)
-        docs.clear()
+    if manifest_out is not None:
+        save_project_manifest(
+            root,
+            project_id=project_key,
+            chunk_count=total_chunks,
+            chunked_files=ingested_files,
+            skipped={
+                "ext": skipped_ext,
+                "size": skipped_large,
+                "empty": skipped_empty,
+                "quota_or_limit": skipped_quota,
+            },
+            target=manifest_out,
+        )
+
+    save_project_ingest_state(
+        root,
+        project_id=project_key,
+        file_hashes=current_hashes,
+        chunk_count=total_chunks,
+        metadata={
+            "scanned_files": scanned_files,
+            "ingested_files": ingested_files,
+            "changed_files": len(changed_paths),
+            "deleted_files": len(deleted_paths),
+            "removed_chunks": total_removed,
+        },
+    )
 
     print(
         f"[ingest] summary scanned={scanned_files} text_files={ingested_files} "
         f"skipped_ext={skipped_ext} skipped_size={skipped_large} "
-        f"skipped_empty={skipped_empty} skipped_quota={skipped_quota}",
+        f"skipped_empty={skipped_empty} skipped_quota={skipped_quota} "
+        f"removed_chunks={total_removed}",
         flush=True,
     )
-    print(f"[ingest] done files={ingested_files} chunks={total_added}", flush=True)
-    return total_added
+    print(f"[ingest] done files={ingested_files} chunks_added={total_added} chunks_total={total_chunks}", flush=True)
+    return total_chunks
 
 
 def main() -> int:
@@ -358,6 +621,8 @@ def main() -> int:
     parser.add_argument("--max-files", type=int, default=DEFAULT_MAX_FILES)
     parser.add_argument("--max-file-bytes", type=int, default=DEFAULT_MAX_FILE_BYTES)
     parser.add_argument("--max-total-bytes", type=int, default=DEFAULT_MAX_TOTAL_BYTES)
+    parser.add_argument("--project-id", default="", help="Optional stable project id for manifest metadata")
+    parser.add_argument("--manifest-out", default="", help="Optional manifest output path")
 
     args = parser.parse_args()
     root = Path(args.root).resolve()
@@ -366,7 +631,14 @@ def main() -> int:
         return 1
 
     try:
-        ingest(root, args.max_files, args.max_file_bytes, args.max_total_bytes)
+        ingest(
+            root,
+            args.max_files,
+            args.max_file_bytes,
+            args.max_total_bytes,
+            project_id=(args.project_id or "").strip() or None,
+            manifest_out=Path(args.manifest_out).resolve() if str(args.manifest_out or "").strip() else None,
+        )
     except Exception as exc:
         print("Ingest failed:", exc)
         return 2

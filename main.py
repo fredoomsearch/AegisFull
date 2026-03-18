@@ -1,6 +1,10 @@
 """
 AEGIS main FastAPI application entrypoint.
 
+Why this module exists:
+- Compose middleware, static mounts, and canonical router wiring.
+- Run startup boot (DB/security/LLM/web warmups) and expose health.
+
 Run:
   uvicorn main:app --reload --log-level debug
 """
@@ -9,10 +13,12 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
 import uuid
+from contextlib import asynccontextmanager
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Deque, Dict, List, Optional, Tuple
@@ -21,11 +27,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-
-from app.api import router as api_router
-from app.api.files import router as files_router
-from app.db.base import engine, init_db
-from app.services.web_search import start_background_warmup
+from app.services import runtime_metrics
 
 logger = logging.getLogger("aegis.main")
 if not logger.handlers:
@@ -34,7 +36,9 @@ if not logger.handlers:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-LLM_WARMUP_ON_START = os.getenv("AEGIS_LLM_WARMUP", "1").lower() in {"1", "true", "yes", "on"}
+DEMO_MODE = (os.getenv("AEGIS_DEMO_MODE", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+LLM_WARMUP_ON_START = os.getenv("AEGIS_LLM_WARMUP", "1").lower() in {"1", "true", "yes", "on"} and not DEMO_MODE
+CLAMAV_STATUS_ON_START = os.getenv("AEGIS_CLAMAV_STATUS_ON_START", "1").lower() in {"1", "true", "yes", "on"}
 DISABLE_DB = os.getenv("AEGIS_DISABLE_DB", "0").lower() in {"1", "true", "yes", "on"}
 
 # Trust reverse-proxy headers for client IP
@@ -42,6 +46,7 @@ TRUST_PROXY = os.getenv("AEGIS_TRUST_PROXY", "0").lower() in {"1", "true", "yes"
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
+    """Read a boolean env var using AEGIS conventions (1/true/yes/on)."""
     raw = os.getenv(name)
     if raw is None:
         return default
@@ -49,6 +54,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def _git_sha_cached() -> str:
+    """Best-effort git SHA for health/debug visibility."""
     try:
         return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], timeout=1).decode().strip()
     except Exception:
@@ -58,10 +64,6 @@ def _git_sha_cached() -> str:
 GIT_SHA = _git_sha_cached()
 
 app = FastAPI(title="AEGIS Chat", version="0.1.0")
-
-# Routers
-app.include_router(files_router)
-app.include_router(api_router)
 
 # CORS
 _cors_origins_raw = os.getenv("AEGIS_CORS_ORIGINS", "*")
@@ -122,6 +124,7 @@ for part in _rate_overrides_raw.split(","):
 
 
 class SlidingWindowRateLimiter:
+    """In-memory per-path/IP guard to avoid accidental API abuse."""
     def __init__(self) -> None:
         self._buckets: Dict[str, Deque[float]] = defaultdict(deque)
 
@@ -157,6 +160,7 @@ rate_limiter = SlidingWindowRateLimiter()
 
 
 def _client_ip(request: Request) -> str:
+    """Resolve client IP, optionally honoring proxy headers when enabled."""
     if TRUST_PROXY:
         xff = request.headers.get("x-forwarded-for")
         if xff:
@@ -168,6 +172,7 @@ def _client_ip(request: Request) -> str:
 
 
 def _error_payload(detail: object, status_code: int, trace_id: Optional[str]) -> dict:
+    """Normalize error payload shape across all exception paths."""
     if isinstance(detail, dict):
         message = detail.get("message") or detail.get("detail") or str(detail)
     else:
@@ -199,6 +204,13 @@ async def add_trace_and_rate_limit(request: Request, call_next):
         rate_limiter.gc(RATE_LIMIT_BUCKET_TTL)
 
     response = await call_next(request)
+    try:
+        runtime_metrics.record_http_response(
+            request.url.path,
+            int(getattr(response, "status_code", 0) or 0),
+        )
+    except Exception:
+        pass
     response.headers["X-Request-ID"] = trace_id
     if SECURE_HEADERS_ENABLED:
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -287,7 +299,19 @@ def index() -> HTMLResponse:
     if not index_path.exists():
         logger.error("[main] index.html NOT FOUND at %s", index_path)
         return HTMLResponse("<h1>UI not found</h1>", status_code=500)
-    return HTMLResponse(index_path.read_text(encoding="utf-8"))
+    html = index_path.read_text(encoding="utf-8", errors="ignore")
+    # Cache-bust UI assets so browsers don't keep an incompatible old UI after pulls.
+    # We keep this server-side so it works without any frontend build step.
+    try:
+        assets = [UI_DIR / "app.js", UI_DIR / "styles.css", index_path]
+        v = int(max(p.stat().st_mtime for p in assets if p.exists()) * 1000)
+        html = re.sub(r"(/ui/(?:app\\.js|styles\\.css))\\?v=\\d+", rf"\\1?v={v}", html)
+        # If the HTML didn't include version params, add them.
+        html = re.sub(r"(/ui/app\\.js)(?!\\?v=)", rf"\\1?v={v}", html)
+        html = re.sub(r"(/ui/styles\\.css)(?!\\?v=)", rf"\\1?v={v}", html)
+    except Exception:
+        pass
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -337,23 +361,62 @@ def _log_security_posture() -> None:
             logger.warning("[security] %s contains weak default-like credential(s). Rotate before production.", env_name)
 
 
-@app.on_event("startup")
-def on_startup() -> None:
+def _run_startup_boot() -> None:
+    """Boot sequence: DB, security posture, LLM warmup, and web warmup."""
     if DISABLE_DB:
         logger.info("[main] DB init skipped (AEGIS_DISABLE_DB=1).")
     else:
+        from app.db.base import engine, init_db
         import app.db.models  # noqa: F401  # register models lazily
 
         logger.info("[main] Initializing DB...")
         init_db(engine)
         logger.info("[main] Database ready.")
-    logger.info("[main] %s", _clamav_status())
+    if CLAMAV_STATUS_ON_START:
+        logger.info("[main] %s", _clamav_status())
     _log_security_posture()
     if LLM_WARMUP_ON_START:
         _warm_llm_once()
-    start_background_warmup()
+    from app.services.web_search import start_background_warmup
+
+    if not DEMO_MODE:
+        start_background_warmup()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    _run_startup_boot()
+    try:
+        yield
+    finally:
+        from app.services.job_manager import wait_for_jobs
+        from app.services.web_search import stop_background_warmup
+
+        warmup_stopped = stop_background_warmup(timeout_s=2.0)
+        pending_jobs = wait_for_jobs(timeout_s=1.0)
+        if not warmup_stopped:
+            logger.debug("[main] Web warmup thread was not running at shutdown.")
+        if int(pending_jobs.get("alive") or 0) > 0:
+            logger.warning(
+                "[main] %s background job thread(s) still running during shutdown.",
+                pending_jobs["alive"],
+            )
+
+
+def _register_routers() -> None:
+    """Attach canonical API surfaces to FastAPI app in a deterministic order."""
+    from app.api import router as api_router
+    from app.api.files import router as files_router
+
+    app.include_router(files_router)
+    app.include_router(api_router)
+
+
+app.router.lifespan_context = lifespan
+_register_routers()
 
 
 @app.get("/healthz")
 def healthz() -> dict:
+    """Liveness endpoint used by startup/verify gates."""
     return {"status": "ok", "version": app.version, "git_sha": GIT_SHA}

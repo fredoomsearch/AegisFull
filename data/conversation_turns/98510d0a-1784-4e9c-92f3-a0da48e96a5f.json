@@ -1,0 +1,210 @@
+[
+  {
+    "turn_id": "eceabf423137",
+    "created_at": 1773819191299,
+    "finished_at": 1773819191342,
+    "status": "success",
+    "mode": "agent",
+    "source_plan": "web_only",
+    "active_project_id": null,
+    "user_message": "latest angular login docs",
+    "items": [
+      {
+        "item_id": "2d90cea60fbd",
+        "ts": 1773819191299,
+        "kind": "run_start",
+        "status": "ok",
+        "payload": {
+          "max_iterations": 3,
+          "max_total_tool_calls": 8,
+          "max_tool_retries": 2,
+          "tool_retry_backoff_ms": 50
+        }
+      },
+      {
+        "item_id": "0c10151807d3",
+        "ts": 1773819191300,
+        "kind": "plan",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "plan": {
+            "mode": "agent",
+            "source_plan": "web_only",
+            "force_web": true,
+            "current_task": "",
+            "current_subtask": "",
+            "next_step": "",
+            "next_tool": null,
+            "missing_evidence": [],
+            "tool_candidates": [
+              "web_search"
+            ],
+            "tool_risks": {
+              "web_search": "safe"
+            },
+            "approval_required": [],
+            "actions": [],
+            "next_action": null,
+            "llm_required": true,
+            "steps": [
+              "web_search",
+              "llm_synthesis"
+            ],
+            "routing_confidence": 0.95,
+            "ambiguous_route": false
+          }
+        }
+      },
+      {
+        "item_id": "e6df2f147bb3",
+        "ts": 1773819191300,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "web_search",
+          "query": "latest angular login"
+        }
+      },
+      {
+        "item_id": "dc9aa93983a5",
+        "ts": 1773819191301,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "web_search",
+          "meta": {
+            "query": "latest angular login",
+            "requested_results": 4,
+            "lang": "en-us",
+            "status": "cache",
+            "source": "cache",
+            "provider": "brave_html",
+            "results": 4,
+            "attempted": false,
+            "cache_used": true,
+            "stale_cache_used": false,
+            "live_web_used": false,
+            "fetched_at": 1773819190.513244,
+            "expires_at": 1773819490.513244,
+            "providers_tried": []
+          },
+          "sources": 4
+        }
+      },
+      {
+        "item_id": "0d418491c99c",
+        "ts": 1773819191301,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "web_search",
+          "status": "ok"
+        }
+      },
+      {
+        "item_id": "f0dd2399a3e7",
+        "ts": 1773819191302,
+        "kind": "evidence",
+        "status": "ok",
+        "payload": {
+          "origin": "web",
+          "kind": "summary",
+          "title": "web context (cache)",
+          "text": "[1] Auth0 auth0.com › blog › complete-guide-to-angular-user-authentication The Complete Guide to Angular User Authentication with Auth0\nContent from https://auth0.com/blog/complete-guide-to-angular-user-authentication/:\nThe Complete Guide to Angular User Authentication with Auth0 Login Developers Developers Developer Center Code Samples Guides Identity Unlocked - Podcasts Zero Index Newsletter Developer Tools OIDC Connect Playground SAML Tool JWT.io Webauthn.me Get Involved Events Auth0 Resea...",
+          "meta": {
+            "query": "latest angular login",
+            "requested_results": 4,
+            "lang": "en-us",
+            "status": "cache",
+            "source": "cache",
+            "provider": "brave_html",
+            "results": 4,
+            "attempted": false,
+            "cache_used": true,
+            "stale_cache_used": false,
+            "live_web_used": false,
+            "fetched_at": 1773819190.513244,
+            "expires_at": 1773819490.513244,
+            "providers_tried": []
+          },
+          "iteration": 1
+        }
+      },
+      {
+        "item_id": "968328d27d88",
+        "ts": 1773819191341,
+        "kind": "run_stop",
+        "status": "ok",
+        "payload": {
+          "reason": "plan_satisfied",
+          "iteration": 1,
+          "total_tool_calls": 0
+        }
+      }
+    ],
+    "assistant_message": "[1] Auth0 auth0.com › blog › complete-guide-to-angular-user-authentication The Complete Guide to Angular User Authentication with Auth0\nContent from https://auth0.com/blog/complete-guide-to-angular-user-authentication/:\nThe Complete Guide to Angular User Authentication with Auth0 Login Developers Developers Developer Center Code Samples Guides Identity Unlocked - Podcasts Zero Index Newsletter Developer Tools OIDC Connect Playground SAML Tool JWT.io Webauthn.me Get Involved Events Auth0 Research Program Documentation Documentation Auth0 Docs Articles Quickstarts APIs SDK Libraries Support Center Community Support Knowledge Base Explore Auth0 Marketplace Resources Blog Learn Intro to IAM (CIAM) Product Platform Auth0 for AI Agents Access Management Extensibility Security User Management Authentication Fine-Grained Authorization View platform Features Universal Login Single Sign-On Multifactor Authentication Actions Machine to Machine Passwordless Breached Passwords Token Vault View features Solutions Customer Identity Trends Report 2025 Industries Retail Financial Services Nonprofits & Charities Startups Healthcare Use Cases Consumer Applications B2B SaaS Applications Blog Pricing",
+    "response_context": {
+      "plan": {
+        "mode": "agent",
+        "source_plan": "web_only",
+        "force_web": true,
+        "current_task": "",
+        "current_subtask": "",
+        "next_step": "",
+        "next_tool": null,
+        "missing_evidence": [],
+        "tool_candidates": [
+          "web_search"
+        ],
+        "tool_risks": {
+          "web_search": "safe"
+        },
+        "approval_required": [],
+        "actions": [],
+        "next_action": null,
+        "llm_required": true,
+        "steps": [
+          "web_search",
+          "llm_synthesis"
+        ],
+        "routing_confidence": 0.95,
+        "ambiguous_route": false
+      },
+      "iterations": 1,
+      "evidence_count": 1,
+      "web_meta": {
+        "query": "latest angular login",
+        "requested_results": 4,
+        "lang": "en-us",
+        "status": "cache",
+        "source": "cache",
+        "provider": "brave_html",
+        "results": 4,
+        "attempted": false,
+        "cache_used": true,
+        "stale_cache_used": false,
+        "live_web_used": false,
+        "fetched_at": 1773819190.513244,
+        "expires_at": 1773819490.513244,
+        "providers_tried": []
+      },
+      "active_project_id": null,
+      "planner_loop": {
+        "phase": "verify",
+        "state": "completed",
+        "max_iterations": 3,
+        "max_total_tool_calls": 8,
+        "max_tool_retries": 2,
+        "tool_retry_backoff_ms": 50,
+        "budget_exhausted": false,
+        "total_tool_calls": 0,
+        "iterations_completed": 1,
+        "stop_reason": "plan_satisfied"
+      }
+    }
+  }
+]

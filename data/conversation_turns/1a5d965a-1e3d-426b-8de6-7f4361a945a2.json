@@ -1,0 +1,171 @@
+[
+  {
+    "turn_id": "e615e0b10a22",
+    "created_at": 1773823341757,
+    "finished_at": 1773823343177,
+    "status": "success",
+    "mode": "web",
+    "source_plan": "web_only",
+    "active_project_id": null,
+    "user_message": "web: latest python 3.12 release notes",
+    "items": [
+      {
+        "item_id": "85835f23e38f",
+        "ts": 1773823341757,
+        "kind": "plan",
+        "status": "ok",
+        "payload": {
+          "mode": "web",
+          "source_plan": "web_only",
+          "force_web": true,
+          "current_task": "latest python 3.12 release notes",
+          "current_subtask": "",
+          "next_step": "fetch fresher external evidence for latest python 3.12 release notes",
+          "next_tool": "web_search",
+          "missing_evidence": [],
+          "tool_candidates": [
+            "web_search"
+          ],
+          "tool_risks": {
+            "web_search": "safe"
+          },
+          "approval_required": [],
+          "actions": [],
+          "next_action": null,
+          "llm_required": true,
+          "steps": [
+            "web_search",
+            "llm_synthesis"
+          ],
+          "routing_confidence": 1.0,
+          "ambiguous_route": false
+        }
+      },
+      {
+        "item_id": "0682a7b99bb0",
+        "ts": 1773823341757,
+        "kind": "source_selection",
+        "status": "ok",
+        "payload": {
+          "source_plan": "web_only",
+          "next_tool": "web_search",
+          "tool_candidates": [
+            "web_search"
+          ],
+          "llm_required": true
+        }
+      },
+      {
+        "item_id": "a9fdd2434d04",
+        "ts": 1773823341757,
+        "kind": "tool_call",
+        "status": "ok",
+        "payload": {
+          "tool": "web_search",
+          "query": "latest python 3.12 release"
+        }
+      },
+      {
+        "item_id": "02a0ab86f50e",
+        "ts": 1773823343128,
+        "kind": "replan",
+        "status": "ok",
+        "payload": {
+          "reason": "web_search",
+          "next_step": "latest python 3.12 release notes",
+          "next_tool": "llm_synthesis",
+          "missing_evidence": [],
+          "recent_tool_failures": []
+        }
+      },
+      {
+        "item_id": "8c182a887270",
+        "ts": 1773823343128,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "tool": "web_search",
+          "query": "latest python 3.12 release",
+          "source": "live",
+          "provider": "brave_html",
+          "results": 4
+        }
+      },
+      {
+        "item_id": "4b89a8e6c857",
+        "ts": 1773823343131,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "tool": "evidence_only",
+          "response": "Collected evidence without synthesis:\n\n[1] Python documentation docs.python.org › 3 › whatsnew › 3.12.html What's New In Python 3.12 — Python 3.14.3 documentation\nContent from https://docs.python.org/3/whatsnew/3.12.html:\nWhatâs New In Python 3.12 — Python 3.14.3 documentation Theme Auto Light Dark Table of Contents Whatâs New In Python 3.12 Summary â Release highlights New Features PEP 695: Type Parameter Syntax PEP 701: Syntactic formalization of f-strings PEP 684: A Per-Interpreter GIL PEP 669: Low impact monitoring for CPython PEP 688: Making the buffer protocol accessible in Python PEP 709: Comprehension inlining Improved Error Messages New Features Related to Type Hints PEP 692: Using TypedDict for more precise **kwargs typing PEP 698: Override Decorator for Static Typing Other Language Changes New Modules Improved Modules array asyncio calendar csv dis fractions importlib.resources inspect itertools math os os.path pathlib platform pdb random shutil sqlite3 statistics sys tempfile threading tkinter tokenize types typing unicodedata unittest uuid Optimizations CPython bytecode changes Demos and Tools Deprecated Pending removal in Python 3.13 Pending removal in Python..."
+        }
+      },
+      {
+        "item_id": "f956c0214691",
+        "ts": 1773823343176,
+        "kind": "replan",
+        "status": "ok",
+        "payload": {
+          "reason": "evidence_only",
+          "next_step": "latest python 3.12 release notes",
+          "next_tool": "web_search",
+          "missing_evidence": [],
+          "recent_tool_failures": []
+        }
+      }
+    ],
+    "assistant_message": "Collected evidence without synthesis:\n\n[1] Python documentation docs.python.org › 3 › whatsnew › 3.12.html What's New In Python 3.12 — Python 3.14.3 documentation\nContent from https://docs.python.org/3/whatsnew/3.12.html:\nWhatâs New In Python 3.12 — Python 3.14.3 documentation Theme Auto Light Dark Table of Contents Whatâs New In Python 3.12 Summary â Release highlights New Features PEP 695: Type Parameter Syntax PEP 701: Syntactic formalization of f-strings PEP 684: A Per-Interpreter GIL PEP 669: Low impact monitoring for CPython PEP 688: Making the buffer protocol accessible in Python PEP 709: Comprehension inlining Improved Error Messages New Features Related to Type Hints PEP 692: Using TypedDict for more precise **kwargs typing PEP 698: Override Decorator for Static Typing Other Language Changes New Modules Improved Modules array asyncio calendar csv dis fractions importlib.resources inspect itertools math os os.path pathlib platform pdb random shutil sqlite3 statistics sys tempfile threading tkinter tokenize types typing unicodedata unittest uuid Optimizations CPython bytecode changes Demos and Tools Deprecated Pending removal in Python 3.13 Pending removal in Python...",
+    "response_context": {
+      "source_plan": "web_only",
+      "source_origin": [
+        "web"
+      ],
+      "active_project_id": null,
+      "effective_tool": "evidence_only",
+      "effective_tool_status": "ok",
+      "effective_tool_output": "Collected evidence without synthesis:\n\n[1] Python documentation docs.python.org › 3 › whatsnew › 3.12.html What's New In Python 3.12 — Python 3.14.3 documentation\nContent from https://docs.python.org/3/whatsnew/3.12.html:\nWhatâs New In Python 3.12 — Python 3.14.3 documentation Theme Auto Light Dark Table of Contents Whatâs New In Python 3.12 Summary â Release highlights New Features PEP 695: Type Parameter Syntax PEP 701: Syntactic formalization of f-strings PEP 684: A Per-Interpreter GIL PEP 669: Low impact monitoring for CPython PEP 688: Making the buffer protocol accessible in Python PEP 709: Comprehension inlining Improved Error Messages New Features Related to Type Hints PEP 692: Using TypedDict for more precise **kwargs typing PEP 698: Override Decorator for Static Typing Other Language Changes New Modules Improved Modules array asyncio calendar csv dis fractions importlib.resources inspect itertools math os os.path pathlib platform pdb random shutil sqlite3 statistics s...",
+      "web_query": "latest python 3.12 release",
+      "web_status": "live",
+      "web_source": "live",
+      "web_provider": "brave_html",
+      "web_results": 4,
+      "web_attempted": true,
+      "using_live_web": true,
+      "using_cached_web": false,
+      "using_stale_cache": false,
+      "data_notice": "Using live web sources.",
+      "architecture_summary": "",
+      "current_task": "latest python 3.12 release notes",
+      "current_subtask": null,
+      "current_file_focus": "docs.py",
+      "current_symbol_focus": null,
+      "last_artifact": "latest python 3.12 release notes",
+      "last_artifact_kind": "ui_component",
+      "current_artifact_focus": "docs.py",
+      "recent_tool_failures": [],
+      "web_findings": [
+        "Python documentation docs.python.org › 3  › whatsnew  › 3.12.html What's New In Python 3.12 — Python 3.14.3 documentation",
+        "Python python.org › downloads  › release  › python-3120 Python Release Python 3.12.0 | Python.org",
+        "04:49 YouTube How to install Python 3.12 on Windows 11 when you already have ... January 28, 2026",
+        "14:36 YouTube What's New in Python 3.12? - YouTube October 13, 2023"
+      ],
+      "next_step": "latest python 3.12 release notes",
+      "next_tool": "web_search",
+      "missing_evidence": [],
+      "tool_candidates": [
+        "web_search"
+      ],
+      "tool_risks": {
+        "web_search": "safe"
+      },
+      "approval_required": [],
+      "actions": [],
+      "next_action": null,
+      "llm_required": true,
+      "routing_confidence": 1.0,
+      "ambiguous_route": false,
+      "pending_approval": null
+    }
+  }
+]

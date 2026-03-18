@@ -1,0 +1,171 @@
+[
+  {
+    "turn_id": "0dd669314b36",
+    "created_at": 1773826606704,
+    "finished_at": 1773826608584,
+    "status": "success",
+    "mode": "web",
+    "source_plan": "web_only",
+    "active_project_id": null,
+    "user_message": "web: where is russia?",
+    "items": [
+      {
+        "item_id": "9ee31d94d38b",
+        "ts": 1773826606704,
+        "kind": "plan",
+        "status": "ok",
+        "payload": {
+          "mode": "web",
+          "source_plan": "web_only",
+          "force_web": true,
+          "current_task": "where is russia?",
+          "current_subtask": "web: where is russia?",
+          "next_step": "web: where is russia?",
+          "next_tool": "web_search",
+          "missing_evidence": [],
+          "tool_candidates": [
+            "web_search"
+          ],
+          "tool_risks": {
+            "web_search": "safe"
+          },
+          "approval_required": [],
+          "actions": [],
+          "next_action": null,
+          "llm_required": true,
+          "steps": [
+            "web_search",
+            "llm_synthesis"
+          ],
+          "routing_confidence": 0.9500000000000001,
+          "ambiguous_route": false
+        }
+      },
+      {
+        "item_id": "46363434b32c",
+        "ts": 1773826606704,
+        "kind": "source_selection",
+        "status": "ok",
+        "payload": {
+          "source_plan": "web_only",
+          "next_tool": "web_search",
+          "tool_candidates": [
+            "web_search"
+          ],
+          "llm_required": true
+        }
+      },
+      {
+        "item_id": "ace3a5251020",
+        "ts": 1773826606705,
+        "kind": "tool_call",
+        "status": "ok",
+        "payload": {
+          "tool": "web_search",
+          "query": "where is"
+        }
+      },
+      {
+        "item_id": "043bb0ae30a6",
+        "ts": 1773826608526,
+        "kind": "replan",
+        "status": "ok",
+        "payload": {
+          "reason": "web_search",
+          "next_step": "web: where is russia?",
+          "next_tool": "llm_synthesis",
+          "missing_evidence": [],
+          "recent_tool_failures": []
+        }
+      },
+      {
+        "item_id": "b6b76b72db6f",
+        "ts": 1773826608526,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "tool": "web_search",
+          "query": "where is",
+          "source": "live",
+          "provider": "brave_html",
+          "results": 4
+        }
+      },
+      {
+        "item_id": "3d50a820a72d",
+        "ts": 1773826608535,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "tool": "evidence_only",
+          "response": "Collected evidence without synthesis:\n\n[2] PenguinRandomhouse.com penguinrandomhouse.com › series › 173 › where-is Where Is? Series\nContent from https://www.penguinrandomhouse.com/series/173/where-is/:\nWhere Is? Skip to Main Content (Press Enter) 📝 Quiz: What Book Should You Read Next? 📝 Quiz: What Book Should You Read Next? Books Kids Popular Authors & Events Recommendations Audio 10 Audiobook Originals You Need To Hear Learn More > What Type of Reader Is Your Child? Take the Quiz! Learn More > Join Our Authors for Upcoming Events Learn More > < Books > Popular New & Noteworthy Bestsellers Graphic Novels & Manga The Must-Read Books of 2025 Popular Books in Spanish Coming Soon Fiction Classics Romance Literary Fiction Mystery & Thriller Science Fiction Spanish Language Fiction Nonfiction Biographies & Memoirs Wellness Cookbooks History Spanish Language Nonfiction Series A Thursday Murder Club Rebel Blue Ranch Robert Langdon A Song of Ice and Fire Penguin Classics < View All > < Kids > Popular New & Noteworthy Bestsellers Award Winners The Parenting Book Guide Kids' Corner Books for Middle Graders Trending Series Who Was? Magic Tree House The Last Kids on Earth Mad Libs Planet Om..."
+        }
+      },
+      {
+        "item_id": "917ba662d1ae",
+        "ts": 1773826608583,
+        "kind": "replan",
+        "status": "ok",
+        "payload": {
+          "reason": "evidence_only",
+          "next_step": "web: where is russia?",
+          "next_tool": "web_search",
+          "missing_evidence": [],
+          "recent_tool_failures": []
+        }
+      }
+    ],
+    "assistant_message": "Collected evidence without synthesis:\n\n[2] PenguinRandomhouse.com penguinrandomhouse.com › series › 173 › where-is Where Is? Series\nContent from https://www.penguinrandomhouse.com/series/173/where-is/:\nWhere Is? Skip to Main Content (Press Enter) 📝 Quiz: What Book Should You Read Next? 📝 Quiz: What Book Should You Read Next? Books Kids Popular Authors & Events Recommendations Audio 10 Audiobook Originals You Need To Hear Learn More > What Type of Reader Is Your Child? Take the Quiz! Learn More > Join Our Authors for Upcoming Events Learn More > < Books > Popular New & Noteworthy Bestsellers Graphic Novels & Manga The Must-Read Books of 2025 Popular Books in Spanish Coming Soon Fiction Classics Romance Literary Fiction Mystery & Thriller Science Fiction Spanish Language Fiction Nonfiction Biographies & Memoirs Wellness Cookbooks History Spanish Language Nonfiction Series A Thursday Murder Club Rebel Blue Ranch Robert Langdon A Song of Ice and Fire Penguin Classics < View All > < Kids > Popular New & Noteworthy Bestsellers Award Winners The Parenting Book Guide Kids' Corner Books for Middle Graders Trending Series Who Was? Magic Tree House The Last Kids on Earth Mad Libs Planet Om...",
+    "response_context": {
+      "source_plan": "web_only",
+      "source_origin": [
+        "web"
+      ],
+      "active_project_id": null,
+      "effective_tool": "evidence_only",
+      "effective_tool_status": "ok",
+      "effective_tool_output": "Collected evidence without synthesis:\n\n[2] PenguinRandomhouse.com penguinrandomhouse.com › series › 173 › where-is Where Is? Series\nContent from https://www.penguinrandomhouse.com/series/173/where-is/:\nWhere Is? Skip to Main Content (Press Enter) 📝 Quiz: What Book Should You Read Next? 📝 Quiz: What Book Should You Read Next? Books Kids Popular Authors & Events Recommendations Audio 10 Audiobook Originals You Need To Hear Learn More > What Type of Reader Is Your Child? Take the Quiz! Learn More > Join Our Authors for Upcoming Events Learn More > < Books > Popular New & Noteworthy Bestsellers Graphic Novels & Manga The Must-Read Books of 2025 Popular Books in Spanish Coming Soon Fiction Classics Romance Literary Fiction Mystery & Thriller Science Fiction Spanish Language Fiction Nonfiction Biographies & Memoirs Wellness Cookbooks History Spanish Language Nonfiction Series A Thursday Murder Club Rebel Blue Ranch Robert Langdon A Song of Ice and Fire Penguin Classics < View All > < Kids...",
+      "web_query": "where is",
+      "web_status": "live",
+      "web_source": "live",
+      "web_provider": "brave_html",
+      "web_results": 4,
+      "web_attempted": true,
+      "using_live_web": true,
+      "using_cached_web": false,
+      "using_stale_cache": false,
+      "data_notice": "Using live web sources.",
+      "architecture_summary": "",
+      "current_task": null,
+      "current_subtask": "web: where is russia?",
+      "current_file_focus": null,
+      "current_symbol_focus": null,
+      "last_artifact": null,
+      "last_artifact_kind": null,
+      "current_artifact_focus": null,
+      "recent_tool_failures": [],
+      "web_findings": [
+        "What is going on in the phrase “where is there”?",
+        "PenguinRandomhouse.com penguinrandomhouse.com › series  › 173  › where-is Where Is? Series",
+        "App Store apps.apple.com › us  › app  › where-is-that  › id492240967 Where is that? App - App Store",
+        "More on reddit.com"
+      ],
+      "next_step": "web: where is russia?",
+      "next_tool": "web_search",
+      "missing_evidence": [],
+      "tool_candidates": [
+        "web_search"
+      ],
+      "tool_risks": {
+        "web_search": "safe"
+      },
+      "approval_required": [],
+      "actions": [],
+      "next_action": null,
+      "llm_required": true,
+      "routing_confidence": 0.9500000000000001,
+      "ambiguous_route": false,
+      "pending_approval": null
+    }
+  }
+]

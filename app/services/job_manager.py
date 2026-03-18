@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+"""
+In-process background job registry.
+
+Why this module exists:
+- Track ingest/ops jobs with deterministic status transitions.
+- Provide stage-level telemetry for UI/log endpoints.
+"""
+
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from threading import Lock, Thread
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 
 @dataclass
@@ -13,14 +21,16 @@ class Job:
     kind: str = "generic"
     status: str = "queued"  # queued | running | success | error
     created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
     error: Optional[str] = None
     result: Optional[Dict] = None
-    meta: Dict[str, str] = field(default_factory=dict)
+    meta: Dict[str, Any] = field(default_factory=dict)
 
 
 _jobs: dict[str, Job] = {}
+_threads: dict[str, Thread] = {}
 _lock = Lock()
 
 
@@ -31,14 +41,72 @@ def _set_job(job_id: str, **updates: object) -> None:
             return
         for key, value in updates.items():
             setattr(job, key, value)
+        job.updated_at = time.time()
+
+
+def _stage_list(job: Job) -> list[dict]:
+    stages = job.meta.get("stages")
+    if isinstance(stages, list):
+        return stages
+    stages = []
+    job.meta["stages"] = stages
+    return stages
+
+
+def start_stage(job_id: str, name: str, *, detail: str = "") -> None:
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return
+        stages = _stage_list(job)
+        now = time.time()
+        stages.append(
+            {
+                "name": str(name),
+                "status": "running",
+                "started_at": now,
+                "finished_at": None,
+                "detail": str(detail or ""),
+            }
+        )
+        job.updated_at = now
+
+
+def finish_stage(job_id: str, name: str, *, status: str = "success", detail: str = "") -> None:
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return
+        stages = _stage_list(job)
+        now = time.time()
+        target = None
+        for st in reversed(stages):
+            if str(st.get("name") or "") == str(name) and st.get("finished_at") in (None, 0, ""):
+                target = st
+                break
+        if target is None:
+            target = {
+                "name": str(name),
+                "status": "running",
+                "started_at": now,
+                "finished_at": None,
+                "detail": "",
+            }
+            stages.append(target)
+        target["status"] = str(status or "success")
+        target["finished_at"] = now
+        if detail:
+            target["detail"] = str(detail)
+        job.updated_at = now
 
 
 def start_job(
     fn: Callable[[], Dict],
     kind: str = "generic",
     job_id: Optional[str] = None,
-    meta: Optional[Dict[str, str]] = None,
+    meta: Optional[Dict[str, Any]] = None,
 ) -> Job:
+    """Create and execute an async job with tracked lifecycle state."""
     job_id = job_id or uuid.uuid4().hex[:10]
     job = Job(id=job_id, kind=kind, meta=meta or {})
     with _lock:
@@ -54,7 +122,10 @@ def start_job(
         finally:
             _set_job(job_id, finished_at=time.time())
 
-    Thread(target=_runner, daemon=True).start()
+    thread = Thread(target=_runner, name=f"job-{kind}-{job_id}", daemon=True)
+    with _lock:
+        _threads[job_id] = thread
+    thread.start()
     return job
 
 
@@ -73,4 +144,24 @@ def list_jobs(limit: int = 20, kind: Optional[str] = None) -> list[Job]:
 
 
 def serialize_job(job: Job) -> Dict:
+    """Convert internal Job dataclass into API-friendly payload."""
     return asdict(job)
+
+
+def wait_for_jobs(timeout_s: float = 1.0) -> Dict[str, int]:
+    deadline = time.time() + max(0.0, float(timeout_s))
+    with _lock:
+        threads = list(_threads.items())
+
+    alive = 0
+    for job_id, thread in threads:
+        remaining = deadline - time.time()
+        if remaining > 0 and thread.is_alive():
+            thread.join(remaining)
+        if thread.is_alive():
+            alive += 1
+            continue
+        with _lock:
+            _threads.pop(job_id, None)
+
+    return {"tracked": len(threads), "alive": alive}

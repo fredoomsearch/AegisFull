@@ -1,5 +1,11 @@
-# app/services/time_service.py
 from __future__ import annotations
+
+"""
+Time-question helper.
+
+Why this module exists:
+- Answer simple timezone/time-of-day questions without invoking heavy model flow.
+"""
 
 import re
 from datetime import datetime

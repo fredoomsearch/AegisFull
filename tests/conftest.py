@@ -14,6 +14,7 @@ os.environ["AEGIS_DISABLE_DB"] = "1"
 os.environ["AEGIS_DISABLE_RETRIEVAL"] = "1"
 os.environ["AEGIS_LLM_WARMUP"] = "0"
 os.environ["AEGIS_DISABLE_EMBEDDINGS"] = "1"
+os.environ["AEGIS_MEMORY_PERSIST"] = "0"
 
 # Ensure project root is importable
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,5 +28,9 @@ def client():
 
     main._warm_llm_once = lambda: None
     main.start_background_warmup = lambda: None
-
     return TestClient(main.app)
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"

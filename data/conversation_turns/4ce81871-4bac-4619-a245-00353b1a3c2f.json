@@ -1,0 +1,171 @@
+[
+  {
+    "turn_id": "e96591cdc4a0",
+    "created_at": 1773823363289,
+    "finished_at": 1773823363356,
+    "status": "success",
+    "mode": "web",
+    "source_plan": "web_only",
+    "active_project_id": null,
+    "user_message": "web: current bitcoin market summary",
+    "items": [
+      {
+        "item_id": "c6ecf8251b64",
+        "ts": 1773823363289,
+        "kind": "plan",
+        "status": "ok",
+        "payload": {
+          "mode": "web",
+          "source_plan": "web_only",
+          "force_web": true,
+          "current_task": "current bitcoin market summary",
+          "current_subtask": "",
+          "next_step": "fetch fresher external evidence for current bitcoin market summary",
+          "next_tool": "web_search",
+          "missing_evidence": [],
+          "tool_candidates": [
+            "web_search"
+          ],
+          "tool_risks": {
+            "web_search": "safe"
+          },
+          "approval_required": [],
+          "actions": [],
+          "next_action": null,
+          "llm_required": true,
+          "steps": [
+            "web_search",
+            "llm_synthesis"
+          ],
+          "routing_confidence": 1.0,
+          "ambiguous_route": false
+        }
+      },
+      {
+        "item_id": "6e149de24c04",
+        "ts": 1773823363289,
+        "kind": "source_selection",
+        "status": "ok",
+        "payload": {
+          "source_plan": "web_only",
+          "next_tool": "web_search",
+          "tool_candidates": [
+            "web_search"
+          ],
+          "llm_required": true
+        }
+      },
+      {
+        "item_id": "dfb0dc65f624",
+        "ts": 1773823363290,
+        "kind": "tool_call",
+        "status": "ok",
+        "payload": {
+          "tool": "web_search",
+          "query": "current bitcoin market"
+        }
+      },
+      {
+        "item_id": "1bdf7f06a967",
+        "ts": 1773823363309,
+        "kind": "replan",
+        "status": "ok",
+        "payload": {
+          "reason": "web_search",
+          "next_step": "current bitcoin market summary",
+          "next_tool": "llm_synthesis",
+          "missing_evidence": [],
+          "recent_tool_failures": []
+        }
+      },
+      {
+        "item_id": "a9b73248ac7d",
+        "ts": 1773823363309,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "tool": "web_search",
+          "query": "current bitcoin market",
+          "source": "cache",
+          "provider": "brave_html",
+          "results": 4
+        }
+      },
+      {
+        "item_id": "7388eafce514",
+        "ts": 1773823363312,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "tool": "evidence_only",
+          "response": "Collected evidence without synthesis:\n\n[1] CoinGecko\nContent from https://www.coingecko.com/:\nCryptocurrency Prices, Charts, and Crypto Market Cap | CoinGecko 📊 Now LIVE: CEX & DEX Trading Activity Report 2026 Coins: 18,090 Exchanges: 1,480 Market Cap: $2.613T 0.1% 24h Vol: $94.315B Dominance: BTC 56.7% ETH 10.7% Gas: 0.056 GWEI Fast: 0.062 GWEI Standard: 0.056 GWEI Safe: 0.056 GWEI Data by Etherscan Language English Currency USD Dark Mode My Account Login and Security Upgrade to Premium Manage Subscription Manage Communications For Developers Developer's Dashboard For Authors Create New Post Buzz Dashboard Sign Out Get the CoinGecko app Scan the QR code above to track crypto prices on-the-go Go Ad-free Login Sign up Use App Get App Cryptocurrencies By Market Cap Categories Chains Crypto Treasuries Rehypothecated Popular Highlights New Cryptocurrencies Gainers & Losers Tools All Coins Compare Coins and NFT Converter Global Chart Exchanges Crypto Exchanges Decentralized Exchanges Derivatives Perp DEXs Prediction Markets Alpha NFT NFT Floor Price NFT Related Coins NFT Watchlist NFT Global Chart Learn Learn Crypto Research Insights News Reports Learn & Earn Videos Newsletter Glossa..."
+        }
+      },
+      {
+        "item_id": "146be62fe829",
+        "ts": 1773823363355,
+        "kind": "replan",
+        "status": "ok",
+        "payload": {
+          "reason": "evidence_only",
+          "next_step": "current bitcoin market summary",
+          "next_tool": "web_search",
+          "missing_evidence": [],
+          "recent_tool_failures": []
+        }
+      }
+    ],
+    "assistant_message": "Collected evidence without synthesis:\n\n[1] CoinGecko\nContent from https://www.coingecko.com/:\nCryptocurrency Prices, Charts, and Crypto Market Cap | CoinGecko 📊 Now LIVE: CEX & DEX Trading Activity Report 2026 Coins: 18,090 Exchanges: 1,480 Market Cap: $2.613T 0.1% 24h Vol: $94.315B Dominance: BTC 56.7% ETH 10.7% Gas: 0.056 GWEI Fast: 0.062 GWEI Standard: 0.056 GWEI Safe: 0.056 GWEI Data by Etherscan Language English Currency USD Dark Mode My Account Login and Security Upgrade to Premium Manage Subscription Manage Communications For Developers Developer's Dashboard For Authors Create New Post Buzz Dashboard Sign Out Get the CoinGecko app Scan the QR code above to track crypto prices on-the-go Go Ad-free Login Sign up Use App Get App Cryptocurrencies By Market Cap Categories Chains Crypto Treasuries Rehypothecated Popular Highlights New Cryptocurrencies Gainers & Losers Tools All Coins Compare Coins and NFT Converter Global Chart Exchanges Crypto Exchanges Decentralized Exchanges Derivatives Perp DEXs Prediction Markets Alpha NFT NFT Floor Price NFT Related Coins NFT Watchlist NFT Global Chart Learn Learn Crypto Research Insights News Reports Learn & Earn Videos Newsletter Glossa...",
+    "response_context": {
+      "source_plan": "web_only",
+      "source_origin": [
+        "web"
+      ],
+      "active_project_id": null,
+      "effective_tool": "evidence_only",
+      "effective_tool_status": "ok",
+      "effective_tool_output": "Collected evidence without synthesis:\n\n[1] CoinGecko\nContent from https://www.coingecko.com/:\nCryptocurrency Prices, Charts, and Crypto Market Cap | CoinGecko 📊 Now LIVE: CEX & DEX Trading Activity Report 2026 Coins: 18,090 Exchanges: 1,480 Market Cap: $2.613T 0.1% 24h Vol: $94.315B Dominance: BTC 56.7% ETH 10.7% Gas: 0.056 GWEI Fast: 0.062 GWEI Standard: 0.056 GWEI Safe: 0.056 GWEI Data by Etherscan Language English Currency USD Dark Mode My Account Login and Security Upgrade to Premium Manage Subscription Manage Communications For Developers Developer's Dashboard For Authors Create New Post Buzz Dashboard Sign Out Get the CoinGecko app Scan the QR code above to track crypto prices on-the-go Go Ad-free Login Sign up Use App Get App Cryptocurrencies By Market Cap Categories Chains Crypto Treasuries Rehypothecated Popular Highlights New Cryptocurrencies Gainers & Losers Tools All Coins Compare Coins and NFT Converter Global Chart Exchanges Crypto Exchanges Decentralized Exchanges Der...",
+      "web_query": "current bitcoin market",
+      "web_status": "cache",
+      "web_source": "cache",
+      "web_provider": "brave_html",
+      "web_results": 4,
+      "web_attempted": true,
+      "using_live_web": false,
+      "using_cached_web": true,
+      "using_stale_cache": false,
+      "data_notice": "Using cached web sources.",
+      "architecture_summary": "",
+      "current_task": "current bitcoin market summary",
+      "current_subtask": null,
+      "current_file_focus": null,
+      "current_symbol_focus": null,
+      "last_artifact": "current bitcoin market summary",
+      "last_artifact_kind": "crypto_flow",
+      "current_artifact_focus": "current bitcoin market summary",
+      "recent_tool_failures": [],
+      "web_findings": [
+        "CoinGecko",
+        "Bitcoin",
+        "bitcoin.org",
+        "https://www.reddit.com/r/btc/"
+      ],
+      "next_step": "current bitcoin market summary",
+      "next_tool": "web_search",
+      "missing_evidence": [],
+      "tool_candidates": [
+        "web_search"
+      ],
+      "tool_risks": {
+        "web_search": "safe"
+      },
+      "approval_required": [],
+      "actions": [],
+      "next_action": null,
+      "llm_required": true,
+      "routing_confidence": 1.0,
+      "ambiguous_route": false,
+      "pending_approval": null
+    }
+  }
+]

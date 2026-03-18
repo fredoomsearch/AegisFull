@@ -1,35 +1,26 @@
 from __future__ import annotations
 
 """
-Improved tools module for web search, fetching and small utilities.
+Core tools & utilities used by runtime.
 
-Public API:
-- find_brave_binary()
-- web_search_structured()
-- web_search()
-- duckduckgo_search_html_structured()
-- browser_search_scrape_structured()
-- fetch_url()
-- is_onion()
-- fetch_url_via_tor()
-- sanitize_web_context()
-- sanitize_messages()
-- parse_cors_origins()
+This module intentionally contains only canonical utilities:
+- Browser binary discovery used by capability checks / browser smoke.
+- SSRF-safe URL fetching utilities used by chat and web snippets.
+- Lightweight sanitizers for web/user text.
+
+Canonical web search orchestration lives in `app/services/web_search.py`.
 """
 
-import getpass
 import ipaddress
 import logging
 import os
 import re
 import shutil
-import signal
 import socket
-import subprocess
 import time
-from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import quote as url_quote, urlparse
+from datetime import UTC, datetime
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -38,13 +29,8 @@ from requests.adapters import HTTPAdapter
 from requests.exceptions import RequestException
 from urllib3.util.retry import Retry
 
-from app.services.web_search import web_search_structured as _svc_web_search_structured
-
 try:  # pragma: no cover
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options as ChromeOptions
-    from selenium.webdriver.chrome.service import Service as ChromeService
-    from selenium.webdriver.common.by import By
+    import selenium  # noqa: F401
 
     SELENIUM_AVAILABLE = True
 except Exception:  # noqa: BLE001
@@ -67,21 +53,14 @@ logger.setLevel(os.getenv("TOOLS_LOG_LEVEL", "INFO"))
 
 __all__ = [
     "find_brave_binary",
-    "web_search_structured",
-    "web_search",
-    "duckduckgo_search_html_structured",
-    "browser_search_scrape_structured",
     "fetch_url",
     "is_onion",
     "fetch_url_via_tor",
     "sanitize_web_context",
     "sanitize_messages",
     "parse_cors_origins",
-    "TOOLS",
-    "tool",
 ]
 
-SearchResult = Dict[str, str]
 FetchResult = Dict[str, Any]
 
 DEFAULT_USER_AGENT = "Mozilla/5.0 (AegisChat)"
@@ -93,20 +72,41 @@ MAX_REDIRECTS = int(os.getenv("TOOLS_MAX_REDIRECTS", "1"))
 ALLOWED_SCHEMES = {"http", "https"}
 ALLOWED_MIME_PREFIXES = ("text/",)
 ALLOWED_MIME_EXACT = {"application/json", "application/xml", "application/xhtml+xml"}
-DUCKDUCKGO_HTML = "https://html.duckduckgo.com/html"  # kept for backwards compat; actual search now uses Brave-first providers
 BLOCK_LOCAL_NETS = {"127.", "10.", "192.168.", "169.254.", "0.0.0.0"}
 BLOCK_LOCAL_NETS |= {
     p.strip()
     for p in (os.getenv("TOOLS_BLOCK_NETS", "") or "").split(",")
     if p.strip()
 }
-ALLOW_REDIRECTS = os.getenv("TOOLS_ALLOW_REDIRECTS", "false").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
 RATE_LIMIT_PER_MINUTE = int(os.getenv("TOOLS_RATE_LIMIT", "120"))
+
+
+def parse_cors_origins(raw: str | None) -> List[str]:
+    """
+    Parse comma-separated CORS origins.
+    - Empty input -> ["*"]
+    - Any wildcard entry collapses to ["*"]
+    - Trims spaces and trailing slashes.
+    - Keeps insertion order while deduplicating.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ["*"]
+
+    parsed: List[str] = []
+    seen: set[str] = set()
+    for part in text.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        if item == "*":
+            return ["*"]
+        cleaned = item.rstrip("/")
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            parsed.append(cleaned)
+
+    return parsed or ["*"]
 
 
 def _create_session(
@@ -134,57 +134,20 @@ _default_session: requests.Session = _create_session()
 _tor_session: requests.Session = _create_session(retries=1, backoff_factor=0.2)
 _rate_bucket: Dict[str, List[float]] = {}
 
-
-def _safe_pkill(pattern: str) -> None:
-    """
-    Best-effort kill processes matching a pattern, scoped to current user.
-    """
-    try:
-        user = getpass.getuser()
-    except Exception:
-        user = None
-
-    try:
-        if user:
-            out = subprocess.run(
-                ["pgrep", "-u", user, "-f", pattern],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                check=False,
-            )
-            pids: List[int] = []
-            if out.stdout:
-                for line in out.stdout.splitlines():
-                    try:
-                        pids.append(int(line.strip()))
-                    except Exception:
-                        continue
-            for pid in pids:
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                    logger.debug("SIGTERM sent to pid %s matching %s", pid, pattern)
-                except Exception:
-                    logger.debug("Failed to kill pid %s", pid)
-            return
-    except Exception:
-        logger.debug("pgrep path failed for pattern=%s", pattern)
-
-    try:
-        subprocess.run(
-            ["pkill", "-u", user or getpass.getuser(), "-f", pattern],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except Exception:
-        logger.debug("pkill fallback failed for pattern=%s", pattern)
-
-
 def find_brave_binary() -> Optional[str]:
     """
     Locate a Brave/Chromium-compatible binary on the system.
     """
+    # Allow explicit override (useful when the default is a Snap wrapper that cannot run in this environment).
+    override = (os.getenv("AEGIS_BROWSER_BINARY") or os.getenv("AEGIS_CHROME_BINARY") or os.getenv("CHROME_BIN") or "").strip()
+    if override:
+        try:
+            if os.path.isfile(override) and os.access(override, os.X_OK):
+                logger.debug("Using browser binary override: %s", override)
+                return override
+        except Exception:
+            pass
+
     common_paths: List[str] = [
         "/usr/bin/brave-browser",
         "/usr/bin/brave",
@@ -205,159 +168,6 @@ def find_brave_binary() -> Optional[str]:
         except Exception:
             continue
     return None
-
-
-def duckduckgo_search_html_structured(
-    query: str,
-    max_results: int = 3,
-    session: Optional[requests.Session] = None,
-) -> List[SearchResult]:
-    # Reuse core web_search with Brave-first provider order; keep signature for compatibility.
-    try:
-        results = _svc_web_search_structured(query, max_results, lang=None) or []
-        trimmed = results[:max_results]
-        logger.debug("web_search_structured (Brave-first) returned %d results for query=%s", len(trimmed), query)
-        return [{"title": r.title, "snippet": r.snippet, "link": r.link} for r in trimmed]
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("duckduckgo_search_html_structured (Brave-first wrapper) failed: %s", exc)
-        return []
-
-
-def browser_search_scrape_structured(
-    query: str,
-    max_results: int = 3,
-    headless: bool = True,
-    session: Optional[requests.Session] = None,
-) -> List[SearchResult]:
-    session = session or _default_session
-
-    if not SELENIUM_AVAILABLE or not CHROMEDRIVER_AUTOINSTALLER_AVAILABLE:
-        logger.debug(
-            "Selenium or chromedriver autoinstaller not available; using Brave-first web_search fallback."
-        )
-        return duckduckgo_search_html_structured(query, max_results, session=session)
-
-    brave_bin = find_brave_binary()
-    if not brave_bin:
-        logger.debug("Brave/Chromium binary not found; using Brave-first web_search fallback.")
-        return duckduckgo_search_html_structured(query, max_results, session=session)
-
-    try:
-        chromedriver_path = chromedriver_autoinstaller.install()
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("chromedriver_autoinstaller failed: %s", exc)
-        return duckduckgo_search_html_structured(query, max_results, session=session)
-
-    try:
-        options = ChromeOptions()
-        options.binary_location = brave_bin
-        if headless:
-            try:
-                options.add_argument("--headless=new")
-            except Exception:  # noqa: BLE001
-                options.add_argument("--headless")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-extensions")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--disable-setuid-sandbox")
-        options.add_argument(
-            f"user-agent={session.headers.get('User-Agent', DEFAULT_USER_AGENT)}"
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Failed to prepare ChromeOptions: %s", exc)
-        return duckduckgo_search_html_structured(query, max_results, session=session)
-
-    try:
-        if chromedriver_path and not os.access(chromedriver_path, os.X_OK):
-            try:
-                os.chmod(chromedriver_path, 0o755)
-            except Exception:
-                logger.debug("Could not chmod chromedriver at %s", chromedriver_path)
-    except Exception:
-        pass
-
-    driver = None
-    try:
-        service = ChromeService(executable_path=chromedriver_path)
-        driver = webdriver.Chrome(service=service, options=options)
-
-        url = f"{DUCKDUCKGO_HTML}?q={url_quote(query)}"
-        driver.get(url)
-        time.sleep(1.0)
-
-        results: List[SearchResult] = []
-        try:
-            elements = driver.find_elements(By.CSS_SELECTOR, "div.result")
-        except Exception:
-            elements = []
-
-        for el in elements[:max_results]:
-            try:
-                a = el.find_element(By.CSS_SELECTOR, "a")
-                title = a.text.strip()
-                link = a.get_attribute("href")
-                try:
-                    snippet_el = el.find_element(By.CSS_SELECTOR, ".result__snippet")
-                    snippet = snippet_el.text.strip()
-                except Exception:
-                    snippet = ""
-                results.append({"title": title, "snippet": snippet, "link": link})
-            except Exception:
-                continue
-
-        if not results:
-            return duckduckgo_search_html_structured(
-                query,
-                max_results,
-                session=session,
-            )
-        return results
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("browser_search_scrape_structured failed: %s", exc)
-        return duckduckgo_search_html_structured(query, max_results, session=session)
-    finally:
-        try:
-            if driver:
-                driver.quit()
-        except Exception:
-            pass
-        _safe_pkill("chromedriver")
-        _safe_pkill("brave")
-
-
-def web_search_structured(query: str, max_results: int = 3, lang: str | None = None) -> List[SearchResult]:
-    """
-    Wrapper over app.services.web_search.web_search_structured -> list of dicts.
-    """
-    results = _svc_web_search_structured(query, max_results, lang=lang)
-    return [
-        {
-            "title": r.title,
-            "snippet": r.snippet,
-            "link": r.link,
-        }
-        for r in results
-    ]
-
-
-def web_search(query: str, max_results: int = 3) -> str:
-    """
-    Web search in plain text format ready for LLM context injection.
-    """
-    results = web_search_structured(query, max_results)
-    if not results:
-        return f"No se encontraron resultados web para: {query!r}"
-
-    lines = []
-    for i, r in enumerate(results, start=1):
-        lines.append(
-            f"[{i}] {r.get('title')}\n"
-            f"URL: {r.get('link')}\n"
-            f"Snippet: {r.get('snippet')}\n"
-        )
-    return "\n".join(lines)
-
 
 def _is_blocked_url(url: str) -> bool:
     parsed = urlparse(url)
@@ -564,7 +374,7 @@ def sanitize_web_context(text: str, max_chars: int = 1200) -> str:
     if not text:
         return ""
 
-    current_year = datetime.utcnow().year
+    current_year = datetime.now(UTC).year
     years = re.findall(r"\b(19\d{2}|20\d{2}|21\d{2})\b", text)
     flagged: List[int] = []
     for y in years:
@@ -612,19 +422,3 @@ def sanitize_messages(
         total += len(content)
 
     return sanitized
-
-
-TOOLS: Dict[str, Callable[..., Any]] = {}
-
-
-def tool(name: str):
-    """
-    Decorator to register a function in the TOOLS registry.
-    """
-
-    def deco(fn: Callable[..., Any]):
-        TOOLS[name] = fn
-        return fn
-
-    return deco
-

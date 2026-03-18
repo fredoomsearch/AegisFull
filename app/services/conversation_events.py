@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+"""
+Ephemeral conversation event stream.
+
+Why this module exists:
+- Record lightweight runtime events for UI/event debugging.
+- Keep short-lived event telemetry decoupled from persisted messages.
+"""
+
 import os
 import threading
-import time
 from typing import Any, Dict, List, Optional
+from app.utils.runtime_helpers import now_ms as _now_ms
 
 MAX_EVENTS_PER_CONV = int(os.getenv("AEGIS_CONV_EVENTS_MAX", "200") or "200")
 EVENT_TTL_SECONDS = int(os.getenv("AEGIS_CONV_EVENTS_TTL", "3600") or "3600")
@@ -11,11 +19,6 @@ INCLUDE_TEXT = (os.getenv("AEGIS_CONV_EVENTS_INCLUDE_TEXT", "") or "").lower() i
 
 _lock = threading.Lock()
 _events: Dict[str, List[Dict[str, Any]]] = {}
-
-
-def _now_ms() -> int:
-    return int(time.time() * 1000)
-
 
 def _sanitize_data(data: Dict[str, Any]) -> Dict[str, Any]:
     if INCLUDE_TEXT:
@@ -49,6 +52,7 @@ def record_event(
     detail: Optional[str] = None,
     data: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
+    """Record one event into in-memory per-conversation stream."""
     if not conv_id:
         return None
     now_ms = _now_ms()
@@ -73,6 +77,7 @@ def list_events(
     since_ts: Optional[int] = None,
     limit: int = 200,
 ) -> List[Dict[str, Any]]:
+    """List recent events with optional `since_ts` incremental filtering."""
     if not conv_id:
         return []
     with _lock:
@@ -83,3 +88,12 @@ def list_events(
     if limit > 0:
         return items[-limit:] 
     return items
+
+
+def clear_events(conv_id: str) -> int:
+    """Drop all in-memory events for a conversation id."""
+    if not conv_id:
+        return 0
+    with _lock:
+        items = _events.pop(conv_id, [])
+    return len(items or [])

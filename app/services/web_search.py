@@ -5,6 +5,10 @@ Web search service for AEGIS.
 
 Public API:
     web_search_structured(query: str, num_results: int = 3, lang: Optional[str] = None) -> list[WebSearchResult]
+
+Why this module exists:
+- Orchestrate multiple providers with cooldown/rotation.
+- Return explicit source metadata (`live/cache/unavailable`) to avoid fake success.
 """
 
 import html as _html
@@ -12,8 +16,8 @@ import logging
 import os
 import re
 import time
-from threading import RLock, Thread
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from threading import Event, RLock, Thread
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 import requests
@@ -21,16 +25,11 @@ from bs4 import BeautifulSoup
 
 from app.core.types import WebSearchResult
 from app.services import search_state
+from app.services.http_client import http_get
 from app.services.search_state import (
     ProviderCooldownError,
     ProviderLimitError,
-    ProxyUnavailableError,
 )
-
-try:
-    from app.services import proxy_pool
-except Exception:  # pragma: no cover
-    proxy_pool = None
 
 logger = logging.getLogger(__name__)
 
@@ -196,20 +195,6 @@ _DDG_A_RE = re.compile(
 _BLOCK_MARKERS = ("enable javascript", "requires javascript", "unusual traffic", "robot")
 
 
-def _proxies_enabled() -> bool:
-    return bool(getattr(proxy_pool, "proxies_configured", lambda: False)())
-
-
-def _http_get(url: str, **kwargs) -> requests.Response:
-    if proxy_pool and _proxies_enabled():
-        try:
-            with proxy_pool.proxy_session() as (session, _):
-                return session.get(url, **kwargs)
-        except ProxyUnavailableError:
-            logger.debug("Proxy unavailable; falling back to direct request for %s", url)
-    return requests.get(url, **kwargs)
-
-
 def _clean_query(q: str) -> str:
     q = " ".join((q or "").split())
     if len(q) > MAX_QUERY_CHARS:
@@ -281,6 +266,10 @@ def _fetch_cached_results(query: str, num_results: int, lang: str) -> Optional[L
     if mem:
         return list(mem)
 
+    meta = search_state.get_cached_results_meta(query, num_results, lang=lang, allow_stale=True)
+    if meta and meta.get("stale"):
+        return None
+
     cached = search_state.get_cached_results(query, num_results, lang=lang)
     if not cached:
         return None
@@ -296,6 +285,181 @@ def _persist_cache(query: str, num_results: int, lang: str, provider: str, resul
     _set_memory_cache(query, num_results, lang, results)
     payload = [r.to_dict() for r in results]
     search_state.set_cached_results(query, num_results, provider, payload, DISK_CACHE_TTL_SECONDS, lang=lang)
+
+
+def _build_meta(
+    *,
+    cleaned_query: str,
+    num_results: int,
+    lang: str,
+    status: str,
+    source: str,
+    provider: str = "",
+    results: int = 0,
+    attempted: bool = False,
+    cache_used: bool = False,
+    stale_cache_used: bool = False,
+    live_web_used: bool = False,
+    fetched_at: float | None = None,
+    expires_at: float | None = None,
+    providers_tried: Sequence[str] | None = None,
+) -> Dict[str, Any]:
+    return {
+        "query": cleaned_query,
+        "requested_results": int(num_results),
+        "lang": lang,
+        "status": status,
+        "source": source,
+        "provider": provider,
+        "results": int(results),
+        "attempted": bool(attempted),
+        "cache_used": bool(cache_used),
+        "stale_cache_used": bool(stale_cache_used),
+        "live_web_used": bool(live_web_used),
+        "fetched_at": float(fetched_at or 0.0),
+        "expires_at": float(expires_at or 0.0),
+        "providers_tried": [str(item) for item in (providers_tried or []) if str(item).strip()],
+    }
+
+
+def web_search_structured_with_meta(
+    query: str,
+    num_results: int = DEFAULT_RESULTS,
+    lang: Optional[str] = None,
+) -> tuple[list[WebSearchResult], Dict[str, Any]]:
+    """Search with provider orchestration and return results + runtime metadata."""
+    try:
+        cleaned = _clean_query(query)
+        lang_code = _resolve_lang(lang)
+        n = max(1, min(num_results, MAX_RESULTS))
+
+        if not cleaned:
+            return [], _build_meta(
+                cleaned_query="",
+                num_results=n,
+                lang=lang_code,
+                status="empty",
+                source="none",
+            )
+
+        mem = _get_memory_cache(cleaned, n, lang_code)
+        if mem:
+            disk_meta = search_state.get_cached_results_meta(cleaned, n, lang=lang_code, allow_stale=True) or {}
+            return list(mem), _build_meta(
+                cleaned_query=cleaned,
+                num_results=n,
+                lang=lang_code,
+                status="cache",
+                source="cache",
+                provider=str(disk_meta.get("provider") or "memory"),
+                results=len(mem),
+                cache_used=True,
+                fetched_at=float(disk_meta.get("fetched_at") or 0.0),
+                expires_at=float(disk_meta.get("expires_at") or 0.0),
+            )
+
+        disk_meta = search_state.get_cached_results_meta(cleaned, n, lang=lang_code, allow_stale=True)
+        if disk_meta and not bool(disk_meta.get("stale")):
+            cached = search_state.get_cached_results(cleaned, n, lang=lang_code)
+            if cached:
+                try:
+                    parsed = [WebSearchResult(**item) for item in cached]
+                    _set_memory_cache(cleaned, n, lang_code, parsed)
+                    return parsed, _build_meta(
+                        cleaned_query=cleaned,
+                        num_results=n,
+                        lang=lang_code,
+                        status="cache",
+                        source="cache",
+                        provider=str(disk_meta.get("provider") or "cache"),
+                        results=len(parsed),
+                        cache_used=True,
+                        fetched_at=float(disk_meta.get("fetched_at") or 0.0),
+                        expires_at=float(disk_meta.get("expires_at") or 0.0),
+                    )
+                except Exception:
+                    logger.debug("Failed to parse cached results for %r", cleaned)
+
+        providers_tried: list[str] = []
+        for provider_name in PROVIDER_ORDER:
+            cfg = _PROVIDERS.get(provider_name)
+            if not cfg:
+                logger.debug("web_search_structured_with_meta: unknown provider %s", provider_name)
+                continue
+            providers_tried.append(provider_name)
+            try:
+                results = _call_provider(provider_name, cfg, cleaned, n, lang_code)
+            except ProviderCooldownError as exc:
+                logger.info("Provider %s cooling down: %s", provider_name, exc)
+                continue
+            except ProviderLimitError as exc:
+                logger.info("Provider %s quota hit: %s", provider_name, exc)
+                continue
+            except Exception:
+                continue
+
+            if not results:
+                logger.debug("Provider %s returned no results for %r", provider_name, cleaned)
+                continue
+
+            trimmed = results[:n]
+            _persist_cache(cleaned, n, lang_code, provider_name, trimmed)
+            return trimmed, _build_meta(
+                cleaned_query=cleaned,
+                num_results=n,
+                lang=lang_code,
+                status="live",
+                source="live",
+                provider=provider_name,
+                results=len(trimmed),
+                attempted=True,
+                live_web_used=True,
+                providers_tried=providers_tried,
+            )
+
+        logger.warning("web_search_structured: all providers exhausted for %r", cleaned)
+        stale = search_state.get_stale_cached_results(cleaned, n, lang=lang_code)
+        if stale:
+            try:
+                restored = [WebSearchResult(**item) for item in stale][:n]
+                stale_meta = search_state.get_cached_results_meta(cleaned, n, lang=lang_code, allow_stale=True) or {}
+                logger.info("Using stale cache for %r after provider exhaustion.", cleaned)
+                return restored, _build_meta(
+                    cleaned_query=cleaned,
+                    num_results=n,
+                    lang=lang_code,
+                    status="stale-cache",
+                    source="stale-cache",
+                    provider=str(stale_meta.get("provider") or "cache"),
+                    results=len(restored),
+                    attempted=True,
+                    cache_used=True,
+                    stale_cache_used=True,
+                    fetched_at=float(stale_meta.get("fetched_at") or 0.0),
+                    expires_at=float(stale_meta.get("expires_at") or 0.0),
+                    providers_tried=providers_tried,
+                )
+            except Exception:
+                logger.debug("Failed to parse stale cache for %r", cleaned)
+        return [], _build_meta(
+            cleaned_query=cleaned,
+            num_results=n,
+            lang=lang_code,
+            status="unavailable",
+            source="none",
+            attempted=True,
+            providers_tried=providers_tried,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("web_search_structured_with_meta failed for query=%r: %s", query, exc)
+        return [], _build_meta(
+            cleaned_query=_clean_query(query),
+            num_results=max(1, min(num_results, MAX_RESULTS)),
+            lang=_resolve_lang(lang),
+            status="error",
+            source="none",
+            attempted=True,
+        )
 
 
 def _search_with_ddgs(query: str, num_results: int, lang: Optional[str] = None) -> List[WebSearchResult]:
@@ -384,7 +548,7 @@ def _search_with_ddg_html(query: str, num_results: int, lang: Optional[str] = No
 
     for base in endpoints:
         try:
-            resp = _http_get(
+            resp = http_get(
                 base,
                 params={"q": query, "kl": lang_code},
                 timeout=HTTP_TIMEOUT,
@@ -447,7 +611,7 @@ def _search_with_ddg_json(query: str, num_results: int, lang: Optional[str] = No
     }
 
     try:
-        resp = _http_get(
+        resp = http_get(
             url,
             params=params,
             timeout=HTTP_TIMEOUT,
@@ -530,7 +694,7 @@ def _search_with_qwant_html(query: str, num_results: int, lang: Optional[str] = 
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
     try:
-        resp = _http_get(url, timeout=HTTP_TIMEOUT, headers=headers, allow_redirects=True)
+        resp = http_get(url, timeout=HTTP_TIMEOUT, headers=headers, allow_redirects=True)
         if resp.status_code >= 400:
             return []
         soup = BeautifulSoup(resp.text or "", "html.parser")
@@ -573,7 +737,7 @@ def _search_with_startpage_html(query: str, num_results: int, lang: Optional[str
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
     try:
-        resp = _http_get(url, timeout=HTTP_TIMEOUT, headers=headers, allow_redirects=True)
+        resp = http_get(url, timeout=HTTP_TIMEOUT, headers=headers, allow_redirects=True)
         if resp.status_code >= 400:
             return []
         soup = BeautifulSoup(resp.text or "", "html.parser")
@@ -612,7 +776,7 @@ def _search_with_brave_html(query: str, num_results: int, lang: Optional[str] = 
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
     try:
-        resp = _http_get(url, timeout=HTTP_TIMEOUT, headers=headers, allow_redirects=True)
+        resp = http_get(url, timeout=HTTP_TIMEOUT, headers=headers, allow_redirects=True)
         if resp.status_code >= 400:
             return []
         soup = BeautifulSoup(resp.text or "", "html.parser")
@@ -671,59 +835,14 @@ def web_search_structured(
     num_results: int = DEFAULT_RESULTS,
     lang: Optional[str] = None,
 ) -> list[WebSearchResult]:
-    try:
-        cleaned = _clean_query(query)
-        if not cleaned:
-            return []
-
-        n = max(1, min(num_results, MAX_RESULTS))
-        lang_code = _resolve_lang(lang)
-
-        cached = _fetch_cached_results(cleaned, n, lang_code)
-        if cached:
-            logger.debug("web_search_structured: cache hit for %r", cleaned)
-            return cached
-
-        for provider_name in PROVIDER_ORDER:
-            cfg = _PROVIDERS.get(provider_name)
-            if not cfg:
-                logger.debug("web_search_structured: unknown provider %s", provider_name)
-                continue
-            try:
-                results = _call_provider(provider_name, cfg, cleaned, n, lang_code)
-            except ProviderCooldownError as exc:
-                logger.info("Provider %s cooling down: %s", provider_name, exc)
-                continue
-            except ProviderLimitError as exc:
-                logger.info("Provider %s quota hit: %s", provider_name, exc)
-                continue
-            except Exception:
-                continue
-
-            if not results:
-                logger.debug("Provider %s returned no results for %r", provider_name, cleaned)
-                continue
-
-            trimmed = results[:n]
-            _persist_cache(cleaned, n, lang_code, provider_name, trimmed)
-            return trimmed
-
-        logger.warning("web_search_structured: all providers exhausted for %r", cleaned)
-        stale = search_state.get_stale_cached_results(cleaned, n, lang=lang_code)
-        if stale:
-            try:
-                restored = [WebSearchResult(**item) for item in stale]
-                logger.info("Using stale cache for %r after provider exhaustion.", cleaned)
-                return restored[:n]
-            except Exception:
-                logger.debug("Failed to parse stale cache for %r", cleaned)
-        return []
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("web_search_structured failed for query=%r: %s", query, exc)
-        return []
+    """Compatibility helper that returns only results (without meta block)."""
+    results, _meta = web_search_structured_with_meta(query, num_results=num_results, lang=lang)
+    return results
 
 
 _warmup_started = False
+_warmup_thread: Thread | None = None
+_warmup_stop = Event()
 
 
 def _run_warmup_cycle() -> None:
@@ -739,16 +858,69 @@ def _warmup_loop() -> None:
         _run_warmup_cycle()
     if WARMUP_INTERVAL_SECONDS <= 0:
         return
-    while True:
-        time.sleep(max(WARMUP_INTERVAL_SECONDS, 5.0))
+    while not _warmup_stop.wait(max(WARMUP_INTERVAL_SECONDS, 5.0)):
         _run_warmup_cycle()
 
 
 def start_background_warmup() -> None:
-    global _warmup_started
-    if _warmup_started:
+    global _warmup_started, _warmup_thread
+    if _warmup_started and _warmup_thread is not None and _warmup_thread.is_alive():
         return
     if not WARMUP_ON_START and WARMUP_INTERVAL_SECONDS <= 0:
         return
+    _warmup_stop.clear()
     _warmup_started = True
-    Thread(target=_warmup_loop, name="web-search-warmup", daemon=True).start()
+    _warmup_thread = Thread(target=_warmup_loop, name="web-search-warmup", daemon=False)
+    _warmup_thread.start()
+
+
+def stop_background_warmup(timeout_s: float = 2.0) -> bool:
+    global _warmup_started, _warmup_thread
+    thread = _warmup_thread
+    if thread is None:
+        _warmup_started = False
+        return False
+    _warmup_stop.set()
+    if thread.is_alive():
+        thread.join(max(0.1, float(timeout_s)))
+    stopped = not thread.is_alive()
+    _warmup_thread = None
+    _warmup_started = False
+    return stopped
+
+
+def get_web_search_status(*, probe: bool = False, probe_query: str = "python fastapi", probe_results: int = 1) -> dict:
+    """Return provider health/cooldown/cache policy summary for readiness UI."""
+    provider_rows = search_state.provider_snapshot(PROVIDER_ORDER)
+    any_ready = any(not bool(row.get("cooling_down")) for row in provider_rows) if provider_rows else bool(PROVIDER_ORDER)
+    payload = {
+        "status": "ready" if any_ready else "cooldown",
+        "providers": provider_rows,
+        "provider_order": list(PROVIDER_ORDER),
+        "provider_count": len(PROVIDER_ORDER),
+        "cache_ttl_seconds": CACHE_TTL_SECONDS,
+        "disk_cache_ttl_seconds": DISK_CACHE_TTL_SECONDS,
+        "timeout_seconds": HTTP_TIMEOUT,
+        "warmup_enabled": WARMUP_ON_START or WARMUP_INTERVAL_SECONDS > 0,
+        "probe_enabled": bool(probe),
+        "probe_ok": None,
+        "probe_provider": None,
+        "probe_results": 0,
+    }
+    if not probe:
+        return payload
+
+    try:
+        results, meta = web_search_structured_with_meta(probe_query, num_results=max(1, probe_results), lang="en")
+        payload["probe_ok"] = bool(results)
+        payload["probe_results"] = len(results or [])
+        payload["probe_provider"] = meta.get("provider")
+        payload["probe_source"] = meta.get("source")
+        payload["probe_status"] = meta.get("status")
+        if not results:
+            payload["status"] = "degraded"
+    except Exception as exc:  # noqa: BLE001
+        payload["probe_ok"] = False
+        payload["probe_error"] = str(exc)
+        payload["status"] = "degraded"
+    return payload

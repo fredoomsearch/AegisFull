@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 """
-Low-level CRUD helpers for Conversation and Message.
-Single, consistent implementation (UUID conversations, autoincrement message ids).
+Canonical conversation persistence helpers.
+
+Why this module exists:
+- Centralize chat/agent conversation and message persistence logic.
+- Keep session-state read/write semantics deterministic across runtime surfaces.
 """
 
 import logging
-from datetime import datetime
-from typing import List, Optional
+import json
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from sqlalchemy import asc, delete, desc, func, select, update
@@ -15,6 +18,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db import models
+from app.services.session_state import normalize_session_state
+from app.utils.runtime_helpers import utcnow_db as _utcnow_db
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +29,24 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 def create_conversation(db: Session, user_id: Optional[str] = None) -> str:
     """
-    Create a conversation and return its UUID string.
+    What it does:
+    - Creates one conversation row and returns the UUID id.
+
+    Why it exists:
+    - Canonical conversation creation entrypoint for chat runtime.
+
+    Called from ->
+    - chat endpoint conversation bootstrap
+    - conversation management endpoints
+
+    Calls ->
+    - SQLAlchemy session add/commit/refresh
     """
     conv = models.Conversation(
         id=str(uuid4()),
         user_id=user_id,
         summary="",
+        session_state_json="{}",
         archived=False,
     )
     try:
@@ -93,7 +110,7 @@ def set_conversation_archived(
         stmt = (
             update(models.Conversation)
             .where(models.Conversation.id == conv_id)
-            .values(archived=archived, updated_at=datetime.utcnow())
+            .values(archived=archived, updated_at=_utcnow_db())
         )
         res = db.execute(stmt)
         db.commit()
@@ -129,17 +146,30 @@ def append_message(
     content: str,
 ) -> models.Message:
     """
-    Append a message to the conversation, creating the conversation if needed.
+    What it does:
+    - Appends a message and updates conversation timestamps.
+
+    Why it exists:
+    - Single persistence path for turn storage consistency.
+
+    Called from ->
+    - chat and agent orchestration flows
+
+    Calls ->
+    - `get_conversation`, SQLAlchemy insert/commit
+
+    Failure/guard behavior:
+    - Creates the conversation lazily if it does not exist yet.
     """
     try:
         conv = get_conversation(db, conv_id)
         if conv is None:
-            conv = models.Conversation(id=conv_id, summary="", archived=False)
+            conv = models.Conversation(id=conv_id, summary="", session_state_json="{}", archived=False)
             db.add(conv)
             db.commit()
             db.refresh(conv)
         else:
-            conv.updated_at = datetime.utcnow()
+            conv.updated_at = _utcnow_db()
 
         msg = models.Message(
             conversation_id=conv.id,
@@ -159,6 +189,79 @@ def append_message(
             exc,
         )
         raise
+
+
+def get_conversation_state(db: Session, conv_id: str) -> Dict[str, Any]:
+    """
+    What it does:
+    - Loads and normalizes persisted session state JSON for a conversation.
+
+    Why it exists:
+    - Keep planner state retrieval deterministic even with stale/malformed payloads.
+
+    Called from ->
+    - chat/agent state loaders
+
+    Calls ->
+    - conversation lookup + session_state.normalize_session_state
+    """
+    conv = get_conversation(db, conv_id)
+    if conv is None:
+        return normalize_session_state({})
+    raw = getattr(conv, "session_state_json", "") or "{}"
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else {}
+    except Exception:
+        parsed = {}
+    return normalize_session_state(parsed if isinstance(parsed, dict) else {})
+
+
+def set_conversation_state(db: Session, conv_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    What it does:
+    - Stores normalized session state JSON for a conversation.
+
+    Why it exists:
+    - Centralize planner state persistence contract.
+
+    Called from ->
+    - chat and agent state update paths
+
+    Calls ->
+    - conversation lookup/create + session_state normalization + DB commit
+    """
+    normalized = normalize_session_state(state)
+    try:
+        conv = get_conversation(db, conv_id)
+        if conv is None:
+            conv = models.Conversation(
+                id=conv_id,
+                summary="",
+                session_state_json=json.dumps(normalized, ensure_ascii=False),
+                archived=False,
+            )
+            db.add(conv)
+        else:
+            conv.session_state_json = json.dumps(normalized, ensure_ascii=False)
+            conv.updated_at = _utcnow_db()
+        db.commit()
+        if conv is not None:
+            db.refresh(conv)
+        return normalized
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.exception("set_conversation_state failed conv_id=%s: %s", conv_id, exc)
+        raise
+
+
+def set_conversation_state_fields(db: Session, conv_id: str, **fields: Any) -> Dict[str, Any]:
+    current = get_conversation_state(db, conv_id)
+    for key, value in fields.items():
+        if isinstance(value, str):
+            current[key] = value.strip() or None
+        else:
+            current[key] = value
+    return set_conversation_state(db, conv_id, current)
 
 
 def get_recent_messages(

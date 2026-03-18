@@ -5,6 +5,9 @@ Lightweight crypto news fetcher with sentiment/impact tagging.
 
 - Primary provider: CryptoPanic (if CRYPTOPANIC_TOKEN is set), else GDELT.
 - Results are cached briefly to avoid hammering upstream.
+
+Why this module exists:
+- Enrich crypto routes with lightweight news/sentiment context.
 """
 
 import os

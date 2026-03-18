@@ -11,7 +11,7 @@ import os
 from contextlib import contextmanager
 from typing import Any, Generator, Optional
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import URL, make_url
 from sqlalchemy.orm import Session, sessionmaker
@@ -114,10 +114,25 @@ def init_db(bind_engine: Optional[Engine] = None) -> None:
     _engine = bind_engine or engine
     try:
         Base.metadata.create_all(bind=_engine)
+        _ensure_compat_columns(_engine)
         logger.info("Tablas de la base de datos creadas correctamente.")
     except Exception as e:  # noqa: BLE001
         logger.exception("Error al crear las tablas: %s", e)
         raise
+
+
+def _ensure_compat_columns(bind_engine: Engine) -> None:
+    try:
+        inspector = inspect(bind_engine)
+        columns = {col["name"] for col in inspector.get_columns("conversations")}
+    except Exception:
+        logger.debug("No se pudo inspeccionar la tabla conversations.", exc_info=True)
+        return
+
+    if "session_state_json" not in columns:
+        logger.info("Adding missing conversations.session_state_json compatibility column.")
+        with bind_engine.begin() as conn:
+            conn.execute(text("ALTER TABLE conversations ADD COLUMN session_state_json TEXT NOT NULL DEFAULT '{}'"))
 
 
 def init_db_manual() -> None:

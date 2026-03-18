@@ -15,10 +15,12 @@ import os
 import shutil
 import threading
 import uuid
-from datetime import datetime
-from typing import Dict, List, Optional, TypedDict
+from datetime import UTC, datetime
+from typing import Any, Dict, List, Optional, TypedDict
 
 from dotenv import load_dotenv
+from app.services.session_state import default_session_state, normalize_session_state, update_session_state
+from app.utils.runtime_helpers import now_ms as _now_ms
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,7 @@ load_dotenv()
 DATA_DIR: str = os.getenv("AEGIS_DATA_DIR", "data")
 CONV_FILE: str = os.path.join(DATA_DIR, "conversations.json")
 MAX_MEMORY_BACKUPS: int = int(os.getenv("AEGIS_MEMORY_MAX_BACKUPS", "5"))
+PERSIST_MEMORY: bool = (os.getenv("AEGIS_MEMORY_PERSIST", "1") or "1").lower() in {"1", "true", "yes", "on"}
 
 # How many turns we keep before trimming (user+assistant pairs -> *2 messages)
 MAX_HISTORY_TURNS: int = int(os.getenv("AEGIS_MAX_HISTORY_TURNS", "20"))
@@ -49,6 +52,10 @@ class Message(TypedDict):
 class Conversation(TypedDict):
     summary: str
     messages: List[Message]
+    state: Dict[str, Any]
+    archived: bool
+    created_at_ms: int
+    updated_at_ms: int
 
 
 _lock = threading.RLock()
@@ -72,7 +79,7 @@ def _ensure_data_dir() -> None:
 def _backup_memory_file(path: str) -> None:
     if MAX_MEMORY_BACKUPS <= 0 or not os.path.exists(path):
         return
-    ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
     backup_path = f"{path}.{ts}.bak"
     try:
         shutil.copy2(path, backup_path)
@@ -117,11 +124,24 @@ def _safe_json_load(path: str) -> Dict[str, Conversation]:
                 if not isinstance(m, dict):
                     continue
                 msgs.append(_normalize_message(m.get("role", "user"), m.get("content", "")))
-        result[conv_id] = {"summary": summary, "messages": msgs}
+        state = normalize_session_state(conv.get("state") or {})
+        archived = bool(conv.get("archived", False))
+        created_at_ms = int(conv.get("created_at_ms") or state.get("focus_last_touch_ms") or _now_ms())
+        updated_at_ms = int(conv.get("updated_at_ms") or state.get("focus_last_touch_ms") or created_at_ms)
+        result[conv_id] = {
+            "summary": summary,
+            "messages": msgs,
+            "state": state,
+            "archived": archived,
+            "created_at_ms": created_at_ms,
+            "updated_at_ms": updated_at_ms,
+        }
     return result
 
 
 def _safe_json_write(path: str, data: Dict[str, Conversation]) -> bool:
+    if not PERSIST_MEMORY:
+        return True
     _ensure_data_dir()
     tmp_file = f"{path}.tmp"
     try:
@@ -156,11 +176,112 @@ def get_or_create_conversation(conversation_id: Optional[str] = None) -> str:
         if conversation_id and conversation_id in conversations:
             return conversation_id
         new_id = str(uuid.uuid4())
-        conversations[new_id] = {"summary": "", "messages": []}
+        ts = _now_ms()
+        conversations[new_id] = {
+            "summary": "",
+            "messages": [],
+            "state": default_session_state(),
+            "archived": False,
+            "created_at_ms": ts,
+            "updated_at_ms": ts,
+        }
         if not save_conversations(conversations):
             logger.warning("Failed to persist new conversation %s to disk.", new_id)
         logger.debug("Created new in-memory conversation %s", new_id)
         return new_id
+
+
+def get_conversation_state(conversation_id: str) -> Dict[str, Any]:
+    with _lock:
+        conv = conversations.get(conversation_id)
+        if not conv:
+            return default_session_state()
+        return normalize_session_state(conv.get("state") or {})
+
+
+def set_conversation_state(conversation_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
+    global conversations
+    with _lock:
+        conv = conversations.get(conversation_id)
+        if conv is None:
+            ts = _now_ms()
+            conv = {
+                "summary": "",
+                "messages": [],
+                "state": default_session_state(),
+                "archived": False,
+                "created_at_ms": ts,
+                "updated_at_ms": ts,
+            }
+            conversations[conversation_id] = conv
+        conv["state"] = normalize_session_state(state)
+        conv["updated_at_ms"] = _now_ms()
+        conversations[conversation_id] = conv
+        save_conversations(conversations)
+        return conv["state"]
+
+
+def set_conversation_state_fields(conversation_id: str, **fields: Any) -> Dict[str, Any]:
+    global conversations
+    with _lock:
+        conv = conversations.get(conversation_id)
+        if conv is None:
+            ts = _now_ms()
+            conv = {
+                "summary": "",
+                "messages": [],
+                "state": default_session_state(),
+                "archived": False,
+                "created_at_ms": ts,
+                "updated_at_ms": ts,
+            }
+            conversations[conversation_id] = conv
+        state = normalize_session_state(conv.get("state") or {})
+        for key, value in fields.items():
+            if value is None:
+                state[key] = None
+            elif isinstance(value, str):
+                state[key] = value.strip()
+            else:
+                state[key] = value
+        conv["state"] = normalize_session_state(state)
+        conv["updated_at_ms"] = _now_ms()
+        conversations[conversation_id] = conv
+        save_conversations(conversations)
+        return conv["state"]
+
+
+def list_conversations(limit: int = 20, include_archived: bool = False) -> List[Dict[str, Any]]:
+    with _lock:
+        rows: List[Dict[str, Any]] = []
+        for conv_id, conv in conversations.items():
+            archived = bool(conv.get("archived", False))
+            if archived and not include_archived:
+                continue
+            rows.append(
+                {
+                    "id": conv_id,
+                    "summary": str(conv.get("summary") or "").strip(),
+                    "archived": archived,
+                    "created_at_ms": int(conv.get("created_at_ms") or 0),
+                    "updated_at_ms": int(conv.get("updated_at_ms") or 0),
+                }
+            )
+    rows.sort(key=lambda row: int(row.get("updated_at_ms") or 0), reverse=True)
+    return rows[: max(1, limit)]
+
+
+def set_conversation_archived(conversation_id: str, archived: bool = True) -> bool:
+    global conversations
+    with _lock:
+        conv = conversations.get(conversation_id)
+        if conv is None:
+            return False
+        conv["archived"] = bool(archived)
+        conv["updated_at_ms"] = _now_ms()
+        conversations[conversation_id] = conv
+        save_conversations(conversations)
+        return True
 
 
 def delete_conversation(conversation_id: str) -> bool:
@@ -209,7 +330,16 @@ def summarize_old_messages(old_messages: List[Message]) -> str:
         return ""
 
 
-def update_memory(conv_id: str, user_msg: str, assistant_msg: str) -> None:
+def update_memory(
+    conv_id: str,
+    user_msg: str,
+    assistant_msg: str,
+    *,
+    sources: Optional[List[Dict[str, Any]]] = None,
+    web_query: str = "",
+    mode: str = "",
+    active_project_id: Optional[str] = None,
+) -> None:
     """
     Add messages to the conversation, trim history, and maintain summaries.
     """
@@ -221,7 +351,15 @@ def update_memory(conv_id: str, user_msg: str, assistant_msg: str) -> None:
     with _lock:
         conv = conversations.get(conv_id)
         if conv is None:
-            conv = {"summary": "", "messages": []}
+            ts = _now_ms()
+            conv = {
+                "summary": "",
+                "messages": [],
+                "state": default_session_state(),
+                "archived": False,
+                "created_at_ms": ts,
+                "updated_at_ms": ts,
+            }
             conversations[conv_id] = conv
 
         conv["messages"].append(user_message)
@@ -241,6 +379,16 @@ def update_memory(conv_id: str, user_msg: str, assistant_msg: str) -> None:
             conv["summary"] = merged_summary
             conv["messages"] = keep
 
+        conv["state"] = update_session_state(
+            conv.get("state") or {},
+            user_msg,
+            assistant_msg,
+            web_query=web_query,
+            sources=sources,
+            mode=mode,
+            active_project_id=active_project_id,
+        )
+        conv["updated_at_ms"] = _now_ms()
         conversations[conv_id] = conv
         if not save_conversations(conversations):
             logger.warning(
@@ -249,8 +397,9 @@ def update_memory(conv_id: str, user_msg: str, assistant_msg: str) -> None:
                 len(conv["messages"]),
             )
         logger.debug(
-            "Updated memory for conv_id=%s (messages=%d, summary_len=%d)",
+            "Updated memory for conv_id=%s (messages=%d, summary_len=%d, goal=%r)",
             conv_id,
             len(conv["messages"]),
             len(conv.get("summary", "")),
+            (conv.get("state") or {}).get("goal"),
         )

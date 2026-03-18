@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="600" viewBox="0 0 1800 600" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1800" y2="600" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#071224"/>
+      <stop offset="0.55" stop-color="#0A1C35"/>
+      <stop offset="1" stop-color="#0B2A3F"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#32D8FF"/>
+      <stop offset="1" stop-color="#3BF0C6"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1400 180) rotate(120) scale(520 420)">
+      <stop offset="0" stop-color="#22E5FF" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#22E5FF" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" stroke="#7BE9FF" stroke-opacity="0.08"/>
+    </pattern>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#03111E" flood-opacity="0.6"/>
+    </filter>
+  </defs>
+
+  <rect width="1800" height="600" fill="url(#bg)"/>
+  <rect width="1800" height="600" fill="url(#grid)"/>
+  <rect width="1800" height="600" fill="url(#glow)"/>
+
+  <circle cx="1640" cy="90" r="220" fill="#29D8FF" fill-opacity="0.08"/>
+  <circle cx="1720" cy="510" r="190" fill="#3AF4CC" fill-opacity="0.06"/>
+
+  <rect x="930" y="82" width="780" height="436" rx="24" fill="#0B1B33" fill-opacity="0.86" stroke="#66E7FF" stroke-opacity="0.24" filter="url(#shadow)"/>
+
+  <text x="96" y="140" fill="#EAFBFF" font-family="'IBM Plex Sans', 'Segoe UI', sans-serif" font-size="58" font-weight="700">
+    AI-Augmented Full Stack Engineer
+  </text>
+  <text x="96" y="196" fill="#9FCEE2" font-family="'IBM Plex Sans', 'Segoe UI', sans-serif" font-size="27" font-weight="500">
+    FastAPI • Agent Runtime • Data Pipelines • Strict Validation
+  </text>
+
+  <rect x="96" y="232" width="760" height="3" rx="1.5" fill="url(#accent)"/>
+
+  <text x="96" y="290" fill="#D7F4FF" font-family="'IBM Plex Sans', 'Segoe UI', sans-serif" font-size="25" font-weight="500">
+    Built AEGIS: tool-first assistant with project-scoped retrieval,
+  </text>
+  <text x="96" y="328" fill="#D7F4FF" font-family="'IBM Plex Sans', 'Segoe UI', sans-serif" font-size="25" font-weight="500">
+    planner/executor loops, strict preflight gates, and production-minded observability.
+  </text>
+
+  <g transform="translate(96 374)">
+    <rect x="0" y="0" width="210" height="44" rx="22" fill="#102A46" stroke="#4CDFFF" stroke-opacity="0.45"/>
+    <text x="105" y="29" text-anchor="middle" fill="#DFFFFF" font-family="'IBM Plex Sans', 'Segoe UI', sans-serif" font-size="18" font-weight="600">Python / FastAPI</text>
+
+    <rect x="228" y="0" width="218" height="44" rx="22" fill="#102A46" stroke="#4CDFFF" stroke-opacity="0.45"/>
+    <text x="337" y="29" text-anchor="middle" fill="#DFFFFF" font-family="'IBM Plex Sans', 'Segoe UI', sans-serif" font-size="18" font-weight="600">React / TypeScript</text>
+
+    <rect x="464" y="0" width="230" height="44" rx="22" fill="#102A46" stroke="#4CDFFF" stroke-opacity="0.45"/>
+    <text x="579" y="29" text-anchor="middle" fill="#DFFFFF" font-family="'IBM Plex Sans', 'Segoe UI', sans-serif" font-size="18" font-weight="600">PostgreSQL / ORM</text>
+
+    <rect x="0" y="56" width="190" height="44" rx="22" fill="#102A46" stroke="#5AF0CB" stroke-opacity="0.5"/>
+    <text x="95" y="85" text-anchor="middle" fill="#DBFFF2" font-family="'IBM Plex Sans', 'Segoe UI', sans-serif" font-size="18" font-weight="600">JWT / OAuth2</text>
+
+    <rect x="208" y="56" width="255" height="44" rx="22" fill="#102A46" stroke="#5AF0CB" stroke-opacity="0.5"/>
+    <text x="335" y="85" text-anchor="middle" fill="#DBFFF2" font-family="'IBM Plex Sans', 'Segoe UI', sans-serif" font-size="18" font-weight="600">Pytest + E2E + CI Gates</text>
+
+    <rect x="481" y="56" width="216" height="44" rx="22" fill="#102A46" stroke="#5AF0CB" stroke-opacity="0.5"/>
+    <text x="589" y="85" text-anchor="middle" fill="#DBFFF2" font-family="'IBM Plex Sans', 'Segoe UI', sans-serif" font-size="18" font-weight="600">LLM + RAG + Web</text>
+  </g>
+
+  <text x="970" y="136" fill="#ECFBFF" font-family="'IBM Plex Sans', 'Segoe UI', sans-serif" font-size="36" font-weight="700">AEGIS Runtime Highlights</text>
+  <rect x="970" y="153" width="290" height="3" rx="1.5" fill="url(#accent)"/>
+
+  <g fill="#CFF5FF" font-family="'IBM Plex Sans', 'Segoe UI', sans-serif" font-size="23" font-weight="500">
+    <text x="970" y="208">• Canonical map: project + conversation + capabilities</text>
+    <text x="970" y="250">• Planner loop: plan → execute → verify → replan</text>
+    <text x="970" y="292">• Tool-first routing before LLM synthesis</text>
+    <text x="970" y="334">• Strict gates: smoke + E2E + readyz + browser smoke</text>
+    <text x="970" y="376">• Explicit degraded/fallback states (no hidden failures)</text>
+    <text x="970" y="418">• Secure ops: approvals, AV scan, SSRF guards</text>
+  </g>
+
+  <text x="970" y="488" fill="#86CBE0" font-family="'IBM Plex Sans', 'Segoe UI', sans-serif" font-size="22" font-weight="500">
+    Open to remote contracts • Backend + Frontend + AI-assisted delivery
+  </text>
+</svg>

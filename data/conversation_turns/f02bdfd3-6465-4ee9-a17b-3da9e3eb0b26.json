@@ -1,0 +1,185 @@
+[
+  {
+    "turn_id": "2b5ce6137a35",
+    "created_at": 1773824971960,
+    "finished_at": 1773824971961,
+    "status": "blocked",
+    "mode": "tool",
+    "source_plan": "local_only",
+    "active_project_id": "proj_3cc10c",
+    "user_message": "[execute_tool] delete_project",
+    "items": [
+      {
+        "item_id": "21a0e54c4af3",
+        "ts": 1773824971960,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "tool": "delete_project",
+          "args": {
+            "project_id": "proj_3cc10c"
+          }
+        }
+      },
+      {
+        "item_id": "1a3f07883090",
+        "ts": 1773824971961,
+        "kind": "approval_required",
+        "status": "blocked",
+        "payload": {
+          "tool": "delete_project",
+          "approval": {
+            "token": "0f623f2710ca",
+            "tool": "delete_project",
+            "created_ms": 1773824971961,
+            "expires_ms": 1773825271961,
+            "summary": "approve tool=delete_project"
+          }
+        }
+      }
+    ],
+    "assistant_message": "approval required",
+    "response_context": {
+      "approval_required": true,
+      "tool": "delete_project"
+    }
+  },
+  {
+    "turn_id": "24ef535ef4bc",
+    "created_at": 1773824971963,
+    "finished_at": 1773824971966,
+    "status": "success",
+    "mode": "tool",
+    "source_plan": "local_only",
+    "active_project_id": "proj_3cc10c",
+    "user_message": "[execute_tool] delete_project",
+    "items": [
+      {
+        "item_id": "9488b8be7cf4",
+        "ts": 1773824971963,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "tool": "delete_project",
+          "args": {
+            "project_id": "proj_3cc10c"
+          }
+        }
+      },
+      {
+        "item_id": "bdbaa22d8347",
+        "ts": 1773824971963,
+        "kind": "approval_granted",
+        "status": "ok",
+        "payload": {
+          "tool": "delete_project"
+        }
+      },
+      {
+        "item_id": "040c243450e1",
+        "ts": 1773824971964,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "tool": "delete_project"
+        }
+      },
+      {
+        "item_id": "77eeb80128f1",
+        "ts": 1773824971965,
+        "kind": "replan",
+        "status": "ok",
+        "payload": {
+          "reason": "delete_project:success",
+          "next_step": "select or ingest a project",
+          "next_tool": "project_manifest",
+          "missing_evidence": [
+            "active_project"
+          ],
+          "recent_tool_failures": []
+        }
+      }
+    ],
+    "assistant_message": "tool executed",
+    "response_context": {
+      "source_plan": "local_only",
+      "source_origin": [
+        "model"
+      ],
+      "active_project_id": null,
+      "effective_tool": "delete_project",
+      "effective_tool_status": "ok",
+      "effective_tool_output": "/tmp/pytest-of-h/pytest-10/test_execute_tool_can_auto_con0",
+      "web_query": "",
+      "web_status": "not-used",
+      "web_source": "none",
+      "web_provider": "",
+      "web_results": 0,
+      "web_attempted": false,
+      "using_live_web": false,
+      "using_cached_web": false,
+      "using_stale_cache": false,
+      "data_notice": "Respondiendo con contexto local del modelo.",
+      "architecture_summary": "",
+      "current_task": null,
+      "current_subtask": null,
+      "current_file_focus": null,
+      "current_symbol_focus": null,
+      "last_artifact": null,
+      "last_artifact_kind": null,
+      "current_artifact_focus": null,
+      "recent_tool_failures": [],
+      "web_findings": [],
+      "next_step": "select or ingest a project",
+      "next_tool": "project_manifest",
+      "missing_evidence": [
+        "active_project"
+      ],
+      "tool_candidates": [],
+      "tool_risks": {},
+      "approval_required": [],
+      "actions": [],
+      "next_action": null,
+      "llm_required": false,
+      "routing_confidence": 0.7000000000000001,
+      "ambiguous_route": false,
+      "pending_approval": {
+        "tool": "delete_project",
+        "expires_ms": 1773825271961
+      },
+      "continue_available": true,
+      "planner_loop": {
+        "phase": "execute",
+        "state": "completed",
+        "tool": "delete_project"
+      },
+      "continued": true,
+      "continue_iterations": 1,
+      "continue_response": "continued-ok",
+      "continue_context": {
+        "source_plan": "local_only",
+        "source_origin": [
+          "model"
+        ],
+        "active_project_id": null,
+        "effective_tool": "agent_continue",
+        "effective_tool_status": "ok",
+        "effective_tool_output": null,
+        "web_query": "",
+        "web_status": "not-used",
+        "web_source": "not-used",
+        "web_provider": "",
+        "web_results": 0,
+        "web_attempted": false,
+        "using_live_web": false,
+        "using_cached_web": false,
+        "using_stale_cache": false,
+        "data_notice": "Respondiendo con contexto local del modelo.",
+        "architecture_summary": "",
+        "current_task": null,
+        "current_subtask": null,
+        "current_file_focus": null
+      }
+    }
+  }
+]

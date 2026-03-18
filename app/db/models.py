@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 """
-SQLAlchemy ORM models: Conversation, Message, Embedding.
-The module now exposes a single, consistent schema (UUID conversations,
-integer autoincrement message ids, DateTime timestamps).
+Canonical SQLAlchemy persistence schema.
+
+Why this module exists:
+- Define the single source of truth for conversation/message/embedding storage.
+- Keep ORM entities stable for chat runtime, retrieval, and strict validation paths.
 """
 
 import uuid
-from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
@@ -23,13 +24,26 @@ from sqlalchemy import (
     Text,
 )
 from sqlalchemy.orm import declarative_base, relationship
+from app.utils.runtime_helpers import utcnow_db as _utcnow_db
 
 Base = declarative_base()
 
 __all__ = ["Base", "Conversation", "Message", "Embedding"]
 
-
 class Conversation(Base):
+    """
+    What it does:
+    - Stores conversation-level metadata and planner session state.
+
+    Why it exists:
+    - Root entity for all chat persistence and turn linkage.
+
+    Called from ->
+    - `db/crud_conversation.py` conversation/state operations
+
+    Calls ->
+    - Related `Message` rows via ORM relationship.
+    """
     __tablename__ = "conversations"
 
     id = Column(
@@ -40,12 +54,13 @@ class Conversation(Base):
     )
     user_id = Column(String, index=True, nullable=True)
     summary = Column(Text, nullable=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    session_state_json = Column(Text, nullable=False, default="{}")
+    created_at = Column(DateTime, nullable=False, default=_utcnow_db)
     updated_at = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=_utcnow_db,
+        onupdate=_utcnow_db,
     )
     archived = Column(Boolean, nullable=False, default=False)
 
@@ -61,6 +76,19 @@ class Conversation(Base):
 
 
 class Message(Base):
+    """
+    What it does:
+    - Stores individual turn messages (user/assistant/system).
+
+    Why it exists:
+    - Canonical turn log for history reconstruction and tool/agent traces.
+
+    Called from ->
+    - `db/crud_conversation.py::append_message`
+
+    Calls ->
+    - Links to parent `Conversation` and child `Embedding` rows.
+    """
     __tablename__ = "messages"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -73,7 +101,7 @@ class Message(Base):
     role = Column(String(20), nullable=False)
     content = Column(Text, nullable=False)
     token_count = Column(Integer, default=0, nullable=False)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=_utcnow_db)
 
     __table_args__ = (
         CheckConstraint("role in ('user','assistant','system')", name="ck_messages_role"),
@@ -96,6 +124,19 @@ class Message(Base):
 
 
 class Embedding(Base):
+    """
+    What it does:
+    - Stores vectorized message embeddings and optional score metadata.
+
+    Why it exists:
+    - Supports retrieval and semantic context features from persisted turns.
+
+    Called from ->
+    - embedding/retrieval pipelines operating on message content
+
+    Calls ->
+    - Links to parent `Message` row.
+    """
     __tablename__ = "embeddings"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -108,7 +149,7 @@ class Embedding(Base):
     vector = Column(LargeBinary, nullable=False)
     dim = Column(Integer, nullable=False)
     score = Column(Float, nullable=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=_utcnow_db)
 
     message = relationship(
         "Message",

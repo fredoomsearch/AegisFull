@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 """
-Endpoints de utilidades de datos / salud del módulo.
+Data/DB utility endpoints.
+
+Why this module exists:
+- Expose minimal database health signal for diagnostics.
 """
 
 import time

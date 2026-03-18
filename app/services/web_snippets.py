@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+"""
+Snippet fetcher for web result URLs.
+
+Why this module exists:
+- Retrieve lightweight page excerpts with robots/domain guards.
+- Enrich web-search answers with explicit fetched context.
+"""
+
 import logging
 import os
 import time
@@ -8,8 +16,7 @@ from typing import Dict, List, Sequence, Tuple
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
-import requests
-
+from app.services.http_client import http_get
 from app.services import search_state
 from app.services.search_state import (
     ProviderCooldownError,
@@ -17,6 +24,7 @@ from app.services.search_state import (
     ProxyUnavailableError,
 )
 from app.tools import fetch_url, sanitize_web_context
+from app.utils.runtime_helpers import proxies_enabled as _proxies_enabled
 
 try:
     from app.services import proxy_pool
@@ -56,23 +64,9 @@ def _domain_from_url(url: str) -> str:
         return ""
 
 
-def _proxies_enabled() -> bool:
-    return bool(getattr(proxy_pool, "proxies_configured", lambda: False)())
-
-
-def _http_get(url: str, **kwargs) -> requests.Response:
-    if proxy_pool and _proxies_enabled():
-        try:
-            with proxy_pool.proxy_session() as (session, _):
-                return session.get(url, **kwargs)
-        except ProxyUnavailableError:
-            logger.debug("Proxy unavailable for %s; falling back to direct request.", url)
-    return requests.get(url, **kwargs)
-
-
 @contextmanager
 def _maybe_proxy_session():
-    if proxy_pool and _proxies_enabled():
+    if proxy_pool and _proxies_enabled(proxy_pool):
         try:
             with proxy_pool.proxy_session() as (session, _):
                 yield session
@@ -96,7 +90,7 @@ def _load_robots(domain: str) -> RobotFileParser | None:
 
     robots_url = f"https://{domain}/robots.txt"
     try:
-        resp = _http_get(
+        resp = http_get(
             robots_url,
             timeout=4,
             headers={"User-Agent": USER_AGENT},

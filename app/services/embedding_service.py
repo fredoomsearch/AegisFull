@@ -1,13 +1,20 @@
 from __future__ import annotations
 
-"""Embedding helpers for retrieval/service layers."""
+"""
+Embedding helpers for retrieval/service layers.
 
-import hashlib
+Why this module exists:
+- Provide a single embedding backend abstraction (model or hash fallback).
+- Keep embedding readiness and timeout behavior deterministic.
+"""
+
 import logging
 import os
 import threading
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Sequence, Union
+from app.utils.ml_helpers import hash_embed as _hash_embed
+from app.utils.threading_helpers import call_with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -155,37 +162,18 @@ def _load_sentence_transformer_with_timeout(
     timeout_s: float,
     model_kwargs: Optional[dict] = None,
 ) -> Optional[Any]:
-    result: dict[str, object] = {"model": None, "error": None}
-    done = threading.Event()
-
-    def _worker() -> None:
-        try:
-            kwargs = model_kwargs or {}
-            result["model"] = SentenceTransformer(model_name, **kwargs)
-        except Exception as exc:  # noqa: BLE001
-            result["error"] = exc
-        finally:
-            done.set()
-
-    thread = threading.Thread(target=_worker, daemon=True)
-    thread.start()
-    done.wait(timeout_s)
-    if not done.is_set():
+    result = call_with_timeout(
+        lambda: SentenceTransformer(model_name, **(model_kwargs or {})),
+        timeout_s=timeout_s,
+        thread_name="embed-model-load",
+        daemon=True,
+    )
+    if not result.completed:
         logger.warning("Embedding model load timed out after %.1fs.", timeout_s)
         return None
-    if result["error"] is not None:
-        raise result["error"]  # type: ignore[misc]
-    return result["model"]  # type: ignore[return-value]
-
-
-def _hash_embed(text: str, dim: int) -> List[float]:
-    buf = text.encode("utf-8", errors="ignore")
-    if not buf:
-        buf = b"\x00"
-    digest = hashlib.sha1(buf).digest()
-    repeats = (dim + len(digest) - 1) // len(digest)
-    raw = (digest * repeats)[:dim]
-    return [(b - 128) / 128.0 for b in raw]
+    if result.error is not None:
+        raise result.error  # type: ignore[misc]
+    return result.value
 
 
 def _normalize(vec: Sequence[float]) -> List[float]:
@@ -232,26 +220,18 @@ def _encode_with_timeout(
     if not timeout_s or timeout_s <= 0:
         return model.encode(texts, normalize_embeddings=True)  # type: ignore[arg-type]
 
-    result: dict[str, object] = {"emb": None, "error": None}
-    done = threading.Event()
-
-    def _worker() -> None:
-        try:
-            result["emb"] = model.encode(texts, normalize_embeddings=True)  # type: ignore[arg-type]
-        except Exception as exc:  # noqa: BLE001
-            result["error"] = exc
-        finally:
-            done.set()
-
-    thread = threading.Thread(target=_worker, daemon=True)
-    thread.start()
-    done.wait(timeout_s)
-    if not done.is_set():
+    result = call_with_timeout(
+        lambda: model.encode(texts, normalize_embeddings=True),  # type: ignore[arg-type]
+        timeout_s=timeout_s,
+        thread_name="embed-encode",
+        daemon=True,
+    )
+    if not result.completed:
         logger.warning("Embedding encode timed out after %.1fs.", timeout_s)
         return None
-    if result["error"] is not None:
-        raise result["error"]  # type: ignore[misc]
-    return result["emb"]  # type: ignore[return-value]
+    if result.error is not None:
+        raise result.error  # type: ignore[misc]
+    return result.value
 
 
 def get_embedding_status(ensure_loaded: bool = False) -> dict:

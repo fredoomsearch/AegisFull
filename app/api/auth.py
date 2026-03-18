@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+"""
+Auth token exchange endpoints.
+
+Why this module exists:
+- Exchange API-key trust into short-lived JWT tokens.
+- Support access/refresh flow for UI and automation clients.
+"""
+
 import time
 import os
 from typing import List, Optional
@@ -19,6 +27,38 @@ router = APIRouter(prefix="/auth", tags=["auth"], dependencies=[Depends(require_
 
 DEFAULT_ACCESS_SECS = int(os.getenv("AEGIS_JWT_EXPIRES", "1800"))  # 30m
 DEFAULT_REFRESH_SECS = int(os.getenv("AEGIS_JWT_REFRESH_EXPIRES", "86400"))  # 24h
+FORBIDDEN_SELF_SCOPES = {"admin"}
+
+
+def _parse_scope_env(name: str, default: str = "") -> list[str]:
+    raw = (os.getenv(name, default) or default).strip()
+    if not raw:
+        return []
+    scopes: list[str] = []
+    seen: set[str] = set()
+    for token in raw.replace(",", " ").split():
+        value = token.strip().lower()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        scopes.append(value)
+    return scopes
+
+
+def _normalize_scope_list(values: list[str] | None) -> list[str]:
+    scopes: list[str] = []
+    seen: set[str] = set()
+    for item in values or []:
+        value = str(item or "").strip().lower()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        scopes.append(value)
+    return scopes
+
+
+SELF_ALLOWED_SCOPES = set(_parse_scope_env("AEGIS_JWT_ALLOWED_SCOPES", "chat files crypto"))
+SELF_DEFAULT_SCOPES = _parse_scope_env("AEGIS_JWT_DEFAULT_SCOPES", "")
 
 
 class TokenRequest(BaseModel):
@@ -40,7 +80,25 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+def _sanitize_self_scopes(values: list[str] | None) -> list[str]:
+    """
+    Normalize and enforce self-issuable scopes for auth token flows.
+    """
+    requested_scopes = _normalize_scope_list(values)
+    disallowed_scopes = sorted(
+        {
+            s
+            for s in requested_scopes
+            if (s in FORBIDDEN_SELF_SCOPES) or (SELF_ALLOWED_SCOPES and s not in SELF_ALLOWED_SCOPES)
+        }
+    )
+    if disallowed_scopes:
+        raise HTTPException(status_code=403, detail=f"Forbidden scopes requested: {', '.join(disallowed_scopes)}")
+    return [s for s in requested_scopes if not SELF_ALLOWED_SCOPES or s in SELF_ALLOWED_SCOPES]
+
+
 def _issue_token(sub: str, scopes: list[str], ttl_seconds: int, token_type: str) -> str:
+    """Create signed JWT payload with consistent claims and expiration."""
     if not JWT_SECRET or jwt is None:
         raise HTTPException(status_code=500, detail="JWT not configured")
     now = int(time.time())
@@ -59,7 +117,10 @@ async def issue_token(req: TokenRequest) -> TokenResponse:
     """
     Exchange an API key for a short-lived access token (and optional refresh token).
     """
-    scopes = [s for s in req.scopes if s]
+    requested_scopes = _normalize_scope_list(req.scopes)
+    if not requested_scopes and SELF_DEFAULT_SCOPES:
+        requested_scopes = list(SELF_DEFAULT_SCOPES)
+    scopes = _sanitize_self_scopes(requested_scopes)
     access_ttl = DEFAULT_ACCESS_SECS
     refresh_ttl = DEFAULT_REFRESH_SECS
 
@@ -88,7 +149,14 @@ async def refresh_token(req: RefreshRequest) -> TokenResponse:
     if not payload or payload.get("type") != "refresh":
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
-    scopes = payload.get("scopes") or payload.get("scope") or []
+    raw_scopes = payload.get("scopes") or payload.get("scope") or []
+    if isinstance(raw_scopes, str):
+        scope_values = [raw_scopes]
+    elif isinstance(raw_scopes, list):
+        scope_values = [str(s) for s in raw_scopes]
+    else:
+        scope_values = []
+    scopes = _sanitize_self_scopes(scope_values)
     sub = payload.get("sub") or "user"
 
     access_ttl = DEFAULT_ACCESS_SECS
@@ -102,5 +170,5 @@ async def refresh_token(req: RefreshRequest) -> TokenResponse:
         expires_in=access_ttl,
         refresh_token=refresh_token,
         refresh_expires_in=refresh_ttl,
-        scopes=scopes if isinstance(scopes, list) else [],
+        scopes=scopes,
     )

@@ -6,8 +6,6 @@ Thin wrapper to the canonical trainer (train_models.py).
 Kept for backward compatibility. Prefer calling train_models.py directly.
 """
 
-import json
-import os
 def main() -> None:
     # Delegate to the main trainer.
     from app.scripts.train_models import main as train_main

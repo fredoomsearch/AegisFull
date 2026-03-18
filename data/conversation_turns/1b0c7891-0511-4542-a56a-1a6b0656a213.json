@@ -1,0 +1,210 @@
+[
+  {
+    "turn_id": "35f96ae6326e",
+    "created_at": 1773818880107,
+    "finished_at": 1773818880147,
+    "status": "success",
+    "mode": "agent",
+    "source_plan": "web_only",
+    "active_project_id": null,
+    "user_message": "where is russia?",
+    "items": [
+      {
+        "item_id": "437c4b90b4e4",
+        "ts": 1773818880108,
+        "kind": "run_start",
+        "status": "ok",
+        "payload": {
+          "max_iterations": 3,
+          "max_total_tool_calls": 8,
+          "max_tool_retries": 2,
+          "tool_retry_backoff_ms": 50
+        }
+      },
+      {
+        "item_id": "aefb5419bd87",
+        "ts": 1773818880108,
+        "kind": "plan",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "plan": {
+            "mode": "agent",
+            "source_plan": "web_only",
+            "force_web": true,
+            "current_task": "",
+            "current_subtask": "",
+            "next_step": "",
+            "next_tool": null,
+            "missing_evidence": [],
+            "tool_candidates": [
+              "web_search"
+            ],
+            "tool_risks": {
+              "web_search": "safe"
+            },
+            "approval_required": [],
+            "actions": [],
+            "next_action": null,
+            "llm_required": true,
+            "steps": [
+              "web_search",
+              "llm_synthesis"
+            ],
+            "routing_confidence": 0.85,
+            "ambiguous_route": false
+          }
+        }
+      },
+      {
+        "item_id": "1acd71d17575",
+        "ts": 1773818880108,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "web_search",
+          "query": "where is"
+        }
+      },
+      {
+        "item_id": "0665d5e9181e",
+        "ts": 1773818880110,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "web_search",
+          "meta": {
+            "query": "where is",
+            "requested_results": 4,
+            "lang": "en-us",
+            "status": "cache",
+            "source": "cache",
+            "provider": "brave_html",
+            "results": 4,
+            "attempted": false,
+            "cache_used": true,
+            "stale_cache_used": false,
+            "live_web_used": false,
+            "fetched_at": 1773818843.0892756,
+            "expires_at": 1773819143.0892756,
+            "providers_tried": []
+          },
+          "sources": 4
+        }
+      },
+      {
+        "item_id": "a82d3515089a",
+        "ts": 1773818880110,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "web_search",
+          "status": "ok"
+        }
+      },
+      {
+        "item_id": "f2af6bb259fe",
+        "ts": 1773818880111,
+        "kind": "evidence",
+        "status": "ok",
+        "payload": {
+          "origin": "web",
+          "kind": "summary",
+          "title": "web context (cache)",
+          "text": "[2] PenguinRandomhouse.com penguinrandomhouse.com › series › 173 › where-is Where Is? Series\nContent from https://www.penguinrandomhouse.com/series/173/where-is/:\nWhere Is? Skip to Main Content (Press Enter) 📝 Quiz: What Book Should You Read Next? 📝 Quiz: What Book Should You Read Next? Books Kids Popular Authors & Events Recommendations Audio Books Bans Are on the Rise in America Learn More > Join Our Authors for Upcoming Events Learn More > New Releases Learn More > < Books > Popular New & ...",
+          "meta": {
+            "query": "where is",
+            "requested_results": 4,
+            "lang": "en-us",
+            "status": "cache",
+            "source": "cache",
+            "provider": "brave_html",
+            "results": 4,
+            "attempted": false,
+            "cache_used": true,
+            "stale_cache_used": false,
+            "live_web_used": false,
+            "fetched_at": 1773818843.0892756,
+            "expires_at": 1773819143.0892756,
+            "providers_tried": []
+          },
+          "iteration": 1
+        }
+      },
+      {
+        "item_id": "8df51448dae4",
+        "ts": 1773818880146,
+        "kind": "run_stop",
+        "status": "ok",
+        "payload": {
+          "reason": "plan_satisfied",
+          "iteration": 1,
+          "total_tool_calls": 0
+        }
+      }
+    ],
+    "assistant_message": "[2] PenguinRandomhouse.com penguinrandomhouse.com › series › 173 › where-is Where Is? Series\nContent from https://www.penguinrandomhouse.com/series/173/where-is/:\nWhere Is? Skip to Main Content (Press Enter) 📝 Quiz: What Book Should You Read Next? 📝 Quiz: What Book Should You Read Next? Books Kids Popular Authors & Events Recommendations Audio Books Bans Are on the Rise in America Learn More > Join Our Authors for Upcoming Events Learn More > New Releases Learn More > < Books > Popular New & Noteworthy Bestsellers Graphic Novels & Manga The Must-Read Books of 2025 Popular Books in Spanish Coming Soon Fiction Classics Romance Literary Fiction Mystery & Thriller Science Fiction Spanish Language Fiction Nonfiction Biographies & Memoirs Wellness Cookbooks History Spanish Language Nonfiction Series A Thursday Murder Club Rebel Blue Ranch Robert Langdon A Song of Ice and Fire Penguin Classics < View All > < Kids > Popular New & Noteworthy Bestsellers Award Winners The Parenting Book Guide Kids' Corner Books for Middle Graders Trending Series Who Was? Magic Tree House The Last Kids on Earth Mad Libs Planet Omar Beloved Characters The World of Eric Carle Bluey Llama Llama Dr. Seuss Junie",
+    "response_context": {
+      "plan": {
+        "mode": "agent",
+        "source_plan": "web_only",
+        "force_web": true,
+        "current_task": "",
+        "current_subtask": "",
+        "next_step": "",
+        "next_tool": null,
+        "missing_evidence": [],
+        "tool_candidates": [
+          "web_search"
+        ],
+        "tool_risks": {
+          "web_search": "safe"
+        },
+        "approval_required": [],
+        "actions": [],
+        "next_action": null,
+        "llm_required": true,
+        "steps": [
+          "web_search",
+          "llm_synthesis"
+        ],
+        "routing_confidence": 0.85,
+        "ambiguous_route": false
+      },
+      "iterations": 1,
+      "evidence_count": 1,
+      "web_meta": {
+        "query": "where is",
+        "requested_results": 4,
+        "lang": "en-us",
+        "status": "cache",
+        "source": "cache",
+        "provider": "brave_html",
+        "results": 4,
+        "attempted": false,
+        "cache_used": true,
+        "stale_cache_used": false,
+        "live_web_used": false,
+        "fetched_at": 1773818843.0892756,
+        "expires_at": 1773819143.0892756,
+        "providers_tried": []
+      },
+      "active_project_id": null,
+      "planner_loop": {
+        "phase": "verify",
+        "state": "completed",
+        "max_iterations": 3,
+        "max_total_tool_calls": 8,
+        "max_tool_retries": 2,
+        "tool_retry_backoff_ms": 50,
+        "budget_exhausted": false,
+        "total_tool_calls": 0,
+        "iterations_completed": 1,
+        "stop_reason": "plan_satisfied"
+      }
+    }
+  }
+]

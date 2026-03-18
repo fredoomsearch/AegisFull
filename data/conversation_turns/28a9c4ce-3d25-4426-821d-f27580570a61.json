@@ -1,0 +1,101 @@
+[
+  {
+    "turn_id": "797511403f1d",
+    "created_at": 1773819073001,
+    "finished_at": 1773819073003,
+    "status": "success",
+    "mode": "tool",
+    "source_plan": "local_only",
+    "active_project_id": "proj_c3f6cc",
+    "user_message": "[execute_tool] project_files",
+    "items": [
+      {
+        "item_id": "fb536f3f958b",
+        "ts": 1773819073002,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "tool": "project_files",
+          "args": {
+            "project_id": "proj_c3f6cc",
+            "q": "app",
+            "limit": 10
+          }
+        }
+      },
+      {
+        "item_id": "66fd282d3485",
+        "ts": 1773819073002,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "tool": "project_files"
+        }
+      },
+      {
+        "item_id": "4409af192f0b",
+        "ts": 1773819073002,
+        "kind": "replan",
+        "status": "ok",
+        "payload": {
+          "reason": "project_files:success",
+          "next_step": "",
+          "next_tool": null,
+          "missing_evidence": [],
+          "recent_tool_failures": []
+        }
+      }
+    ],
+    "assistant_message": "tool executed",
+    "response_context": {
+      "source_plan": "local_only",
+      "source_origin": [
+        "model"
+      ],
+      "active_project_id": null,
+      "effective_tool": "project_files",
+      "effective_tool_status": "ok",
+      "effective_tool_output": "proj_c3f6cc",
+      "web_query": "",
+      "web_status": "not-used",
+      "web_source": "none",
+      "web_provider": "",
+      "web_results": 0,
+      "web_attempted": false,
+      "using_live_web": false,
+      "using_cached_web": false,
+      "using_stale_cache": false,
+      "data_notice": "Answering with local model context.",
+      "architecture_summary": "",
+      "current_task": null,
+      "current_subtask": null,
+      "current_file_focus": null,
+      "current_symbol_focus": null,
+      "last_artifact": null,
+      "last_artifact_kind": null,
+      "current_artifact_focus": null,
+      "recent_tool_failures": [],
+      "web_findings": [],
+      "next_step": null,
+      "next_tool": null,
+      "missing_evidence": [],
+      "tool_candidates": [],
+      "tool_risks": {},
+      "approval_required": [],
+      "actions": [],
+      "next_action": null,
+      "llm_required": true,
+      "routing_confidence": 0.5,
+      "ambiguous_route": false,
+      "pending_approval": null,
+      "continue_available": false,
+      "planner_loop": {
+        "phase": "execute",
+        "state": "completed",
+        "tool": "project_files"
+      },
+      "continued": false,
+      "continue_skipped_reason": "no-continue-plan"
+    }
+  }
+]

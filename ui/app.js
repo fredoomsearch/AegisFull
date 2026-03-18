@@ -3,12 +3,28 @@
    - Robust: tolerates different response shapes from backend
 */
 
+// Boot marker + crash capture (used by index.html watchdog)
+try {
+  window.__AEGIS_UI_BOOTED__ = true;
+  window.__AEGIS_UI_BOOT_ERROR__ = null;
+} catch {}
+
 const MODES = { CHAT: "chat", WEB: "web", URL: "url", CRYPTO: "crypto", IMAGE: "image" };
 const LANG = { ES: "es", EN: "en" };
 
-const CHAT_MAX_TIMEOUT_MS = 420000;
+// Frontend should not cut model responses by default.
+// Long-running endpoints are handled without client-side abort deadlines.
+const CHAT_MAX_TIMEOUT_MS = 0;
+const AUTH_RETRY_BASE_MS = 1500;
+const AUTH_RETRY_MAX_MS = 30000;
 const RESET_CONV_ON_LOAD = false;
 const TRADE_TEST_DEFAULT = false; // keep trades educational unless you flip it server-side
+// Keep all explicit modes visible by default (chat/web/url/crypto/image).
+const CHAT_ONLY_EXPERIENCE = false;
+// Keep agent internals available server-side, but hide agent-centric UI controls by default.
+const AGENT_UI_ENABLED = false;
+// Keep snapshot/session view concise; detailed crypto analytics stay in crypto panel.
+const SNAPSHOT_MINIMAL_VIEW = true;
 
 const endpoints = {
   websearch: "/websearch",
@@ -18,7 +34,7 @@ const endpoints = {
   archiveConversation: (id) => `/chat/${id}/archive`,
   unarchiveConversation: (id) => `/chat/${id}/unarchive`,
   deleteConversation: (id) => `/chat/${id}`,
-  analyzeImage: "/analyze_image",
+  analyzeAttachment: "/analyze_attachment",
   conversationEvents: (id) => `/chat/${id}/events`,
 
   cryptoPredict: "/crypto/predict",
@@ -30,34 +46,102 @@ const endpoints = {
   cryptoPnl: "/crypto/pnl",
   cryptoNews: "/crypto/news",
   cryptoPredictions: "/crypto/predictions",
+  cryptoPredictionThresholds: "/crypto/predictions/thresholds",
+  cryptoPredictionCredibility: "/crypto/predictions/credibility",
+  cryptoPredictionLeaderboard: "/crypto/predictions/leaderboard",
+  cryptoPredictionStatsExport: "/crypto/predictions/stats/export",
   cryptoPredictionsClear: "/crypto/predictions",
+  cryptoModelsRegistry: "/crypto/models/registry",
+  cryptoSymbolsMeta: "/crypto/symbols/meta",
   adminRefresh: "/admin/refresh-crypto",
   adminRefreshLog: "/admin/refresh-log",
   adminCancelAll: "/admin/cancel-all",
   systemSnapshot: "/system/snapshot",
+  systemCapabilities: "/system/capabilities",
   imageGenerate: "/image/generate",
+  imageGenerateWithReference: "/image/generate_with_reference",
   imageRecent: "/image/recent",
+  imageCheckpoints: "/image/checkpoints",
   healthz: "/healthz",
   authToken: "/auth/token",
   authRefresh: "/auth/refresh",
 
-  toolsTree: "/tools/tree",
-  toolsContent: "/tools/content",
+  systemReadyz: "/system/readyz",
+  systemDemoCheck: "/system/demo_check",
+  systemShutdown: "/system/shutdown",
+
+  filesTree: "/files/tree",
+  filesContent: "/files/content",
+  filesDiffContent: "/files/content/diff",
+  filesSaveContent: "/files/content/save",
+  filesRenameContent: "/files/content/rename",
+  filesDeleteContent: "/files/content/delete",
+  filesCreateDir: "/files/path/mkdir",
+  filesMovePath: "/files/path/move",
+  filesBatchPreview: "/files/batch/preview",
+  filesBatchApply: "/files/batch/apply",
+  filesApplyIdea: (id, ideaId) => `/files/projects/${id}/ideas/${ideaId}/apply`,
 
   filesUploadZip: "/files/upload-zip",
+  filesProjects: "/files/projects",
+  filesProjectDetail: (id) => `/files/projects/${id}`,
+  filesProjectFiles: (id) => `/files/projects/${id}/files`,
+  filesProjectSymbols: (id) => `/files/projects/${id}/symbols`,
+  filesProjectEntrypoints: (id) => `/files/projects/${id}/entrypoints`,
+  filesProjectDependencies: (id) => `/files/projects/${id}/dependencies`,
+  filesProjectConfigs: (id) => `/files/projects/${id}/configs`,
+  filesProjectIdeas: (id) => `/files/projects/${id}/ideas`,
+  filesProjectIntelligence: (id) => `/files/projects/${id}/intelligence`,
+  filesProjectImpact: (id) => `/files/projects/${id}/impact`,
+  filesProjectRenamePlan: (id) => `/files/projects/${id}/rename_plan`,
   filesClone: "/files/clone",
-  filesDeleteProject: "/tools/delete_project",
+  filesDeleteProject: "/files/delete_project",
+  filesRegisterRoot: "/files/register-root",
   filesIngest: "/files/ingest",
   filesIngestStatus: "/files/ingest/status",
   filesIngestJobs: "/files/ingest/jobs",
+  filesIngestRecent: "/files/ingest/recent",
   filesIngestLog: "/files/ingest/log",
+  filesAvStatus: "/files/av/status",
+  filesAvRecent: "/files/av/recent",
+  bindConversationProject: (id) => `/chat/${id}/project`,
+  conversationState: (id) => `/chat/${id}/state`,
+  conversationTurns: (id) => `/chat/${id}/turns`,
+  conversationTurnDetail: (id, turnId) => `/chat/${id}/turns/${turnId}`,
+  conversationExecuteTool: (id) => `/chat/${id}/execute_tool`,
+  conversationAgentStep: (id) => `/chat/${id}/agent_step`,
+  conversationAgentRun: (id) => `/chat/${id}/agent_run`,
+  conversationAgentContinue: (id) => `/chat/${id}/agent_continue`,
 };
+
+const CRYPTO_SEARCH_SYMBOLS = [
+  "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "TRXUSDT",
+  "LINKUSDT", "MATICUSDT", "LTCUSDT", "ATOMUSDT", "ETCUSDT", "XLMUSDT", "BCHUSDT", "APTUSDT", "ARBUSDT", "OPUSDT",
+  "SUIUSDT", "NEARUSDT", "AAVEUSDT", "UNIUSDT", "XMRUSDT", "FILUSDT", "ALGOUSDT", "XTZUSDT", "MKRUSDT", "INJUSDT",
+  "RUNEUSDT", "KASUSDT", "IMXUSDT", "TIAUSDT", "WIFUSDT", "PEPEUSDT", "SHIBUSDT", "BONKUSDT", "SEIUSDT", "STXUSDT",
+  "THETAUSDT", "ICPUSDT", "RNDRUSDT", "GRTUSDT", "SANDUSDT", "MANAUSDT", "ENJUSDT", "EOSUSDT", "EGLDUSDT", "VETUSDT",
+  "HBARUSDT", "QNTUSDT", "LDOUSDT", "JUPUSDT", "JTOUSDT", "PYTHUSDT", "FETUSDT", "WLDUSDT", "CRVUSDT", "COMPUSDT",
+  "SNXUSDT", "FTMUSDT", "GALAUSDT", "DYDXUSDT", "ARUSDT", "AXSUSDT", "PENDLEUSDT", "ONDOUSDT", "STRKUSDT", "1INCHUSDT",
+  "IOTAUSDT", "KAVAUSDT", "ZRXUSDT", "CAKEUSDT", "CELOUSDT", "GMXUSDT", "FLOWUSDT",
+];
 
 const cleanKey = (k) =>
   (k || "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean)[0] || "";
+
+function hasMainApiKey() {
+  return !!cleanKey(state.apiKey);
+}
+
+function hasFilesApiKey() {
+  return !!cleanKey(state.filesApiKey || state.apiKey);
+}
+
+function hasAuthForScope(scope = "main") {
+  return scope === "files" ? hasFilesApiKey() : hasMainApiKey();
+}
 
 const state = {
   mode: MODES.CHAT,
@@ -66,14 +150,32 @@ const state = {
   useExistingConversation: localStorage.getItem("aegis_use_existing") === "1",
   apiKey: cleanKey(localStorage.getItem("aegis_api_key")),
   filesApiKey: cleanKey(localStorage.getItem("aegis_files_api_key") || localStorage.getItem("aegis_api_key")),
+  imageReferenceFile: null,
+  chatAttachment: null,
+  chatAttachmentAutoWeb: JSON.parse(localStorage.getItem("aegis_attachment_auto_web") || "true"),
 
   pending: false,
   activeControllers: new Set(),
   cancelledByUser: false,
   lastLatencyMs: null,
+  lastReadyz: null,
+  readyzTimer: null,
 
-  // UI / sidebar
-  currentProjectRoot: "app",
+  // UI / sidebar (input auxiliar; el proyecto activo real vive en activeProjectId)
+  manualProjectRoot: String(localStorage.getItem("aegis_project_root") || "").trim(),
+  fileViewerPath: "",
+  fileViewerContent: "",
+  fileViewerEditing: false,
+  fileViewerIsNew: false,
+  fileViewerDiffMode: false,
+  fileViewerDiffText: "",
+  fileViewerPreviousPath: "",
+  fileViewerPreviousContent: "",
+  treeSelectionPath: "",
+  treeSelectionIsDir: false,
+  batchApplyReviewToken: "",
+  batchApplyReviewedPayload: "",
+  batchApplyPreviewText: "",
 
   // crypto + chart
   chartSymbol: "BTCUSDT",
@@ -83,15 +185,26 @@ const state = {
   compareMarkers: [],
   compareHighlightId: null,
   cryptoModelsMeta: { available: ["ensemble"], default: "ensemble" },
+  cryptoModelRegistry: [],
+  cryptoSymbolMeta: null,
   selectedCryptoModel: "ensemble",
+  cryptoStatsEngine: localStorage.getItem("aegis_crypto_stats_engine") || "trained",
+  cryptoThresholdRec: null,
+  cryptoCredibility: null,
+  cryptoLeaderboard: [],
+  lastPrediction: null,
   savePredictions: JSON.parse(localStorage.getItem("aegis_save_preds") || "true"),
   alertsOn: JSON.parse(localStorage.getItem("aegis_alerts") || "false"),
   showNewsMarkers: true,
   newsProvider: null,
-  chatSideVisible: true,
+  chatSideVisible: false,
   layoutCollapsed: localStorage.getItem("aegis_layout_collapsed") === "1",
-  chartVisible: localStorage.getItem("aegis_chart_visible") !== "0",
+  // Keep crypto chart/sources collapsed by default until user explicitly opens it.
+  chartVisible: localStorage.getItem("aegis_chart_visible") === "1",
   sidebarVisible: localStorage.getItem("aegis_sidebar_visible") !== "0",
+  chartRangeMinutes: Math.max(0, Number(localStorage.getItem("aegis_chart_range_minutes") || "0")) || 0,
+  chartViewMode: "auto", // auto (preset/all) | manual (wheel zoom/pan)
+  chartWindow: null, // { start, end } index window for manual view
 
   // timers
   liveTimer: null,
@@ -110,6 +223,27 @@ const state = {
   convEventsSince: null,
   convEventsItems: [],
   convEventsFailures: 0,
+  convAuthBlockedAt: 0,
+  convTurnsItems: [],
+  convTurnsTimer: null,
+  turnsFilter: localStorage.getItem("aegis_turns_filter") || "",
+  convTurnsInFlight: false,
+  convTurnsForceQueued: false,
+  convEventsInFlight: false,
+  convEventsForceQueued: false,
+  readyzInFlight: false,
+  chartInFlight: false,
+  chartQueued: false,
+  chartQueuedSymbol: "",
+  newsInFlight: false,
+  newsForceQueued: false,
+  snapshotInFlight: false,
+  snapshotQueued: false,
+  alertsInFlight: false,
+  cryptoPredictionInFlight: false,
+  cryptoPredictionQueued: false,
+  lastCryptoPredictionAt: 0,
+  lastCryptoPredictionKey: "",
 
   // session modal
   conversationList: [],
@@ -122,8 +256,18 @@ const state = {
   seenAlerts: new Set(),
 
   // theme
-  theme: "future", // default: future palette; toggle removed from header
+  theme: "serious", // sober default palette for daily use
+  debugTraceEnabled: localStorage.getItem("aegis_debug_trace") === "1",
+  chatOnlyExperience: CHAT_ONLY_EXPERIENCE,
+  lastSourceUsageNotice: "",
+  statusNoticeTimes: new Map(),
   uploadedProjects: [],
+  projectRecords: [],
+  activeProjectId: localStorage.getItem("aegis_active_project_id") || "",
+  activeProjectDetail: null,
+  activeProjectImpact: null,
+  lastSnapshot: null,
+  lastChatContext: null,
   accessToken: localStorage.getItem("aegis_access_token") || "",
   refreshToken: localStorage.getItem("aegis_refresh_token") || "",
   tokenExp: Number(localStorage.getItem("aegis_token_exp") || "0"), // epoch seconds
@@ -132,52 +276,170 @@ const state = {
     lastError: null,
     lastOkAt: 0,
   },
+  authRetryFailures: 0,
+  authRetryBlockedUntil: 0,
+  authHintShown: false,
 };
 
 const dom = {};
 
 document.addEventListener("DOMContentLoaded", () => {
-  cacheDom();
-  wireUI();
-  initState();
-  updateAllUI();
-  appendBubble(state.lang === LANG.ES ? "AEGIS listo." : "AEGIS ready.", "bot");
-  localizeHelp();
-  // placeholders
-  if (dom.filesLogContent) dom.filesLogContent.textContent = state.lang === LANG.ES ? "Selecciona un log (ingest/admin) para verlo aquí." : "Select a log (ingest/admin) to view it here.";
-  renderProjectList();
-  startTokenAutoRefresh();
-  applyLayoutCollapsed();
-  if (state.autoSnapshotEnabled) scheduleSnapshot(1500);
+  try {
+    document.body.classList.add("perf-lite");
+    cacheDom();
+    wireUI();
+    initState();
+    updateAllUI();
+    applyAuthState();
+    appendBubble(state.lang === LANG.ES ? "AEGIS listo." : "AEGIS ready.", "bot");
+    localizeHelp();
+    // placeholders
+    if (dom.filesLogContent) dom.filesLogContent.textContent = state.lang === LANG.ES ? "Selecciona un log (ingest/admin) para verlo aquí." : "Select a log (ingest/admin) to view it here.";
+    renderProjectList();
+    void loadCryptoSymbolsMeta().then(() => loadSymbolsList(dom.chartSymbol?.value || ""));
+    startTokenAutoRefresh();
+    startReadyzPolling();
+    applyLayoutCollapsed();
+    if (state.autoSnapshotEnabled) scheduleSnapshot(1500);
+  } catch (err) {
+    try {
+      window.__AEGIS_UI_BOOT_ERROR__ = err?.stack || err?.message || String(err);
+    } catch {}
+    // Best-effort visible fallback (doesn't depend on markdown libs)
+    try {
+      const diag = document.getElementById("uiBootDiagBody");
+      const wrap = document.getElementById("uiBootDiag");
+      if (diag && wrap) {
+        diag.textContent =
+          "UI init failed.\n\n" +
+          (err?.stack || err?.message || String(err));
+        wrap.style.display = "block";
+      }
+    } catch {}
+    console.error(err);
+  }
 });
+
+function applyAuthState() {
+  const es = state.lang === LANG.ES;
+  const missingKey = !String(state.apiKey || "").trim();
+  // Do not hard-disable primary actions when the key is missing: it confuses users ("nothing happens").
+  // Instead, let clicks open the API key modal and show a clear message.
+  const disabled = !!state.pending;
+  if (dom.sendBtn) {
+    dom.sendBtn.disabled = disabled;
+    dom.sendBtn.classList.toggle("requires-key", missingKey);
+    dom.sendBtn.title = missingKey
+      ? (es ? "Configura tu API key (🔑) para enviar." : "Set your API key (🔑) to send.")
+      : "";
+  }
+  if (dom.stopBtn) {
+    const activeWork = !!state.pending || state.activeControllers.size > 0;
+    dom.stopBtn.hidden = !activeWork;
+    dom.stopBtn.disabled = !activeWork;
+    dom.stopBtn.title = es
+      ? "Detener solicitudes activas y procesos del panel"
+      : "Stop active requests and panel jobs";
+  }
+  if (dom.apiKeyBtn) dom.apiKeyBtn.classList.toggle("danger", missingKey);
+
+  if (missingKey && !state.authHintShown) {
+    state.authHintShown = true;
+    appendBubble(
+      es
+        ? "Configura tu API key (ícono 🔑 arriba) para usar Chat/Files. Sin clave, la UI carga pero el backend responderá 401."
+        : "Set your API key (🔑 icon) to use Chat/Files. Without a key, the UI loads but the backend will return 401.",
+      "error"
+    );
+    // Reduce confusion: if the modal exists, open it once automatically.
+    try {
+      const prompted = localStorage.getItem("aegis_api_key_prompted") === "1";
+      if (!prompted && dom.apiKeyModal) {
+        localStorage.setItem("aegis_api_key_prompted", "1");
+        setTimeout(() => openModal(dom.apiKeyModal), 50);
+      }
+    } catch {}
+  }
+}
+
+function ensureApiKeyOrPrompt({ action = "chat" } = {}) {
+  const missingKey = !String(state.apiKey || "").trim();
+  if (!missingKey) return true;
+
+  const es = state.lang === LANG.ES;
+  appendBubble(
+    es
+      ? `Falta API key. Abre 🔑 y configura tu key para continuar (${action}).`
+      : `Missing API key. Open 🔑 and set your key to continue (${action}).`,
+    "error"
+  );
+  try {
+    if (dom.apiKeyModal) openModal(dom.apiKeyModal);
+    else dom.apiKeyBtn?.click?.();
+  } catch {}
+  return false;
+}
 
 function cacheDom() {
   dom.chat = document.getElementById("chat");
   dom.modeIndicator = document.getElementById("modeIndicator");
+  dom.runtimeStatusBadge = document.getElementById("runtimeStatusBadge");
+  dom.webStatusBadge = document.getElementById("webStatusBadge");
   dom.msgInput = document.getElementById("msg");
+  dom.stopBtn = document.getElementById("stopBtn");
   dom.sendBtn = document.getElementById("sendBtn");
 
+  dom.chatBtn = document.getElementById("chatBtn");
   dom.webBtn = document.getElementById("webBtn");
   dom.urlBtn = document.getElementById("urlBtn");
   dom.cryptoBtn = document.getElementById("cryptoBtn");
   dom.imgBtn = document.getElementById("imgBtn");
+  dom.attachBtn = document.getElementById("attachBtn");
   dom.layoutToggle = document.getElementById("layoutToggle");
   dom.imgInput = document.getElementById("imgInput");
+  dom.attachmentInput = document.getElementById("attachmentInput");
+  dom.chatAttachmentBar = document.getElementById("chatAttachmentBar");
+  dom.chatAttachmentLabel = document.getElementById("chatAttachmentLabel");
+  dom.chatAttachmentAutoWeb = document.getElementById("chatAttachmentAutoWeb");
+  dom.chatAttachmentClear = document.getElementById("chatAttachmentClear");
+  dom.imageQuickBar = document.getElementById("imageQuickBar");
+  dom.imageModeGuide = document.getElementById("imageModeGuide");
 
   dom.langEs = document.getElementById("langEs");
   dom.langEn = document.getElementById("langEn");
 
   dom.convIdDisplay = document.getElementById("conv-id-display");
   dom.convIdChip = document.getElementById("conv-id-chip");
-  dom.timeoutLabel = document.getElementById("timeout-label");
   dom.convEventsList = document.getElementById("convEventsList");
   dom.convEventsRefresh = document.getElementById("convEventsRefresh");
+  dom.convTurnsList = document.getElementById("convTurnsList");
+  dom.sessionsEventsWrap = document.querySelector(".sessions-events-wrap");
+  dom.sessionsTurnsWrap = document.querySelector(".sessions-turns-wrap");
+  dom.turnsFilter = document.getElementById("turnsFilter");
+  dom.turnsOpenBtn = document.getElementById("turnsOpenBtn");
+  dom.turnsQuickFilters = document.getElementById("turnsQuickFilters");
+  dom.turnDetailModal = document.getElementById("turnDetailModal");
+  dom.turnDetailTitle = document.getElementById("turnDetailTitle");
+  dom.turnDetailSummary = document.getElementById("turnDetailSummary");
+  dom.turnDetailToolWrap = document.getElementById("turnDetailToolWrap");
+  dom.turnDetailToolLabel = document.getElementById("turnDetailToolLabel");
+  dom.turnDetailToolOut = document.getElementById("turnDetailToolOut");
+  dom.turnDetailJsonLabel = document.getElementById("turnDetailJsonLabel");
+  dom.turnDetailBody = document.getElementById("turnDetailBody");
+  dom.turnDetailClose = document.getElementById("turnDetailClose");
+  dom.turnDetailCopy = document.getElementById("turnDetailCopy");
 
   dom.apiKeyBtn = document.getElementById("apiKeyBtn");
+  dom.apiKeyModal = document.getElementById("apiKeyModal");
+  dom.apiKeyClose = document.getElementById("apiKeyClose");
+  dom.apiKeySave = document.getElementById("apiKeySave");
+  dom.apiKeyClear = document.getElementById("apiKeyClear");
+  dom.apiKeyMainInput = document.getElementById("apiKeyMainInput");
+  dom.apiKeyFilesInput = document.getElementById("apiKeyFilesInput");
+  dom.apiKeyUseSame = document.getElementById("apiKeyUseSame");
+  dom.globalSnapshotBtn = document.getElementById("globalSnapshotBtn");
   dom.showCryptoPanelBtn = document.getElementById("showCryptoPanelBtn");
   dom.showFilesPanelBtn = document.getElementById("showFilesPanelBtn");
-  dom.cancelAllBtn = document.getElementById("cancelAllBtn");
-  dom.clearLogsBtn = document.getElementById("clearLogsBtn");
   dom.helpBtn = document.getElementById("helpBtn");
   dom.helpModal = document.getElementById("helpModal");
   dom.helpClose = document.getElementById("helpClose");
@@ -185,6 +447,7 @@ function cacheDom() {
   dom.symbolsModal = document.getElementById("symbolsModal");
   dom.symbolsClose = document.getElementById("symbolsClose");
   dom.symbolsList = document.getElementById("symbolsList");
+  dom.symbolsQuotes = document.getElementById("symbolsQuotes");
 
   dom.hintBtn = document.getElementById("hintBtn");
   dom.hintTooltip = document.getElementById("chat-hint-tooltip");
@@ -194,7 +457,6 @@ function cacheDom() {
   dom.focusSelect = null;
 
   // sidebar sources
-  dom.sourcesTitle = document.getElementById("sources-title");
   dom.sourcesContent = document.getElementById("sources-content");
   dom.logsLiveToggle = document.getElementById("logsLiveToggle");
   dom.savePredToggle = document.getElementById("savePredToggle");
@@ -202,8 +464,8 @@ function cacheDom() {
   dom.predsBtn = document.getElementById("predsBtn");
   dom.pnlBtn = document.getElementById("pnlBtn");
   dom.statsBtn = document.getElementById("statsBtn");
-  dom.snapshotBtn = document.getElementById("snapshotBtn");
   dom.clearCryptoBtn = document.getElementById("clearCryptoBtn");
+  dom.debugTraceToggle = document.getElementById("debugTraceToggle");
   dom.statusList = document.getElementById("statusList");
   dom.copyConvId = document.getElementById("copyConvId");
 
@@ -213,18 +475,7 @@ function cacheDom() {
   dom.newsRefreshBtn = document.getElementById("newsRefreshBtn");
   dom.newsCompactToggle = document.getElementById("newsCompactToggle");
 
-  // image mode
-  dom.imagePrompt = document.getElementById("imagePrompt");
-  dom.imageNegative = document.getElementById("imageNegative");
-  dom.imageSteps = document.getElementById("imageSteps");
-  dom.imageSeed = document.getElementById("imageSeed");
-  dom.imageGenerateBtn = document.getElementById("imageGenerateBtn");
-  dom.imageGallery = document.getElementById("imageGallery");
-  dom.imageStatus = document.getElementById("imageStatus");
-  dom.imageRefreshBtn = document.getElementById("imageRefreshBtn");
-
   // files
-  dom.treeBtn = document.getElementById("treeBtn");
   dom.projectSelect = document.getElementById("projectSelect");
   dom.refreshTreeBtn = document.getElementById("refreshTreeBtn");
   dom.projectTree = document.getElementById("projectTree");
@@ -232,20 +483,37 @@ function cacheDom() {
   dom.projectUploadInput = document.getElementById("projectUploadInput");
   dom.projectCloneBtn = document.getElementById("projectCloneBtn");
   dom.projectDeleteBtn = document.getElementById("projectDeleteBtn");
+  dom.activeProjectBadge = document.getElementById("activeProjectBadge");
+  dom.activeProjectSelect = document.getElementById("activeProjectSelect");
+  dom.filesToChatBtn = document.getElementById("filesToChatBtn");
+  dom.projectMeta = document.getElementById("projectMeta");
   dom.ingestLogBtn = document.getElementById("ingestLogBtn");
   dom.ingestStatusBtn = document.getElementById("ingestStatusBtn");
   dom.ingestStatusText = document.getElementById("ingestStatusText");
   dom.ingestJobsList = document.getElementById("ingestJobsList");
   dom.ingestJobsRefresh = document.getElementById("ingestJobsRefresh");
   dom.filesLogContent = document.getElementById("filesLogContent");
-  dom.securityNote = document.getElementById("securityNote");
   dom.filesExpandBtn = document.getElementById("filesExpandBtn");
   dom.projectList = document.getElementById("projectList");
   dom.projectList && (dom.projectList.title = state.lang === LANG.ES ? "Proyectos cargados/clonados" : "Uploaded/cloned projects");
+  dom.sourceOriginBar = document.getElementById("sourceOriginBar");
 
   dom.fileViewerTitle = document.getElementById("fileViewerTitle");
+  dom.fileEditorPath = document.getElementById("fileEditorPath");
   dom.fileViewerBody = document.getElementById("fileViewerBody");
+  dom.fileEditorBody = document.getElementById("fileEditorBody");
   dom.copyFileBtn = document.getElementById("copyFileBtn");
+  dom.newFileBtn = document.getElementById("newFileBtn");
+  dom.newFolderBtn = document.getElementById("newFolderBtn");
+  dom.movePathBtn = document.getElementById("movePathBtn");
+  dom.batchApplyBtn = document.getElementById("batchApplyBtn");
+  dom.renameFileBtn = document.getElementById("renameFileBtn");
+  dom.editFileBtn = document.getElementById("editFileBtn");
+  dom.diffFileBtn = document.getElementById("diffFileBtn");
+  dom.deleteFileBtn = document.getElementById("deleteFileBtn");
+  dom.saveFileBtn = document.getElementById("saveFileBtn");
+  dom.cancelFileEditBtn = document.getElementById("cancelFileEditBtn");
+  syncFileViewerMode();
 
   dom.chatSidePanel = document.getElementById("chatSidePanel");
   dom.chatSideToggle = document.getElementById("chatSideToggle");
@@ -253,8 +521,15 @@ function cacheDom() {
   dom.chatCol = document.querySelector(".chat-col");
   dom.appSidebar = document.querySelector(".app-sidebar");
 
+  dom.batchApplyModal = document.getElementById("batchApplyModal");
+  dom.batchApplyClose = document.getElementById("batchApplyClose");
+  dom.batchApplyInput = document.getElementById("batchApplyInput");
+  dom.batchApplyPreview = document.getElementById("batchApplyPreview");
+  dom.batchApplyPreviewBtn = document.getElementById("batchApplyPreviewBtn");
+  dom.batchApplyRun = document.getElementById("batchApplyRun");
+  dom.batchApplyTemplate = document.getElementById("batchApplyTemplate");
+
   // crypto controls
-  dom.cryptoInline = document.getElementById("cryptoInline");
   dom.cryptoModelSelect = document.getElementById("cryptoModelSelect");
   dom.cryptoHorizon = document.getElementById("cryptoHorizon");
   dom.chatTradeQty = document.getElementById("chatTradeQty");
@@ -268,6 +543,9 @@ function cacheDom() {
   dom.chartExpandBtn = document.getElementById("chartExpandBtn");
   dom.chartTitle = document.getElementById("chartTitle");
   dom.priceChart = document.getElementById("priceChart");
+  dom.chartModeHint = document.getElementById("chartModeHint");
+  dom.chartRangeButtons = Array.from(document.querySelectorAll("[data-chart-range]"));
+  dom.chartResetZoom = document.getElementById("chartResetZoom");
   dom.chartLive = document.getElementById("chartLive");
   dom.newsMarkersToggle = document.getElementById("newsMarkersToggle");
   dom.signalBar = document.getElementById("signalBar");
@@ -281,8 +559,6 @@ function cacheDom() {
   dom.predictionCompareRefresh = document.getElementById("predictionCompareRefresh");
   dom.predictionCompareHelp = document.getElementById("predictionCompareHelp");
   dom.predictionCompareTooltip = document.getElementById("predictionCompareTooltip");
-
-  dom.adminRefresh = document.getElementById("adminRefresh");
 
   // tabs (sidebar reduced to Archivos only, keep structure simple)
   dom.tabButtons = Array.from(document.querySelectorAll(".tab-btn"));
@@ -299,23 +575,94 @@ function initState() {
     localStorage.removeItem("aegis_use_existing");
   }
   const storedSide = localStorage.getItem("aegis_chat_side_visible");
+  if (storedSide === "1") state.chatSideVisible = true;
   if (storedSide === "0") state.chatSideVisible = false;
+  // Snapshot polling is always-on in current UX contract.
+  state.autoSnapshotEnabled = true;
+  localStorage.setItem("aegis_auto_snapshot", "1");
   // tokens already pulled from localStorage in state init
   applyTheme(state.theme);
+  document.body.dataset.mode = state.mode;
   updateConversationIndicators(state.conversationId);
   resetConversationEvents();
-  setProjectRoot(state.currentProjectRoot);
-  loadConversationList(state.conversationsIncludeArchived);
+  syncProjectSelectValue(state.manualProjectRoot);
+  if (hasAuthForScope("main")) {
+    loadConversationList(state.conversationsIncludeArchived);
+  } else if (dom.sessionsList) {
+    dom.sessionsList.innerHTML = `<li class="sessions-empty">${
+      state.lang === LANG.ES
+        ? "Auth requerida. Configura API key (🔑)."
+        : "Auth required. Set API key (🔑)."
+    }</li>`;
+  }
   applyChatSideVisible();
   applyPanelVisibility();
-  // Try to load the file tree once on init (will use currentProjectRoot).
-  loadProjectTree();
-  setImageStatus(state.lang === LANG.ES ? "Listo" : "Ready", "muted");
+  if (hasAuthForScope("files")) {
+    if (state.activeProjectId || getEffectiveProjectRoot()) {
+      loadProjectTree();
+    }
+    loadRegisteredProjects();
+  } else {
+    state.projectRecords = [];
+    renderProjectList();
+    renderActiveProjectSelect();
+  }
+  if (state.conversationId && hasAuthForScope("main")) syncConversationState(state.conversationId);
+  if (dom.chatAttachmentAutoWeb) dom.chatAttachmentAutoWeb.checked = !!state.chatAttachmentAutoWeb;
+  updateChatAttachmentBar();
+  updateImageQuickBar();
+  setDebugTraceEnabled(state.debugTraceEnabled, { persist: false, silent: true });
+  loadSymbolsList();
+  applyChatOnlyExperience();
+}
+
+function hideNode(node, hide = true) {
+  if (!node) return;
+  node.style.display = hide ? "none" : "";
+  node.setAttribute("aria-hidden", String(!!hide));
+}
+
+function applyChatOnlyExperience() {
+  if (!state.chatOnlyExperience) return;
+  state.mode = MODES.CHAT;
+  document.body.dataset.mode = state.mode;
+
+  [
+    dom.webBtn,
+    dom.urlBtn,
+    dom.cryptoBtn,
+    dom.imgBtn,
+    dom.attachBtn,
+    dom.showCryptoPanelBtn,
+  ].forEach((node) => hideNode(node, true));
+
+  state.chartVisible = false;
+  localStorage.setItem("aegis_chart_visible", "0");
+  if (dom.chartPanel) dom.chartPanel.classList.add("chart-hidden");
+
+  document.querySelectorAll("[data-i18n='hint_crypto'], [data-i18n='hint_image']").forEach((node) => {
+    if (node instanceof HTMLElement) node.style.display = "none";
+  });
+  document.querySelectorAll("[data-i18n='help_item_crypto_label'], [data-i18n='help_item_image_label']").forEach((node) => {
+    const li = node instanceof HTMLElement ? node.closest("li") : null;
+    if (li instanceof HTMLElement) li.style.display = "none";
+  });
 }
 
 function wireUI() {
   // send
   dom.sendBtn?.addEventListener("click", onSend);
+  dom.stopBtn?.addEventListener("click", async () => {
+    const activeWork = !!state.pending || state.activeControllers.size > 0;
+    if (!activeWork) {
+      notifyStatus(
+        state.lang === LANG.ES ? "No hay procesos activos." : "No active processes.",
+        { kind: "info", key: "stop:none", dedupeMs: 1200, ttlMs: 1400 }
+      );
+      return;
+    }
+    await cancelAllRequests(true);
+  });
   dom.msgInput?.addEventListener("input", () => autoSizeTextarea(dom.msgInput));
   dom.msgInput?.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -326,30 +673,49 @@ function wireUI() {
 
   // cancel
   // mode buttons
-  dom.webBtn?.addEventListener("click", () => setMode(state.mode === MODES.WEB ? MODES.CHAT : MODES.WEB));
+  dom.chatBtn?.addEventListener("click", () => setMode(MODES.CHAT));
   dom.urlBtn?.addEventListener("click", () => setMode(state.mode === MODES.URL ? MODES.CHAT : MODES.URL));
   dom.cryptoBtn?.addEventListener("click", () => setMode(state.mode === MODES.CRYPTO ? MODES.CHAT : MODES.CRYPTO));
   dom.imgBtn?.addEventListener("click", () => {
-    setMode(MODES.IMAGE);
+    const enteringImage = state.mode !== MODES.IMAGE;
+    setMode(enteringImage ? MODES.IMAGE : MODES.CHAT);
   });
   dom.layoutToggle?.addEventListener("click", toggleLayoutCollapse);
-
   // image input
   dom.imgInput?.addEventListener("change", async () => {
     const f = dom.imgInput.files?.[0];
     dom.imgInput.value = "";
     if (!f) return;
-    await analyzeImage(f);
+    state.imageReferenceFile = f;
+    await analyzeAttachment(f, { showPreview: true });
   });
 
-  dom.imageGenerateBtn?.addEventListener("click", (e) => {
-    e.preventDefault();
-    generateImageFromUI();
+  dom.attachmentInput?.addEventListener("change", async () => {
+    const f = dom.attachmentInput.files?.[0];
+    dom.attachmentInput.value = "";
+    if (!f) return;
+    await analyzeAttachment(f);
   });
 
-  dom.imageRefreshBtn?.addEventListener("click", (e) => {
+  dom.attachBtn?.addEventListener("click", (e) => {
     e.preventDefault();
-    loadRecentImages();
+    if (state.mode === MODES.IMAGE) {
+      dom.imgInput?.click();
+    } else {
+      dom.attachmentInput?.click();
+    }
+  });
+
+  dom.chatAttachmentClear?.addEventListener("click", (e) => {
+    e.preventDefault();
+    clearChatAttachment({ clearImageRef: true });
+    appendBubble(state.lang === LANG.ES ? "Adjunto limpiado." : "Attachment cleared.", "bot");
+  });
+
+  dom.chatAttachmentAutoWeb?.addEventListener("change", () => {
+    state.chatAttachmentAutoWeb = !!dom.chatAttachmentAutoWeb?.checked;
+    localStorage.setItem("aegis_attachment_auto_web", JSON.stringify(state.chatAttachmentAutoWeb));
+    updateChatAttachmentBar();
   });
 
   // language
@@ -368,12 +734,22 @@ function wireUI() {
 
   // symbols modal (pares válidos / deploy tips)
   dom.symbolsBtn?.addEventListener("click", () => {
-    loadSymbolsList();
+    void loadCryptoSymbolsMeta();
+    loadSymbolsList(dom.chartSymbol?.value || "");
     openModal(dom.symbolsModal);
   });
   dom.symbolsClose?.addEventListener("click", () => closeModal(dom.symbolsModal));
   dom.symbolsModal?.addEventListener("click", (e) => {
     if (e.target === dom.symbolsModal) closeModal(dom.symbolsModal);
+  });
+
+  dom.batchApplyClose?.addEventListener("click", () => closeModal(dom.batchApplyModal));
+  dom.batchApplyRun?.addEventListener("click", () => { void applyBatchWorkspacePlan(); });
+  dom.batchApplyPreviewBtn?.addEventListener("click", () => { void previewBatchWorkspacePlan(); });
+  dom.batchApplyTemplate?.addEventListener("click", fillBatchApplyTemplate);
+  dom.batchApplyInput?.addEventListener("input", clearBatchApplyReview);
+  dom.batchApplyModal?.addEventListener("click", (e) => {
+    if (e.target === dom.batchApplyModal) closeModal(dom.batchApplyModal);
   });
 
   // focus selector
@@ -384,39 +760,123 @@ function wireUI() {
     loadConversationList(state.conversationsIncludeArchived);
   });
 
-  // clear logs view
-  dom.clearLogsBtn?.addEventListener("click", clearLogsView);
-
-  // cancel all
-  dom.cancelAllBtn?.addEventListener("click", () => cancelAllRequests(true));
+  dom.turnsFilter?.addEventListener("input", (e) => {
+    state.turnsFilter = String(e.target.value || "");
+    localStorage.setItem("aegis_turns_filter", state.turnsFilter);
+    renderConversationTurns(state.convTurnsItems);
+  });
+  dom.turnsOpenBtn?.addEventListener("click", () => {
+    const q = String(dom.turnsFilter?.value || "").trim();
+    if (!q) return;
+    const convId = state.conversationId;
+    const id = q.replace(/^id:\s*/i, "").trim();
+    const items = Array.isArray(state.convTurnsItems) ? state.convTurnsItems : [];
+    const match = items.find((t) => String(t?.turn_id || "").startsWith(id));
+    if (match) {
+      openTurnDetail(match);
+      return;
+    }
+    if (!convId || !id) return;
+    // Fetch exact turn (works even if not in the last N turns)
+    (async () => {
+      try {
+        const url = new URL(endpoints.conversationTurnDetail(convId, id), location.origin);
+        const res = await fetchWithTimeout(url.toString(), { headers: { Accept: "application/json" } }, { timeout: 20000, retries: 0 });
+        const data = await safeJson(res);
+        if (!res.ok) return;
+        const turn = data?.turn && typeof data.turn === "object" ? data.turn : null;
+        if (turn) openTurnDetail(turn);
+      } catch (err) {
+        if (err?.name === "AbortError") return;
+        console.error(err);
+      }
+    })();
+  });
 
   // API key
   dom.apiKeyBtn?.addEventListener("click", () => {
-    const msgMain = state.lang === LANG.ES ? "X-API-Key (vacío para borrar):" : "X-API-Key (empty to clear):";
-    const next = prompt(msgMain, state.apiKey || "");
-    if (next == null) return;
-    state.apiKey = cleanKey(next || "");
+    if (!dom.apiKeyModal) {
+      // Fallback for stale HTML (older UI without the modal). Keep a working path.
+      const es = state.lang === LANG.ES;
+      appendBubble(
+        es
+          ? "UI desactualizada: no se encontró el modal de API keys. Haz hard refresh (Ctrl+Shift+R) y reinicia el servidor si hace falta. Fallback: usando prompts."
+          : "Stale UI: API key modal not found. Hard refresh (Ctrl+Shift+R) and restart the server if needed. Fallback: using prompts.",
+        "error"
+      );
+      const msgMain = es ? "X-API-Key (vacío para borrar):" : "X-API-Key (empty to clear):";
+      const next = prompt(msgMain, state.apiKey || "");
+      if (next == null) return;
+      state.apiKey = cleanKey(next || "");
+      if (state.apiKey) localStorage.setItem("aegis_api_key", state.apiKey);
+      else localStorage.removeItem("aegis_api_key");
+
+      const msgFiles = es
+        ? "X-API-Key para Files (Enter para usar la misma):"
+        : "X-API-Key for Files (Enter to reuse main):";
+      const nextFiles = prompt(msgFiles, state.filesApiKey || state.apiKey || "");
+      if (nextFiles !== null) {
+        const trimmed = cleanKey(nextFiles || "");
+        state.filesApiKey = trimmed || state.apiKey || "";
+        if (state.filesApiKey) localStorage.setItem("aegis_files_api_key", state.filesApiKey);
+        else localStorage.removeItem("aegis_files_api_key");
+      }
+      clearAuthRetryCooldown();
+      clearTokens();
+      refreshAuthedPanels().catch(() => {});
+      applyAuthState();
+      appendBubble(es ? "API key actualizada." : "API key updated.", "bot");
+      return;
+    }
+    // Fill modal inputs from current state (do not show in cleartext unless user types).
+    if (dom.apiKeyMainInput) dom.apiKeyMainInput.value = state.apiKey || "";
+    if (dom.apiKeyFilesInput) dom.apiKeyFilesInput.value = state.filesApiKey && state.filesApiKey !== state.apiKey ? state.filesApiKey : "";
+    if (dom.apiKeyUseSame) dom.apiKeyUseSame.checked = true;
+    openModal(dom.apiKeyModal);
+  });
+  dom.apiKeyClose?.addEventListener("click", () => closeModal(dom.apiKeyModal));
+  dom.apiKeyModal?.addEventListener("click", (e) => {
+    if (e.target === dom.apiKeyModal) closeModal(dom.apiKeyModal);
+  });
+  dom.apiKeyUseSame?.addEventListener("change", () => {
+    if (!dom.apiKeyUseSame?.checked) return;
+    if (dom.apiKeyFilesInput) dom.apiKeyFilesInput.value = "";
+  });
+  dom.apiKeySave?.addEventListener("click", async () => {
+    const main = cleanKey(dom.apiKeyMainInput?.value || "");
+    const useSame = !!dom.apiKeyUseSame?.checked;
+    const files = useSame ? "" : cleanKey(dom.apiKeyFilesInput?.value || "");
+
+    state.apiKey = main;
     if (state.apiKey) localStorage.setItem("aegis_api_key", state.apiKey);
     else localStorage.removeItem("aegis_api_key");
 
-    const msgFiles = state.lang === LANG.ES
-      ? "X-API-Key para Files/Tools (Enter para usar la misma):"
-      : "X-API-Key for Files/Tools (Enter to reuse main):";
-    const nextFiles = prompt(msgFiles, state.filesApiKey || state.apiKey || "");
-    if (nextFiles === null) {
-      // keep previous if user cancels second prompt
-    } else {
-      const trimmed = cleanKey(nextFiles || "");
-      state.filesApiKey = trimmed || state.apiKey || "";
-      if (state.filesApiKey) localStorage.setItem("aegis_files_api_key", state.filesApiKey);
-      else localStorage.removeItem("aegis_files_api_key");
-    }
+    state.filesApiKey = files || state.apiKey || "";
+    if (state.filesApiKey) localStorage.setItem("aegis_files_api_key", state.filesApiKey);
+    else localStorage.removeItem("aegis_files_api_key");
 
-    // Reset/obtain tokens after key update
+    clearAuthRetryCooldown();
     clearTokens();
-    ensureAccessToken().catch(() => {});
-
+    await refreshAuthedPanels().catch(() => {});
+    applyAuthState();
+    closeModal(dom.apiKeyModal);
     appendBubble(state.lang === LANG.ES ? "API key actualizada." : "API key updated.", "bot");
+  });
+  dom.apiKeyClear?.addEventListener("click", () => {
+    state.apiKey = "";
+    state.filesApiKey = "";
+    localStorage.removeItem("aegis_api_key");
+    localStorage.removeItem("aegis_files_api_key");
+    clearAuthRetryCooldown();
+    clearTokens();
+    stopConversationEventsPolling();
+    applyAuthState();
+    closeModal(dom.apiKeyModal);
+    appendBubble(state.lang === LANG.ES ? "Keys borradas." : "Keys cleared.", "bot");
+  });
+  dom.globalSnapshotBtn?.addEventListener("click", () => {
+    // Manual snapshot should not force-open crypto panel.
+    loadSnapshot({ renderInSources: !!state.chartVisible, forceToast: true, source: "manual" });
   });
   dom.showCryptoPanelBtn?.addEventListener("click", showCryptoPanelFromToolbar);
   dom.showFilesPanelBtn?.addEventListener("click", showFilesPanelFromToolbar);
@@ -430,16 +890,66 @@ function wireUI() {
   });
 
   // files tree
-  dom.treeBtn?.addEventListener("click", () => {
-    activateTab("files");
+  dom.projectSelect?.addEventListener("change", async () => {
+    const selected = String(dom.projectSelect.value || "").trim();
+    if (selected === "app" || selected === "ui") {
+      clearManualProjectRoot({ syncSelect: true });
+      appendBubble(
+        state.lang === LANG.ES
+          ? "Ese selector legacy ya no registra roots relativos. Usa el selector de proyecto activo o un root absoluto manual."
+          : "That legacy selector no longer registers relative roots. Use active project selector or an absolute manual root.",
+        "error"
+      );
+      loadProjectTree();
+      return;
+    }
+    const prev = String(state.activeProjectId || "").trim();
+    setManualProjectRoot(dom.projectSelect.value || "");
+    try {
+      // Make manual roots converge to a canonical project_id.
+      const data = await ensureCurrentRootRegistered();
+      const nextId = String(data?.project_id || state.activeProjectId || "").trim();
+      if (nextId && nextId !== prev) {
+        appendBubble(
+          state.lang === LANG.ES
+            ? `Root registrado → proyecto activo ${nextId}.`
+            : `Root registered → active project ${nextId}.`,
+          "bot"
+        );
+      }
+    } catch (err) {
+      console.warn("root-register-failed", err);
+      if (String(err?.message || "").includes("manual-root-must-be-absolute")) {
+        appendBubble(
+          state.lang === LANG.ES
+            ? "Root manual inválido. Usa una ruta absoluta o selecciona un proyecto activo."
+            : "Invalid manual root. Use an absolute path or select an active project.",
+          "error"
+        );
+      }
+    }
     loadProjectTree();
   });
-  dom.projectSelect?.addEventListener("change", () => {
-    setProjectRoot(dom.projectSelect.value || "app");
-    loadProjectTree();
+  dom.filesToChatBtn?.addEventListener("click", () => {
+    setMode(MODES.CHAT);
+    try { dom.msgInput?.focus(); } catch {}
+  });
+  dom.activeProjectSelect?.addEventListener("change", () => {
+    setActiveProject(dom.activeProjectSelect.value || "");
   });
   dom.refreshTreeBtn?.addEventListener("click", loadProjectTree);
   dom.copyFileBtn?.addEventListener("click", copyFileViewer);
+  dom.newFileBtn?.addEventListener("click", startNewFileMode);
+  dom.newFolderBtn?.addEventListener("click", createFolderInWorkspace);
+  dom.movePathBtn?.addEventListener("click", moveSelectedWorkspacePath);
+  dom.batchApplyBtn?.addEventListener("click", openBatchApplyModal);
+  dom.renameFileBtn?.addEventListener("click", renameFileViewer);
+  dom.editFileBtn?.addEventListener("click", enterFileEditMode);
+  dom.diffFileBtn?.addEventListener("click", toggleFileDiffMode);
+  dom.deleteFileBtn?.addEventListener("click", deleteFileViewer);
+  dom.saveFileBtn?.addEventListener("click", saveFileViewer);
+  dom.cancelFileEditBtn?.addEventListener("click", cancelFileEditMode);
+  window.addEventListener("beforeunload", handleBeforeUnload);
 
   // upload zip / clone / delete
   dom.projectUploadBtn?.addEventListener("click", () => dom.projectUploadInput?.click());
@@ -475,6 +985,33 @@ function wireUI() {
 
   // crypto + chart
   dom.chartRefresh?.addEventListener("click", () => loadChartData(dom.chartSymbol?.value));
+  dom.chartSymbol?.addEventListener("change", () => {
+    loadSymbolsList(dom.chartSymbol?.value || "");
+    loadChartData(dom.chartSymbol?.value);
+    if (state.chartVisible) {
+      loadPredictionComparison(dom.chartSymbol?.value, { force: true });
+    }
+  });
+  dom.chartSymbol?.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    loadChartData(dom.chartSymbol?.value);
+    if (state.chartVisible) {
+      loadPredictionComparison(dom.chartSymbol?.value, { force: true });
+    }
+  });
+  dom.chartSymbol?.addEventListener("input", () => {
+    loadSymbolsList(dom.chartSymbol?.value || "");
+  });
+  dom.chartRangeButtons?.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const minutes = Number(btn.getAttribute("data-chart-range") || "0");
+      setChartRangePreset(minutes, { rerender: true });
+    });
+  });
+  dom.chartResetZoom?.addEventListener("click", () => resetChartZoom({ rerender: true }));
+  dom.priceChart?.addEventListener("wheel", handleChartWheel, { passive: false });
+  dom.priceChart?.addEventListener("dblclick", () => resetChartZoom({ rerender: true }));
   dom.chartExpandBtn?.addEventListener("click", (e) => {
     if (e.shiftKey) {
       toggleChartExpand();
@@ -494,10 +1031,10 @@ function wireUI() {
   dom.cryptoModelSelect?.addEventListener("change", () => {
     state.selectedCryptoModel = dom.cryptoModelSelect.value || "ensemble";
     localStorage.setItem("aegis_crypto_model", state.selectedCryptoModel);
-    loadCryptoPrediction();
+    loadCryptoPrediction({ force: true });
   });
-  dom.cryptoHorizon?.addEventListener("change", () => loadCryptoPrediction());
-  dom.chatTradeQty?.addEventListener("change", () => loadCryptoPrediction());
+  dom.cryptoHorizon?.addEventListener("change", () => loadCryptoPrediction({ force: true }));
+  dom.chatTradeQty?.addEventListener("change", () => loadCryptoPrediction({ force: true }));
 
   dom.copyConvId?.addEventListener("click", async () => {
     const id = state.conversationId || "";
@@ -524,16 +1061,11 @@ function wireUI() {
   // sidebar tools
   dom.predsBtn?.addEventListener("click", () => loadRecentPredictions());
   dom.statsBtn?.addEventListener("click", () => loadStats());
-  dom.snapshotBtn?.addEventListener("click", () => {
-    if (state.autoSnapshotEnabled) {
-      disableAutoSnapshot();
-    } else {
-      enableAutoSnapshot();
-      loadSnapshot();
-    }
-  });
   dom.clearCryptoBtn?.addEventListener("click", () => clearCryptoHistory());
   dom.pnlBtn?.addEventListener("click", () => loadPnl());
+  dom.debugTraceToggle?.addEventListener("click", () => {
+    setDebugTraceEnabled(!state.debugTraceEnabled);
+  });
 
   dom.savePredToggle?.addEventListener("change", () => {
     state.savePredictions = !!dom.savePredToggle.checked;
@@ -553,9 +1085,19 @@ function wireUI() {
     else stopLogsPolling();
   });
 
-  // admin refresh
-  dom.adminRefresh?.addEventListener("click", adminRefreshCrypto);
   dom.convEventsRefresh?.addEventListener("click", () => loadConversationEvents({ force: true }));
+
+  dom.turnDetailClose?.addEventListener("click", () => closeModal(dom.turnDetailModal));
+  dom.turnDetailCopy?.addEventListener("click", async () => {
+    const raw = String(dom.turnDetailBody?.textContent || "").trim();
+    if (!raw) return;
+    try {
+      await navigator.clipboard.writeText(raw);
+      appendBubble(state.lang === LANG.ES ? "Turn copiado." : "Turn copied.", "bot");
+    } catch {
+      appendBubble(raw, "bot");
+    }
+  });
 }
 
 function updateAllUI() {
@@ -566,34 +1108,98 @@ function updateAllUI() {
     dom.langEs.setAttribute("aria-pressed", String(state.lang === LANG.ES));
     dom.langEn.setAttribute("aria-pressed", String(state.lang === LANG.EN));
   }
-  // placeholder
-  if (dom.msgInput) dom.msgInput.placeholder = state.lang === LANG.ES ? "Escribe tu mensaje..." : "Type your message...";
+  // placeholder / composer state
+  updateComposeUI();
+  if (dom.turnsFilter) {
+    dom.turnsFilter.placeholder = state.lang === LANG.ES
+      ? "filtrar: id:, tool:, texto..."
+      : "filter: id:, tool:, text...";
+    if (dom.turnsFilter.value !== String(state.turnsFilter || "")) {
+      dom.turnsFilter.value = String(state.turnsFilter || "");
+    }
+  }
+  if (dom.turnsOpenBtn) {
+    dom.turnsOpenBtn.title = state.lang === LANG.ES ? "Abrir por ID" : "Open by ID";
+  }
+  renderTurnsQuickFilters();
 
   // mode UI
   updateModeIndicator();
   updateModeButtons();
-  updateCryptoInlineVisibility();
-  updateImageVisibility();
+  updateImageQuickBar();
   updateTogglesVisibility();
-  updateLatencyLabel();
+  updateChatAttachmentBar();
   updateStatusCenter();
   updateSnapshotToggleUI();
   localizeUI();
+  updateChartRangeButtons();
   applyPanelVisibility();
 
   // init sources
   clearSources();
 
-  // preload crypto models + chart
-  loadCryptoModels();
-  loadChartData(state.chartSymbol);
+  // Lazy-load crypto data only when the crypto panel is visible.
+  if (state.chartVisible) {
+    loadCryptoModels();
+    loadChartData(state.chartSymbol);
+  } else {
+    updateChartTitle(state.chartSymbol);
+  }
   updatePredictionTooltipText();
+}
+
+function renderTurnsQuickFilters() {
+  if (!dom.turnsQuickFilters) return;
+  const es = state.lang === LANG.ES;
+  dom.turnsQuickFilters.innerHTML = "";
+  const presets = [
+    { q: "", label: es ? "Todos" : "All", cls: "" },
+    { q: "status:failed", label: es ? "Fallidos" : "Failed", cls: "warn" },
+    { q: "tool:llm", label: "tool:llm", cls: "" },
+    { q: "tool:web_search", label: "tool:web_search", cls: "" },
+    { q: "tool:project_manifest", label: "tool:project_manifest", cls: "" },
+  ];
+  presets.forEach((p) => {
+    const chip = el("span", { class: `mini-chip ${p.cls || ""}`.trim(), text: p.label });
+    chip.addEventListener("click", () => {
+      state.turnsFilter = p.q;
+      localStorage.setItem("aegis_turns_filter", state.turnsFilter);
+      if (dom.turnsFilter) dom.turnsFilter.value = state.turnsFilter;
+      renderConversationTurns(state.convTurnsItems);
+    });
+    dom.turnsQuickFilters.appendChild(chip);
+  });
 }
 
 function updateStatusCenter() {
   if (!dom.statusList) return;
   const es = state.lang === LANG.ES;
   const items = [];
+
+  // Runtime capabilities (from latest /system/readyz or snapshot)
+  try {
+    const readyz = state.lastReadyz || state.lastSnapshot?.readyz || {};
+    const snap = state.lastSnapshot?.snapshot || {};
+    const status = String(readyz.status || snap.status || "").trim() || "unknown";
+    const webStatus = String((readyz.web_search && readyz.web_search.status) || "").trim();
+    const webProviders = Number((readyz.web_search && readyz.web_search.provider_count) || 0) || 0;
+    const imgStatus = String((readyz.image && readyz.image.status) || "").trim();
+    const llmStatus = String((readyz.llm && readyz.llm.status) || "").trim() || (readyz.checks?.llm ? "ready" : "");
+
+    const noteParts = [];
+    noteParts.push(`readyz:${status}`);
+    if (webStatus) noteParts.push(`web:${webStatus}${webProviders ? `(${webProviders})` : ""}`);
+    if (imgStatus) noteParts.push(`image:${imgStatus}`);
+    if (llmStatus) noteParts.push(`llm:${llmStatus}`);
+    const note = noteParts.join(" ");
+
+    const level = status === "ready" ? "on" : (status === "degraded" || status === "fallback-only" ? "warn" : "off");
+    items.push({
+      label: es ? "Runtime" : "Runtime",
+      note,
+      status: level,
+    });
+  } catch {}
 
   items.push({
     label: es ? "Solicitudes" : "Requests",
@@ -602,30 +1208,45 @@ function updateStatusCenter() {
     progress: state.pending ? "indeterminate" : null,
   });
 
+  items.push({
+    label: es ? "Debug trazas" : "Debug traces",
+    note: state.debugTraceEnabled
+      ? (es ? "ON (muestra decisiones/rutas internas)" : "ON (shows internal routing/decisions)")
+      : (es ? "OFF (salida limpia para usuario)" : "OFF (clean user-facing output)"),
+    status: state.debugTraceEnabled ? "warn" : "off",
+  });
+
   const authErr = state.authDiag?.lastError || null;
   const hasCreds = !!(state.apiKey || state.filesApiKey || state.accessToken);
+  const retryMsLeft = Math.max(0, Number(state.authRetryBlockedUntil || 0) - Date.now());
+  const retryNote = retryMsLeft > 0
+    ? ` · ${es ? "reintento" : "retry"} ${Math.ceil(retryMsLeft / 1000)}s`
+    : "";
   items.push({
     label: "Auth",
     note: authErr
-      ? `${authErr.scope || "main"} ${authErr.status || 401} (${authErr.hasKey ? "key" : "no-key"}|${authErr.hasBearer ? "bearer" : "no-bearer"})${authErr.detail ? ` · ${authErr.detail}` : ""}`
+      ? `${authErr.scope || "main"} ${authErr.status || 401} (${authErr.hasKey ? "key" : "no-key"}|${authErr.hasBearer ? "bearer" : "no-bearer"})${authErr.detail ? ` · ${authErr.detail}` : ""}${retryNote}`
       : hasCreds
-        ? (es ? "Credenciales cargadas" : "Credentials loaded")
+        ? `${es ? "Credenciales cargadas" : "Credentials loaded"}${retryNote}`
         : (es ? "Sin credenciales" : "No credentials"),
-    status: authErr ? "warn" : (hasCreds ? "on" : "off"),
+    status: (authErr || retryMsLeft > 0) ? "warn" : (hasCreds ? "on" : "off"),
   });
 
-  items.push({
-    label: es ? "Gráfico live" : "Live chart",
-    note: state.liveTimer ? (es ? "Actualizando cada 15s" : "Refreshing every 15s") : (es ? "Pausado" : "Paused"),
-    status: state.liveTimer ? "on" : "off",
-    progress: state.liveTimer ? "indeterminate" : null,
-  });
+  const cryptoStatusVisible = !!(state.chartVisible || state.mode === MODES.CRYPTO || state.liveTimer || state.alertsTimer);
+  if (cryptoStatusVisible) {
+    items.push({
+      label: es ? "Gráfico live" : "Live chart",
+      note: state.liveTimer ? (es ? "Actualizando cada 60s" : "Refreshing every 60s") : (es ? "Pausado" : "Paused"),
+      status: state.liveTimer ? "on" : "off",
+      progress: state.liveTimer ? "indeterminate" : null,
+    });
 
-  items.push({
-    label: es ? "Alertas" : "Alerts",
-    note: state.alertsTimer ? (es ? "Monitoreando outcomes" : "Monitoring outcomes") : (es ? "Off" : "Off"),
-    status: state.alertsTimer ? "on" : "off",
-  });
+    items.push({
+      label: es ? "Alertas" : "Alerts",
+      note: state.alertsTimer ? (es ? "Monitoreando outcomes" : "Monitoring outcomes") : (es ? "Off" : "Off"),
+      status: state.alertsTimer ? "on" : "off",
+    });
+  }
 
   items.push({
     label: es ? "Logs" : "Logs",
@@ -647,12 +1268,14 @@ function updateStatusCenter() {
     status: state.convEventsTimer ? "on" : "off",
   });
 
-  items.push({
-    label: es ? "Cripto refresh" : "Crypto refresh",
-    note: state.logIsAdmin ? (es ? "Log activo (usa /admin/refresh-log)" : "Log active (via /admin/refresh-log)") : (es ? "Sin log" : "No log"),
-    status: state.logIsAdmin ? "warn" : "off",
-    progress: state.logIsAdmin ? "indeterminate" : null,
-  });
+  if (state.logIsAdmin) {
+    items.push({
+      label: es ? "Cripto refresh" : "Crypto refresh",
+      note: state.logIsAdmin ? (es ? "Log activo (usa /admin/refresh-log)" : "Log active (via /admin/refresh-log)") : (es ? "Sin log" : "No log"),
+      status: state.logIsAdmin ? "warn" : "off",
+      progress: state.logIsAdmin ? "indeterminate" : null,
+    });
+  }
 
   dom.statusList.innerHTML = "";
   items.forEach((it) => {
@@ -689,44 +1312,260 @@ function setLang(lang) {
   state.lang = lang;
   localStorage.setItem("aegis_lang", state.lang);
   updateAllUI();
+  setDebugTraceEnabled(state.debugTraceEnabled, { persist: false, silent: true });
   appendBubble(state.lang === LANG.ES ? "Idioma: ES." : "Language: EN.", "bot");
   localizeHelp();
 }
 
+function isImageQuestionPrompt(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return false;
+  if (/[?？]\s*$/.test(raw)) return true;
+  return /^(?:what|how|why|can you|could you|describe|explain|summarize|analyze|que|qué|como|cómo|por qué|puedes|describe|explica|resume|analiza)\b/i.test(raw);
+}
+
+function getComposePlaceholder() {
+  const es = state.lang === LANG.ES;
+  if (state.mode === MODES.URL) {
+    return es ? "Pega una URL o usa url:https://..." : "Paste a URL or use url:https://...";
+  }
+  if (state.mode === MODES.CRYPTO) {
+    return es ? "BTCUSDT H=15m o usa el panel Cripto..." : "BTCUSDT H=15m or use the Crypto panel...";
+  }
+  if (state.mode === MODES.IMAGE) {
+    return es
+      ? "Dibuja un dragón, /img ciudad neón, o sube una imagen de referencia..."
+      : "Draw a dragon, /img neon city, or upload a reference image...";
+  }
+  return es ? "Escribe tu mensaje..." : "Type your message...";
+}
+
+function getSendButtonLabel() {
+  const es = state.lang === LANG.ES;
+  if (state.mode === MODES.URL) return es ? "Leer" : "Read";
+  if (state.mode === MODES.CRYPTO) return es ? "Predecir" : "Predict";
+  if (state.mode === MODES.IMAGE) return es ? "Dibujar" : "Draw";
+  return es ? "Enviar" : "Send";
+}
+
+function getPendingBubbleLabel(mode = state.mode, text = "") {
+  const es = state.lang === LANG.ES;
+  if (mode === MODES.WEB) return es ? "Buscando en web…" : "Searching web…";
+  if (mode === MODES.URL) return es ? "Leyendo URL…" : "Reading URL…";
+  if (mode === MODES.CRYPTO) return es ? "Calculando señal…" : "Calculating signal…";
+  if (mode === MODES.IMAGE) {
+    return isImageQuestionPrompt(text)
+      ? (es ? "Analizando imagen…" : "Analyzing image…")
+      : (es ? "Generando imagen…" : "Generating image…");
+  }
+  return es ? "Escribiendo…" : "Typing…";
+}
+
+function getWorkPendingLabel(kind = "agent") {
+  const es = state.lang === LANG.ES;
+  if (kind === "action") return es ? "Ejecutando acción…" : "Running action…";
+  if (kind === "attachment") return es ? "Analizando adjunto…" : "Analyzing attachment…";
+  return es ? "Ejecutando agente…" : "Running agent…";
+}
+
+function updateComposeUI() {
+  const es = state.lang === LANG.ES;
+  if (dom.msgInput) dom.msgInput.placeholder = getComposePlaceholder();
+  if (dom.sendBtn) {
+    dom.sendBtn.textContent = getSendButtonLabel();
+    dom.sendBtn.title =
+      state.mode === MODES.IMAGE
+        ? (es ? "Generar imagen desde el chat" : "Generate image from chat")
+        : state.mode === MODES.CRYPTO
+          ? (es ? "Ejecutar predicción cripto" : "Run crypto prediction")
+          : state.mode === MODES.URL
+            ? (es ? "Leer URL" : "Read URL")
+            : (es ? "Enviar mensaje" : "Send message");
+  }
+  if (dom.stopBtn) {
+    const activeWork = !!state.pending || state.activeControllers.size > 0;
+    dom.stopBtn.textContent = es ? "Detener" : "Stop";
+    dom.stopBtn.hidden = !activeWork;
+    dom.stopBtn.disabled = !activeWork;
+  }
+}
+
 function setMode(mode) {
+  if (state.chatOnlyExperience && mode !== MODES.CHAT) {
+    mode = MODES.CHAT;
+  }
   state.mode = mode;
+  document.body.dataset.mode = state.mode;
   updateModeIndicator();
   updateModeButtons();
-  updateCryptoInlineVisibility();
-  updateImageVisibility();
+  updateImageQuickBar();
+  updateComposeUI();
   updateTogglesVisibility();
+  applyPanelVisibility();
+  notifyStatus(
+    state.lang === LANG.ES
+      ? `Modo: ${
+          state.mode === MODES.WEB ? "Web" :
+          state.mode === MODES.URL ? "URL" :
+          state.mode === MODES.CRYPTO ? "Cripto" :
+          state.mode === MODES.IMAGE ? "Imagen" : "Chat"
+        }`
+      : `Mode: ${
+          state.mode === MODES.WEB ? "Web" :
+          state.mode === MODES.URL ? "URL" :
+          state.mode === MODES.CRYPTO ? "Crypto" :
+          state.mode === MODES.IMAGE ? "Image" : "Chat"
+        }`,
+    { kind: "info", key: `mode:${state.mode}`, dedupeMs: 1500, ttlMs: 1800 }
+  );
 
   // when entering crypto, refresh chart/prediction
-  if (state.mode === MODES.CRYPTO) {
+  if (!state.chatOnlyExperience && state.mode === MODES.CRYPTO) {
+    if (!state.chartVisible) {
+      state.chartVisible = true;
+      localStorage.setItem("aegis_chart_visible", "1");
+      applyPanelVisibility();
+    }
     loadCryptoModels();
-    loadCryptoPrediction();
+    loadCryptoPrediction({ force: true });
     loadPredictionComparison(state.chartSymbol, { force: true });
+    if (dom.chartLive?.checked && !state.liveTimer) {
+      startLiveChart();
+    }
   }
 
-  // when entering image, load recent gallery
-  if (state.mode === MODES.IMAGE) {
-    loadRecentImages();
+  if (!state.chatOnlyExperience && state.mode === MODES.IMAGE) {
+    dom.msgInput?.focus();
   }
 }
 
 function updateModeIndicator() {
   if (!dom.modeIndicator) return;
-  const label =
-    state.mode === MODES.WEB ? (state.lang === LANG.ES ? "Modo: Web" : "Mode: Web") :
-    state.mode === MODES.URL ? (state.lang === LANG.ES ? "Modo: URL" : "Mode: URL") :
-    state.mode === MODES.CRYPTO ? (state.lang === LANG.ES ? "Modo: Cripto" : "Mode: Crypto") :
-    state.mode === MODES.IMAGE ? (state.lang === LANG.ES ? "Modo: Imagen" : "Mode: Image") :
-    (state.lang === LANG.ES ? "Modo: Chat" : "Mode: Chat");
-  dom.modeIndicator.textContent = label;
+  const label = state.chatOnlyExperience
+    ? (state.lang === LANG.ES ? "Modo: Chat (auto web/local)" : "Mode: Chat (auto web/local)")
+    : (
+      state.mode === MODES.WEB ? (state.lang === LANG.ES ? "Modo: Web" : "Mode: Web") :
+      state.mode === MODES.URL ? (state.lang === LANG.ES ? "Modo: URL" : "Mode: URL") :
+      state.mode === MODES.CRYPTO ? (state.lang === LANG.ES ? "Modo: Cripto" : "Mode: Crypto") :
+      state.mode === MODES.IMAGE ? (state.lang === LANG.ES ? "Modo: Imagen" : "Mode: Image") :
+      (state.lang === LANG.ES ? "Modo: Chat" : "Mode: Chat")
+    );
+  const showHint = state.chatOnlyExperience ? true : [MODES.CHAT, MODES.WEB, MODES.URL].includes(state.mode);
+  const hint = showHint ? formatModeRuntimeHint(state.lastChatContext) : "";
+  dom.modeIndicator.textContent = hint ? `${label} • ${hint}` : label;
+  updateRuntimeStatusBadge();
+  updateWebStatusBadge();
+}
+
+function updateRuntimeStatusBadge() {
+  if (!dom.runtimeStatusBadge) return;
+  const es = state.lang === LANG.ES;
+
+  const readyz = state.lastReadyz && typeof state.lastReadyz === "object"
+    ? state.lastReadyz
+    : (state.lastSnapshot?.readyz && typeof state.lastSnapshot.readyz === "object" ? state.lastSnapshot.readyz : {});
+
+  const status = String(readyz?.status || "").trim() || "unknown";
+  const degraded = Array.isArray(readyz?.degraded_reasons) ? readyz.degraded_reasons : [];
+  const web = readyz?.web_search && typeof readyz.web_search === "object" ? readyz.web_search : {};
+  const img = readyz?.image && typeof readyz.image === "object" ? readyz.image : {};
+  const llm = readyz?.llm && typeof readyz.llm === "object" ? readyz.llm : {};
+
+  const cls =
+    status === "ready" ? "success"
+    : (status === "degraded" || status === "fallback-only") ? "warn"
+    : status === "error" ? "danger"
+    : "muted";
+
+  dom.runtimeStatusBadge.className = `pill ${cls} header-web-badge`.trim();
+  dom.runtimeStatusBadge.textContent = `RUN: ${status}`;
+
+  const parts = [];
+  const webStatus = String(web?.status || "").trim();
+  const imgStatus = String(img?.status || "").trim();
+  const llmStatus = String(llm?.status || "").trim();
+  if (webStatus) parts.push(`web:${webStatus}`);
+  if (imgStatus) parts.push(`image:${imgStatus}`);
+  if (llmStatus) parts.push(`llm:${llmStatus}`);
+  if (degraded.length) parts.push(`${es ? "degraded" : "degraded"}:${degraded.slice(0, 4).join(",")}`);
+
+  dom.runtimeStatusBadge.title = parts.length
+    ? (es ? `Estado runtime (${parts.join(" ")})` : `Runtime status (${parts.join(" ")})`)
+    : (es ? "Estado runtime" : "Runtime status");
+}
+
+function updateWebStatusBadge() {
+  if (!dom.webStatusBadge) return;
+  const es = state.lang === LANG.ES;
+
+  const ctx = state.lastChatContext && typeof state.lastChatContext === "object" ? state.lastChatContext : {};
+  const readyz = state.lastReadyz && typeof state.lastReadyz === "object" ? state.lastReadyz : {};
+  const readyzWeb = readyz.web_search && typeof readyz.web_search === "object" ? readyz.web_search : {};
+
+  let label = es ? "WEB: —" : "WEB: —";
+  let title = es
+    ? "Estado web (auto). Usa `web:` para forzar búsqueda."
+    : "Web status (auto). Use `web:` to force search.";
+  let cls = "muted";
+
+  if (ctx.using_live_web) {
+    label = es ? "WEB: vivo" : "WEB: live";
+    title = es
+      ? "Última respuesta usó web en vivo (auto o forzada con `web:`)."
+      : "Last answer used live web (auto or forced with `web:`).";
+    cls = "success";
+  } else if (ctx.using_cached_web || ctx.using_stale_cache) {
+    label = es ? "WEB: caché" : "WEB: cache";
+    title = es ? "Última respuesta usó caché web." : "Last answer used web cache.";
+    cls = "warn";
+  } else {
+    const status = String(ctx.web_status || readyzWeb.status || "").trim();
+    if (status === "ready") {
+      label = es ? "WEB: listo" : "WEB: ready";
+      cls = "success";
+    } else if (status === "cooldown") {
+      label = es ? "WEB: cooldown" : "WEB: cooldown";
+      cls = "warn";
+      title = es ? "Proveedor en cooldown; usando local/caché." : "Provider in cooldown; using local/cache.";
+    } else if (status === "unavailable" || status === "error") {
+      label = es ? "WEB: no disp." : "WEB: unavailable";
+      cls = "muted";
+      title = es
+        ? "Web no disponible en este momento; respondiendo en local. El contexto web sigue en automático."
+        : "Web is unavailable right now; answering locally. Web context remains automatic.";
+    } else if (status === "not-used") {
+      label = es ? "WEB: auto/local" : "WEB: auto/local";
+      cls = "muted";
+      title = es
+        ? "Esta respuesta se resolvió en local; la web sigue en modo automático."
+        : "This answer was resolved locally; web remains in automatic mode.";
+    } else if (status) {
+      label = `WEB: ${status}`;
+      cls = "muted";
+    } else {
+      label = es ? "WEB: auto" : "WEB: auto";
+      cls = "muted";
+      title = es
+        ? "Web en modo automático; esta respuesta no necesitó web."
+        : "Web is in automatic mode; this response did not need web.";
+    }
+  }
+
+  dom.webStatusBadge.className = `pill ${cls} header-web-badge`.trim();
+  dom.webStatusBadge.textContent = label;
+  dom.webStatusBadge.title = title;
 }
 
 function updateModeButtons() {
+  if (state.chatOnlyExperience) {
+    if (dom.chatBtn) {
+      dom.chatBtn.setAttribute("aria-pressed", "true");
+      dom.chatBtn.style.opacity = "1";
+    }
+    return;
+  }
   const map = [
+    [dom.chatBtn, state.mode === MODES.CHAT],
     [dom.webBtn, state.mode === MODES.WEB],
     [dom.urlBtn, state.mode === MODES.URL],
     [dom.cryptoBtn, state.mode === MODES.CRYPTO],
@@ -739,22 +1578,15 @@ function updateModeButtons() {
   });
 }
 
-function updateCryptoInlineVisibility() {
-  if (!dom.cryptoInline) return;
-  const show = state.mode === MODES.CRYPTO;
-  dom.cryptoInline.style.display = show ? "flex" : "none";
-  dom.cryptoInline.setAttribute("aria-hidden", String(!show));
-}
-
-function updateImageVisibility() {
-  const section = document.getElementById("imagePanel");
-  if (!section) return;
-  const show = state.mode === MODES.IMAGE;
-  section.style.display = show ? "block" : "none";
-  section.setAttribute("aria-hidden", String(!show));
-}
-
 function updateTogglesVisibility() {
+  if (state.chatOnlyExperience) {
+    if (dom.savePredToggle?.parentElement) dom.savePredToggle.parentElement.style.display = "none";
+    if (dom.alertsToggle?.parentElement) dom.alertsToggle.parentElement.style.display = "none";
+    if (dom.logsLiveToggle?.parentElement) dom.logsLiveToggle.parentElement.style.display = "none";
+    stopLogsPolling();
+    stopAlertsPolling();
+    return;
+  }
   // show save/alerts/logs only in crypto mode
   const show = state.mode === MODES.CRYPTO;
   if (dom.savePredToggle?.parentElement) dom.savePredToggle.parentElement.style.display = show ? "inline-flex" : "none";
@@ -797,6 +1629,11 @@ function applyChatSideVisible() {
     dom.chatSideShow.textContent = es ? "Estado / Sesión" : "Status / Session";
     dom.chatSideShow.setAttribute("aria-label", es ? "Mostrar panel Estado/Sesión" : "Show Status/Session panel");
   }
+  if (!visible) {
+    stopConversationEventsPolling();
+  } else if (state.conversationId && hasAuthForScope("main") && state.debugTraceEnabled) {
+    startConversationEventsPolling();
+  }
 }
 
 function toggleLayoutCollapse() {
@@ -819,8 +1656,173 @@ function applyLayoutCollapsed() {
   }
 }
 
+function setDebugTraceEnabled(enabled, { persist = true, silent = false } = {}) {
+  state.debugTraceEnabled = !!enabled;
+  if (persist) {
+    localStorage.setItem("aegis_debug_trace", state.debugTraceEnabled ? "1" : "0");
+  }
+  const es = state.lang === LANG.ES;
+  if (dom.debugTraceToggle) {
+    dom.debugTraceToggle.classList.toggle("active", state.debugTraceEnabled);
+    dom.debugTraceToggle.setAttribute("aria-pressed", state.debugTraceEnabled ? "true" : "false");
+    dom.debugTraceToggle.title = state.debugTraceEnabled
+      ? (es ? "Debug ON: muestra trazas internas (tools, rutas, evidencia)." : "Debug ON: shows internal traces (tools, routing, evidence).")
+      : (es ? "Debug OFF: salida limpia (sin trazas internas)." : "Debug OFF: clean output (no internal traces).");
+    dom.debugTraceToggle.textContent = state.debugTraceEnabled ? "DBG:ON" : "DBG:OFF";
+  }
+  if (!silent) {
+    notifyStatus(
+      state.debugTraceEnabled
+        ? (es ? "Debug ON: trazas internas visibles." : "Debug ON: internal traces visible.")
+        : (es ? "Debug OFF: salida limpia." : "Debug OFF: clean output."),
+      { kind: state.debugTraceEnabled ? "warn" : "info", key: "debug-toggle", dedupeMs: 800, ttlMs: 2200 }
+    );
+  }
+  if (dom.sessionsEventsWrap) dom.sessionsEventsWrap.style.display = state.debugTraceEnabled ? "" : "none";
+  if (dom.sessionsTurnsWrap) dom.sessionsTurnsWrap.style.display = state.debugTraceEnabled ? "" : "none";
+  if (!state.debugTraceEnabled) {
+    stopConversationEventsPolling();
+  } else if (state.chatSideVisible && state.conversationId && hasAuthForScope("main")) {
+    startConversationEventsPolling();
+  }
+  renderSourceOriginBar(state.lastChatContext);
+  updateStatusCenter();
+}
+
 function openModal(node) { node?.classList?.remove("hidden"); }
 function closeModal(node) { node?.classList?.add("hidden"); }
+
+function batchApplyTemplateObject() {
+  return {
+    operations: [
+      { op: "mkdir", path: "app/generated" },
+      { op: "write", path: "app/generated/example.py", content: "print('ok')\n", create: true },
+    ],
+  };
+}
+
+function fillBatchApplyTemplate() {
+  if (!dom.batchApplyInput) return;
+  dom.batchApplyInput.value = JSON.stringify(batchApplyTemplateObject(), null, 2);
+  clearBatchApplyReview();
+}
+
+function openBatchApplyModal() {
+  if (!state.activeProjectId) {
+    appendBubble(state.lang === LANG.ES ? "No hay proyecto activo." : "No active project.", "error");
+    return;
+  }
+  if (dom.batchApplyInput && !String(dom.batchApplyInput.value || "").trim()) {
+    fillBatchApplyTemplate();
+  }
+  openModal(dom.batchApplyModal);
+}
+
+async function prepareSymbolRenamePlan(symbol) {
+  if (!state.activeProjectId) {
+    appendBubble(state.lang === LANG.ES ? "No hay proyecto activo." : "No active project.", "error");
+    return;
+  }
+  const currentSymbol = String(symbol || "").trim();
+  if (!currentSymbol) return;
+  const es = state.lang === LANG.ES;
+  const newSymbol = String(
+    window.prompt(
+      es ? `Nuevo nombre para ${currentSymbol}` : `New name for ${currentSymbol}`,
+      `${currentSymbol}Renamed`
+    ) || ""
+  ).trim();
+  if (!newSymbol || newSymbol === currentSymbol) return;
+  try {
+    const res = await fetchWithTimeout(
+      endpoints.filesProjectRenamePlan(state.activeProjectId),
+      {
+        method: "POST",
+        headers: withJsonHeaders({}, "files"),
+        body: JSON.stringify({
+          symbol: currentSymbol,
+          new_symbol: newSymbol,
+          limit: 20,
+        }),
+      },
+      { timeout: 30000, retries: 0 }
+    );
+    const data = await safeJson(res);
+    if (!res.ok) {
+      throw new Error(data?.detail || `${res.status} ${res.statusText || ""}`.trim());
+    }
+    const operations = Array.isArray(data?.plan?.operations) ? data.plan.operations : [];
+    if (!operations.length) {
+      appendBubble(
+        es
+          ? "No encontré cambios seguros para ese rename."
+          : "No safe changes were found for that rename.",
+        "error"
+      );
+      return;
+    }
+    if (dom.batchApplyInput) {
+      dom.batchApplyInput.value = JSON.stringify({ operations }, null, 2);
+    }
+    clearBatchApplyReview();
+    openModal(dom.batchApplyModal);
+    appendBubble(
+      es
+        ? `Plan de rename listo: ${operations.length} archivos`
+        : `Rename plan ready: ${operations.length} files`,
+      "bot"
+    );
+  } catch (err) {
+    console.error(err);
+    appendBubble(
+      `${es ? "No se pudo preparar el rename." : "Could not prepare rename."} ${err?.message || ""}`.trim(),
+      "error"
+    );
+  }
+}
+
+function batchApplyPayloadText() {
+  return String(dom.batchApplyInput?.value || "").trim();
+}
+
+function clearBatchApplyReview() {
+  state.batchApplyReviewToken = "";
+  state.batchApplyReviewedPayload = "";
+  state.batchApplyPreviewText = "";
+  if (dom.batchApplyPreview) {
+    dom.batchApplyPreview.textContent = "";
+    dom.batchApplyPreview.hidden = true;
+  }
+  if (dom.batchApplyRun) {
+    dom.batchApplyRun.disabled = true;
+  }
+}
+
+function setBatchApplyPreview(data, payloadText) {
+  state.batchApplyReviewToken = String(data?.review_token || "");
+  state.batchApplyReviewedPayload = payloadText;
+  state.batchApplyPreviewText = String(data?.combined_diff || "").trim();
+  if (dom.batchApplyPreview) {
+    dom.batchApplyPreview.hidden = false;
+    dom.batchApplyPreview.textContent = state.batchApplyPreviewText || (
+      state.lang === LANG.ES ? "Sin cambios en el preview." : "No changes in preview."
+    );
+  }
+  if (dom.batchApplyRun) {
+    dom.batchApplyRun.disabled = !state.batchApplyReviewToken;
+  }
+}
+
+function batchApplyReviewIsCurrent() {
+  return !!state.batchApplyReviewToken && state.batchApplyReviewedPayload === batchApplyPayloadText();
+}
+
+function batchApplyErrorMessage(data, fallback) {
+  const detail = data?.detail;
+  if (typeof detail === "string" && detail.trim()) return detail.trim();
+  if (detail && typeof detail === "object") return String(detail.message || fallback || "").trim();
+  return String(fallback || "").trim();
+}
 
 function activateTab(tab) {
   dom.tabButtons.forEach((b) => b.classList.toggle("active", b.getAttribute("data-tab") === tab));
@@ -849,25 +1851,126 @@ function autoSizeTextarea(node) {
   node.style.height = Math.min(node.scrollHeight, 160) + "px";
 }
 
-function appendBubble(text, role = "bot", allowHtml = false) {
+function appendBubble(text, role = "bot", allowHtml = false, traceContext = null) {
   if (!dom.chat) return null;
+  let content = String(text ?? "");
+  if (role === "bot") {
+    content = sanitizeAssistantAnswerText(content);
+  }
   const node = el("div", {
     class: `bubble ${role === "user" ? "user" : role === "error" ? "error" : "bot"}`,
     attrs: { role: "article" },
   });
+  const body = el("div", { class: "bubble-body" });
 
-  if (allowHtml) node.innerHTML = sanitizeAndRenderMarkdown(text);
-  else node.textContent = text;
+  if (allowHtml) body.innerHTML = sanitizeAndRenderMarkdown(content);
+  else body.textContent = content;
+
+  node.appendChild(body);
+  if (role === "bot" && state.debugTraceEnabled && traceContext && typeof traceContext === "object") {
+    renderBubbleTrace(node, traceContext);
+  }
 
   dom.chat.appendChild(node);
   scrollBottom();
   return node;
 }
 
-function appendTyping() {
+function normalizeChatImagePath(path) {
+  const raw = String(path || "").trim();
+  if (!raw) return "";
+  const withoutHost = raw.replace(/^https?:\/\/[^/]+/i, "");
+  const prefixed = withoutHost.startsWith("/") ? withoutHost : `/${withoutHost}`;
+  return /^\/data\/images\/[A-Za-z0-9._/-]+$/.test(prefixed) ? prefixed : "";
+}
+
+function appendImageBubble({ imagePath = "", caption = "", meta = "", localFile = null } = {}) {
+  if (!dom.chat) return null;
+  const node = el("div", {
+    class: "bubble bot bubble-media",
+    attrs: { role: "article" },
+  });
+  const body = el("div", { class: "bubble-body" });
+
+  if (caption) {
+    body.appendChild(el("div", { class: "bubble-media-title", text: caption }));
+  }
+
+  const imageWrap = el("div", { class: "chat-image-card" });
+  const img = document.createElement("img");
+  img.className = "chat-image-preview";
+  img.loading = "lazy";
+  img.alt = caption || "Generated image";
+  img.referrerPolicy = "no-referrer";
+  img.decoding = "async";
+
+  let localUrl = "";
+  if (localFile instanceof File) {
+    localUrl = URL.createObjectURL(localFile);
+    img.src = localUrl;
+    img.addEventListener("load", () => {
+      try { URL.revokeObjectURL(localUrl); } catch {}
+    }, { once: true });
+    img.addEventListener("error", () => {
+      try { URL.revokeObjectURL(localUrl); } catch {}
+    }, { once: true });
+  } else {
+    const src = normalizeChatImagePath(imagePath);
+    if (!src) return null;
+    img.src = src;
+  }
+
+  imageWrap.appendChild(img);
+  body.appendChild(imageWrap);
+
+  if (meta) {
+    body.appendChild(el("div", { class: "bubble-media-meta", text: meta }));
+  }
+
+  node.appendChild(body);
+  dom.chat.appendChild(node);
+  scrollBottom();
+  return node;
+}
+
+function ensureStatusToastRail() {
+  if (dom.statusToastRail && document.body.contains(dom.statusToastRail)) return dom.statusToastRail;
+  const rail = el("div", {
+    class: "status-toast-rail",
+    attrs: { "aria-live": "polite", "aria-atomic": "false" },
+  });
+  document.body.appendChild(rail);
+  dom.statusToastRail = rail;
+  return rail;
+}
+
+function notifyStatus(message, options = {}) {
+  const text = String(message || "").trim();
+  if (!text) return;
+  const key = String(options.key || text);
+  const now = Date.now();
+  const dedupeMs = Math.max(0, Number(options.dedupeMs || 2000));
+  const last = Number(state.statusNoticeTimes.get(key) || 0);
+  if (last && now - last < dedupeMs) return;
+  state.statusNoticeTimes.set(key, now);
+
+  const ttlMs = Math.max(1200, Number(options.ttlMs || 2000));
+  const kind = String(options.kind || "info");
+  const rail = ensureStatusToastRail();
+  const node = el("div", { class: `status-toast ${kind}`, text });
+  rail.appendChild(node);
+
+  requestAnimationFrame(() => node.classList.add("show"));
+  setTimeout(() => {
+    node.classList.remove("show");
+    setTimeout(() => node.remove(), 180);
+  }, ttlMs);
+}
+
+function appendTyping(label = "") {
   removeTyping();
   const t = el("div", { class: "bubble bot typing", attrs: { id: "typing-bubble" } });
-  t.textContent = state.lang === LANG.ES ? "Escribiendo…" : "Typing…";
+  t.textContent = String(label || "").trim() || (state.lang === LANG.ES ? "Escribiendo…" : "Typing…");
   dom.chat?.appendChild(t);
   scrollBottom();
 }
@@ -903,8 +2006,8 @@ function formatLatency(ms) {
 }
 
 function applyTheme(name) {
-  const allowed = ["original", "future", "retro"];
-  state.theme = allowed.includes(name) ? name : "future";
+  const allowed = ["serious", "original", "future", "retro"];
+  state.theme = allowed.includes(name) ? name : "serious";
   document.body.dataset.theme = state.theme;
   localStorage.setItem("aegis_theme", state.theme);
   if (dom.themeBtn) {
@@ -914,7 +2017,7 @@ function applyTheme(name) {
 }
 
 function cycleTheme() {
-  const order = ["original", "future", "retro"];
+  const order = ["serious", "original", "future", "retro"];
   const idx = order.indexOf(state.theme);
   const next = order[(idx + 1) % order.length];
   applyTheme(next);
@@ -922,13 +2025,6 @@ function cycleTheme() {
      state.lang === LANG.ES ? `Tema: ${next}` : `Theme: ${next}`,
      "bot"
    );
-}
-
-function updateLatencyLabel() {
-  if (!dom.timeoutLabel) return;
-  const base = state.lang === LANG.ES ? "Tiempo de respuesta: " : "Response time: ";
-  const label = base + formatLatency(state.lastLatencyMs);
-  dom.timeoutLabel.textContent = label;
 }
 
 function localizeUI() {
@@ -950,6 +2046,7 @@ function localizeUI() {
     save_label: es ? "Guardar" : "Save",
     logs_label: es ? "Logs" : "Logs",
     tab_sources: es ? "Fuentes" : "Sources",
+    crypto_insights_title: es ? "Insights Cripto" : "Crypto Insights",
     tab_files: es ? "Archivos" : "Files",
     tab_session: es ? "Sesión" : "Session",
     sources_title: es ? "Fuentes" : "Sources",
@@ -969,6 +2066,7 @@ function localizeUI() {
     chart_mode_hint: es ? "p>63% COMPRAR • p<37% VENDER • mantener en medio" : "p>63% BUY • p<37% SELL • HOLD in between",
     file_viewer_placeholder: es ? "Selecciona un archivo en Archivos" : "Select a file in Files",
     image_generator_title: es ? "Generador de imágenes (local demo)" : "Image generator (local demo)",
+    image_flow_hint: es ? "Flujo: subir → extraer contexto → conversar/generar." : "Flow: upload → extract context → chat/generate.",
     image_prompt_label: es ? "Prompt" : "Prompt",
     image_prompt_placeholder: es ? "Describe la imagen..." : "Describe the image...",
     image_negative_label: es ? "Negativo" : "Negative",
@@ -977,42 +2075,59 @@ function localizeUI() {
     image_seed_label: es ? "Seed" : "Seed",
     image_seed_placeholder: es ? "aleatoria" : "random",
     image_generate_btn: es ? "Generar" : "Generate",
+    image_mode_inline_guide: es
+      ? "Modo imagen: escribe directamente 'dibuja un dragón' o usa /img tu prompt. Si subes una imagen, puedes conversar con su contexto o generar usando esa referencia."
+      : "Image mode: type directly 'draw a dragon' or use /img your prompt. If you upload an image, you can chat with its context or generate using that reference.",
     image_steps_help: es
       ? "Steps: cantidad de iteraciones. Más = mejor detalle, pero tarda más."
       : "Steps: denoising iterations. Higher = more detail, but slower.",
     image_seed_help: es
       ? "Seed: número base aleatorio. Mismo prompt + misma seed = resultado similar."
       : "Seed: random base number. Same prompt + same seed = similar result.",
+    active_project_none: es ? "Sin proyecto activo" : "No active project",
+    active_project_none_option: es ? "Sin proyecto activo" : "No active project",
+    project_option_manual: es ? "Root manual..." : "Manual root...",
     project_option_app: es ? "app (backend)" : "app (backend)",
     project_option_ui: es ? "ui (frontend)" : "ui (frontend)",
     ready_label: es ? "Listo" : "Ready",
     help_item_chat_label: es ? "Chat" : "Chat",
     help_item_chat_desc: es ? "conversación normal con memoria. Usa modo Código/Cripto si aplica." : "normal conversation with memory. Use Code/Crypto mode when needed.",
-    help_item_web_label: es ? "Modo Web" : "Web mode",
-    help_item_web_desc: es ? "botón globo; llama a /websearch y muestra fuentes a la derecha." : "globe button; calls /websearch and shows sources on the right.",
+    help_item_web_label: es ? "Web (auto)" : "Web (auto)",
+    help_item_web_desc: es
+      ? "el contexto web está activo en automático; usa `web:` para forzar búsqueda y ver fuentes."
+      : "web context is auto-on; use `web:` to force search and show sources.",
     help_item_url_label: es ? "Modo URL" : "URL mode",
-    help_item_url_desc: es ? "pega una URL; /fetch_url la lee y la ves en Fuentes." : "paste a URL; /fetch_url reads it and you can see it in Sources.",
-    help_item_code_label: es ? "Modo Código" : "Code mode",
-    help_item_code_desc: es ? "envía preguntas técnicas; usa RAG si hay índice." : "send technical questions; uses RAG when an index exists.",
+    help_item_url_desc: state.chatOnlyExperience
+      ? (es ? "usa `url:https://...` para leer y resumir un enlace." : "use `url:https://...` to read and summarize a link.")
+      : (es ? "pega una URL; /fetch_url la lee y la ves en Fuentes." : "paste a URL; /fetch_url reads it and you can see it in Sources."),
+    help_item_code_label: es ? "Código" : "Code",
+    help_item_code_desc: es ? "preguntas técnicas; usa RAG si hay índice local." : "technical questions; uses local RAG when indexed.",
     help_item_image_label: es ? "Imagen" : "Image",
-    help_item_image_desc: es ? "sube una imagen; /analyze_image hace OCR local (ES/EN)." : "upload an image; /analyze_image runs local OCR (ES/EN).",
+    help_item_image_desc: es ? "sube una imagen y conversa en chat usando su contexto visual." : "upload an image and chat using its visual context.",
+    attach_mode_title: es ? "Adjuntar imagen/documento para chat" : "Attach image/document for chat",
+    image_upload_chat_title: es ? "Subir imagen para contexto" : "Upload image for context",
+    attachment_auto_web: es ? "Enriquecer con web (si hace falta)" : "Enrich with web (if needed)",
+    attachment_clear_title: es ? "Quitar adjunto" : "Clear attachment",
     help_item_crypto_label: es ? "Cripto (señal + horizonte)" : "Crypto (signal + horizon)",
     help_item_crypto_desc: es ? "escribe “BTCUSDT H=2m” o usa el panel Cripto. Genera señal demo y guarda precio base." : "type “BTCUSDT H=2m” or use the Crypto panel. It creates a demo signal and saves base price.",
-    symbols_modal_title: es ? "Despliegue rápido y símbolos (USDT)" : "Quick deploy and symbols (USDT)",
+    symbols_modal_title: es ? "Despliegue rápido + monedas/pairs Binance permitidos" : "Quick deploy + allowed Binance coins/pairs",
     symbols_deploy_label: es ? "Deploy (local):" : "Deploy (local):",
     symbols_deploy_desc: es ? "activa DB + claves, luego" : "set DB + keys, then run",
     symbols_deploy_desc_2: es ? "Usa el ícono de llave para poner la misma clave en la UI." : "Use the key icon to set the same key in the UI.",
     symbols_keys_label: es ? "Claves mínimas:" : "Minimum keys:",
     symbols_keys_optional: es ? "Opcional:" : "Optional:",
-    symbols_pairs_label: es ? "Pares Binance (USDT):" : "Binance pairs (USDT):",
-    symbols_tip: es ? "Copia un símbolo y pégalo en el campo del gráfico/cripto para ver precio y predicción. Todos son pares USDT (spot)." : "Copy a symbol and paste it into the chart/crypto field to see price and prediction. All are USDT spot pairs.",
+    symbols_pairs_label: es ? "Pares Binance sugeridos (lista ampliada):" : "Suggested Binance pairs (expanded list):",
+    symbols_tip: es ? "Puedes escribir nombre o alias (ej: bitcoin, ethereum, btc, eth). Se normaliza automáticamente al par Binance (USDT por defecto)." : "You can type coin name or alias (e.g. bitcoin, ethereum, btc, eth). It auto-normalizes to a Binance pair (USDT by default).",
 
     api_key_title: es ? "Configurar API key" : "Set API key",
     show_crypto_panel_title: es ? "Mostrar panel cripto" : "Show crypto panel",
     show_files_panel_title: es ? "Mostrar panel de archivos/repos" : "Show files/repos panel",
     tree_title: es ? "Ver árbol de proyecto" : "View project tree",
-    symbols_title_btn: es ? "Pares y despliegue rápido" : "Symbols and quick deploy",
+    symbols_title_btn: es ? "Monedas/Pares y despliegue rápido" : "Coins/Pairs and quick deploy",
     admin_refresh_title: es ? "Refrescar datos/modelos cripto (admin)" : "Refresh crypto data/models (admin)",
+    agent_step_title: es ? "Agent step (tool-first). Shift=run" : "Agent step (tool-first). Shift=run",
+    agent_run_title: es ? "Agent run (multi-step)" : "Agent run (multi-step)",
+    stop_server_title: es ? "Apagar servidor (admin)" : "Stop server (admin)",
     clear_logs_title: es ? "Limpiar logs" : "Clear logs",
     cancel_all_title: es ? "Cancelar todo" : "Cancel all",
     help_btn_title: es ? "Guía rápida de herramientas" : "Quick tools guide",
@@ -1021,10 +2136,11 @@ function localizeUI() {
     hide_panel_title: es ? "Ocultar panel" : "Hide panel",
     copy_id_title: es ? "Copiar ID" : "Copy ID",
     refresh_log_title: es ? "Actualizar log" : "Refresh log",
+    mode_chat_title: es ? "Modo chat" : "Chat mode",
     mode_web_title: es ? "Modo búsqueda web" : "Web search mode",
     mode_url_title: es ? "Modo leer URL" : "Read URL mode",
     mode_crypto_title: es ? "Modo cripto" : "Crypto mode",
-    mode_image_title: es ? "Analizar imagen" : "Analyze image",
+    mode_image_title: es ? "Modo imagen" : "Image mode",
     layout_toggle_title: es ? "Ocultar paneles laterales" : "Hide side panels",
     chart_symbol_aria: es ? "Símbolo cripto" : "Crypto symbol",
     chart_refresh_title: es ? "Actualizar gráfico" : "Refresh chart",
@@ -1047,6 +2163,7 @@ function localizeUI() {
     upload_zip_title: es ? "Subir proyecto ZIP" : "Upload ZIP project",
     clone_repo_title: es ? "Clonar repo" : "Clone repo",
     delete_project_title: es ? "Eliminar proyecto" : "Delete project",
+    files_to_chat_title: es ? "Volver a chat" : "Back to chat",
     ingest_log_title: es ? "Ver log de ingesta" : "View ingest log",
     files_expand_title: es ? "Expandir Archivos" : "Expand Files",
     ingest_status_title: es ? "Estado de ingesta" : "Ingest status",
@@ -1074,20 +2191,12 @@ function localizeUI() {
     if (!key || !map[key]) return;
     el.setAttribute("aria-label", map[key]);
   });
-  if (dom.sendBtn) dom.sendBtn.textContent = map.send_btn;
-  if (dom.msgInput) dom.msgInput.placeholder = es ? "Escribe tu mensaje..." : "Type your message...";
+  updateComposeUI();
   if (dom.projectList) dom.projectList.title = es ? "Proyectos cargados/clonados" : "Uploaded/cloned projects";
-  if (dom.imageSteps) {
-    dom.imageSteps.title = es
-      ? "Iteraciones de generación: más pasos, más detalle y más tiempo."
-      : "Generation iterations: more steps means more detail and more time.";
-  }
-  if (dom.imageSeed) {
-    dom.imageSeed.placeholder = es ? "aleatoria" : "random";
-    dom.imageSeed.title = es
-      ? "Controla la variación: misma seed reproduce un resultado parecido."
-      : "Controls variation: same seed reproduces a similar output.";
-  }
+  renderActiveProjectSelect();
+  renderActiveProjectBadge();
+  renderProjectMeta();
+  renderSourceOriginBar(state.lastChatContext);
   if (dom.buyBtn) dom.buyBtn.title = es ? "Comprar (simulado, educativo)" : "Buy (simulated, educational)";
   if (dom.sellBtn) dom.sellBtn.title = es ? "Vender (simulado, educativo)" : "Sell (simulated, educational)";
   if (dom.predictionCompareHelp) {
@@ -1111,12 +2220,6 @@ function localizeUI() {
       : "P&L from simulated trades (educational).";
   }
 
-  // security note
-  if (dom.securityNote) {
-    dom.securityNote.textContent = es
-      ? "• Claves: AEGIS / FILES / ADMIN\n• Límite y bloqueos SSRF: solo http/https, redes privadas bloqueadas, redirecciones limitadas\n• Contenido: tamaño y MIME limitados; .onion solo vía Tor\n• AV: escaneo opcional de subidas/clones (ClamAV)\n• Logs separados: /admin/refresh-log y /files/ingest/log (job_id)\n• Recomendado: HTTPS y CORS restringido"
-      : "• Keys: AEGIS / FILES / ADMIN\n• SSRF guard: http/https only, private nets blocked, redirects limited\n• Content: size & MIME caps; .onion via Tor only\n• AV: optional scan on uploads/clones (ClamAV)\n• Logs separated: /admin/refresh-log and /files/ingest/log (job_id)\n• Recommended: HTTPS and restricted CORS";
-  }
 }
 
 function localizeHelp() {
@@ -1132,8 +2235,8 @@ function localizeHelp() {
       ? "Preguntas generales, debugging local o instrucciones paso a paso."
       : "General questions, local debugging, and step-by-step help.",
     hint_web: es
-      ? "Agrega web: cuando necesites fuentes recientes o enlaces citables."
-      : "Add web: when you need fresh sources or citable links.",
+      ? "El contexto web está en automático por defecto. Agrega web: para forzar búsqueda cuando necesites fuentes recientes o enlaces citables."
+      : "Web context is automatic by default. Add web: to force search when you need fresh sources or citable links.",
     hint_url: es
       ? "Usa url:https://... para leer y resumir un enlace específico."
       : "Use url:https://... to read and summarize a specific link.",
@@ -1141,8 +2244,8 @@ function localizeHelp() {
       ? "Activa el panel para predicciones, trades simulados y métricas P&L."
       : "Enable the panel for predictions, simulated trades, and P&L metrics.",
     hint_image: es
-      ? "Sube capturas y obtén OCR para explicar errores o textos."
-      : "Upload screenshots and get OCR to explain errors or text.",
+      ? "Activa Imagen (📷), sube archivo y pregunta en chat para usar su contexto."
+      : "Enable Image mode (📷), upload a file, and ask in chat using its context.",
   };
 
   for (const [key, text] of Object.entries(map)) {
@@ -1166,7 +2269,7 @@ function updateConversationIndicators(id) {
 
 function setPending(on) {
   state.pending = !!on;
-  if (dom.sendBtn) dom.sendBtn.disabled = state.pending;
+  applyAuthState();
   updateStatusCenter();
 }
 
@@ -1175,17 +2278,33 @@ function toggleFilesExpand() {
 }
 
 function showCryptoPanelFromToolbar() {
+  if (state.mode === MODES.IMAGE) {
+    setMode(MODES.CHAT);
+  }
   if (state.layoutCollapsed) {
     state.layoutCollapsed = false;
     localStorage.setItem("aegis_layout_collapsed", "0");
     applyLayoutCollapsed();
   }
-  state.chartVisible = true;
-  localStorage.setItem("aegis_chart_visible", "1");
+  if (!state.chartVisible) {
+    state.chartVisible = true;
+    localStorage.setItem("aegis_chart_visible", "1");
+  }
   applyPanelVisibility();
+  loadCryptoModels();
+  loadChartData(state.chartSymbol);
+  loadCryptoPrediction({ force: true });
+  loadPredictionComparison(state.chartSymbol, { force: true });
+  notifyStatus(
+    state.lang === LANG.ES ? "Panel cripto abierto." : "Crypto panel opened.",
+    { kind: "info", key: "crypto-panel-open", dedupeMs: 1500, ttlMs: 1800 }
+  );
 }
 
 function showFilesPanelFromToolbar() {
+  if (state.mode === MODES.IMAGE || state.mode === MODES.CRYPTO) {
+    setMode(MODES.CHAT);
+  }
   if (state.layoutCollapsed) {
     state.layoutCollapsed = false;
     localStorage.setItem("aegis_layout_collapsed", "0");
@@ -1210,8 +2329,11 @@ function toggleChartVisibility() {
 }
 
 function applyPanelVisibility() {
-  const chartVisible = !!state.chartVisible;
-  const sidebarVisible = !!state.sidebarVisible;
+  const chatOnly = !!state.chatOnlyExperience;
+  const isCrypto = state.mode === MODES.CRYPTO;
+  // Image mode now runs from the chat bar, so side panels follow normal visibility rules.
+  const chartVisible = chatOnly ? false : !!state.chartVisible;
+  const sidebarVisible = chatOnly ? true : (isCrypto ? false : !!state.sidebarVisible);
   const es = state.lang === LANG.ES;
 
   if (dom.chartPanel) dom.chartPanel.classList.toggle("chart-hidden", !chartVisible);
@@ -1236,21 +2358,29 @@ function applyPanelVisibility() {
   }
 
   if (dom.showCryptoPanelBtn) {
-    dom.showCryptoPanelBtn.classList.toggle("active", !chartVisible);
-    dom.showCryptoPanelBtn.setAttribute("aria-pressed", String(!chartVisible));
+    dom.showCryptoPanelBtn.classList.toggle("active", chartVisible);
+    dom.showCryptoPanelBtn.setAttribute("aria-pressed", String(chartVisible));
+    dom.showCryptoPanelBtn.title = chartVisible
+      ? (es ? "Ocultar panel cripto" : "Hide crypto panel")
+      : (es ? "Mostrar panel cripto" : "Show crypto panel");
   }
   if (dom.showFilesPanelBtn) {
-    dom.showFilesPanelBtn.classList.toggle("active", !sidebarVisible);
-    dom.showFilesPanelBtn.setAttribute("aria-pressed", String(!sidebarVisible));
+    dom.showFilesPanelBtn.classList.toggle("active", sidebarVisible);
+    dom.showFilesPanelBtn.setAttribute("aria-pressed", String(sidebarVisible));
+    dom.showFilesPanelBtn.title = sidebarVisible
+      ? (es ? "Ocultar panel de archivos/repos" : "Hide files/repos panel")
+      : (es ? "Mostrar panel de archivos/repos" : "Show files/repos panel");
   }
 }
 
 function registerAbortController(controller) {
   if (controller) state.activeControllers.add(controller);
+  updateComposeUI();
   return controller;
 }
 function unregisterAbortController(controller) {
   if (controller) state.activeControllers.delete(controller);
+  updateComposeUI();
 }
 
 async function cancelAllRequests(fullStop = false) {
@@ -1304,10 +2434,167 @@ async function cancelBackendProcesses() {
   }
 }
 
+async function shutdownServer() {
+  const es = state.lang === LANG.ES;
+  const warn = es
+    ? "Esto intentará apagar el servidor AEGIS en esta máquina. ¿Continuar?"
+    : "This will attempt to shut down the AEGIS server on this machine. Continue?";
+  if (!confirm(warn)) return;
+
+  try {
+    const res = await fetchWithTimeout(
+      endpoints.systemShutdown,
+      { method: "POST", headers: { Accept: "application/json" } },
+      { timeout: 8000, retries: 0 },
+    );
+    const data = await safeJson(res);
+    if (!res.ok) {
+      const detail = (data && data.detail) ? String(data.detail) : `${res.status} ${res.statusText || ""}`.trim();
+      if (res.status === 403) {
+        appendBubble(
+          es
+            ? "Shutdown deshabilitado. Actívalo con `AEGIS_ENABLE_SHUTDOWN_ENDPOINT=1` o usa `./stop_aegis.sh`."
+            : "Shutdown is disabled. Enable with `AEGIS_ENABLE_SHUTDOWN_ENDPOINT=1` or use `./stop_aegis.sh`.",
+          "error",
+        );
+        return;
+      }
+      throw new Error(detail || "shutdown failed");
+    }
+    appendBubble(es ? "Servidor apagándose..." : "Server shutting down...", "bot");
+  } catch (err) {
+    console.error(err);
+    appendBubble(es ? "No se pudo apagar el servidor." : "Could not shut down server.", "error");
+  }
+}
+
+async function executeConversationTool(
+  tool,
+  args = {},
+  {
+    autoApprove = false,
+    title = "",
+    continueAfter = false,
+    continueMessage = "",
+    continueUseWeb = false,
+    continueSynthesize = true,
+    continueMaxIterations = 2,
+    continueMaxTotalToolCalls = 6,
+    continueMaxToolRetries = 1,
+    continueToolRetryBackoffMs = 150,
+  } = {},
+) {
+  const es = state.lang === LANG.ES;
+  const convId = state.conversationId;
+  if (!convId) {
+    appendBubble(es ? "No hay conversación activa. Envía un mensaje primero." : "No active conversation. Send a message first.", "error");
+    return null;
+  }
+  const url = new URL(endpoints.conversationExecuteTool(convId), location.origin);
+  const payload = {
+    tool: String(tool || "").trim(),
+    args: args && typeof args === "object" ? args : {},
+    continue_after: !!continueAfter,
+    continue_message: String(continueMessage || "").trim() || undefined,
+    continue_lang: state.lang,
+    continue_use_web: !!continueUseWeb,
+    continue_synthesize: !!continueSynthesize,
+    continue_max_iterations: Number(continueMaxIterations || 2),
+    continue_max_total_tool_calls: Number(continueMaxTotalToolCalls || 6),
+    continue_max_tool_retries: Number(continueMaxToolRetries || 1),
+    continue_tool_retry_backoff_ms: Number(continueToolRetryBackoffMs || 150),
+  };
+
+  const doCall = async (extra = {}) => {
+    const res = await fetchWithTimeout(url.toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ ...payload, ...extra }),
+    }, { timeout: 30000, retries: 0 });
+    const data = await safeJson(res);
+    return { res, data };
+  };
+
+  let first = null;
+  try {
+    first = await doCall();
+  } catch (err) {
+    console.error(err);
+    appendBubble(es ? "Error ejecutando tool." : "Tool execution error.", "error");
+    return null;
+  }
+
+  if (first.res.status === 409 && first.data && typeof first.data === "object") {
+    const approval = first.data?.detail?.approval || first.data?.approval || null;
+    const token = String(approval?.token || "").trim();
+    if (!token) {
+      appendBubble(es ? "Approval requerido, pero sin token." : "Approval required, but missing token.", "error");
+      return null;
+    }
+    if (!autoApprove) {
+      const warn = es
+        ? `El servidor requiere aprobación para: ${payload.tool}. ¿Aprobar?`
+        : `Server requires approval for: ${payload.tool}. Approve?`;
+      if (!confirm(warn)) return null;
+    }
+    const second = await doCall({ approval_token: token });
+    if (!second.res.ok) {
+      const msg = second.data?.detail || second.data?.error || `HTTP ${second.res.status}`;
+      appendBubble(String(msg), "error");
+      return null;
+    }
+    if (second.data && typeof second.data === "object" && second.data.context && typeof second.data.context === "object") {
+      state.lastChatContext = second.data.context;
+      renderProjectMeta();
+      renderSourceOriginBar(state.lastChatContext);
+    }
+    if (second.data?.continued && second.data?.continue_result?.response) {
+      const contCtx = second.data?.continue_result?.context && typeof second.data.continue_result.context === "object"
+        ? second.data.continue_result.context
+        : state.lastChatContext;
+      appendBubble(String(second.data.continue_result.response), "bot", true, contCtx);
+      if (contCtx && typeof contCtx === "object") {
+        state.lastChatContext = contCtx;
+        renderProjectMeta();
+        renderSourceOriginBar(state.lastChatContext);
+      }
+    }
+    if (title) renderSimpleList(second.data, title);
+    return second.data;
+  }
+
+  if (!first.res.ok) {
+    const msg = first.data?.detail || first.data?.error || `HTTP ${first.res.status}`;
+    appendBubble(String(msg), "error");
+    return null;
+  }
+  if (first.data && typeof first.data === "object" && first.data.context && typeof first.data.context === "object") {
+    state.lastChatContext = first.data.context;
+    renderProjectMeta();
+    renderSourceOriginBar(state.lastChatContext);
+  }
+  if (first.data?.continued && first.data?.continue_result?.response) {
+    const contCtx = first.data?.continue_result?.context && typeof first.data.continue_result.context === "object"
+      ? first.data.continue_result.context
+      : state.lastChatContext;
+    appendBubble(String(first.data.continue_result.response), "bot", true, contCtx);
+    if (contCtx && typeof contCtx === "object") {
+      state.lastChatContext = contCtx;
+      renderProjectMeta();
+      renderSourceOriginBar(state.lastChatContext);
+    }
+  }
+  if (title) renderSimpleList(first.data, title);
+  return first.data;
+}
+
 async function fetchWithTimeout(url, opts = {}, { timeout = CHAT_MAX_TIMEOUT_MS, retries = 0 } = {}) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = registerAbortController(new AbortController());
-    const id = setTimeout(() => controller.abort(), timeout);
+    const timeoutMs = Number(timeout);
+    const disableDeadline = isLongRunningEndpoint(url);
+    const useDeadline = Number.isFinite(timeoutMs) && timeoutMs > 0 && !disableDeadline;
+    const id = useDeadline ? setTimeout(() => controller.abort(), timeoutMs) : null;
     try {
       await ensureAccessToken();
       const scope = authScopeForUrl(url);
@@ -1328,12 +2615,18 @@ async function fetchWithTimeout(url, opts = {}, { timeout = CHAT_MAX_TIMEOUT_MS,
           const retried = await fetch(url, { ...merged, signal: controller.signal });
           if (retried.status === 401 || retried.status === 403) {
             await markAuthFailure(url, retried, { scope, keyToUse });
+            if (isConversationPollUrl(url)) {
+              handleConversationPollAuthDenied(retried.status);
+            }
           } else if (retried.ok) {
             clearAuthFailure();
           }
           return retried;
         }
         await markAuthFailure(url, res, { scope, keyToUse });
+        if (isConversationPollUrl(url)) {
+          handleConversationPollAuthDenied(res.status);
+        }
         return res;
       }
       if (res.ok) {
@@ -1344,9 +2637,35 @@ async function fetchWithTimeout(url, opts = {}, { timeout = CHAT_MAX_TIMEOUT_MS,
       if (attempt === retries) throw err;
       await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
     } finally {
-      clearTimeout(id);
+      if (id != null) clearTimeout(id);
       unregisterAbortController(controller);
     }
+  }
+}
+
+function isLongRunningEndpoint(url) {
+  try {
+    const u = new URL(url, location.origin);
+    const p = String(u.pathname || "");
+    if (p === "/chat") return true;
+    if (/^\/chat\/[^/]+\/agent_(step|run|continue)$/.test(p)) return true;
+    if (p === "/image/generate" || p === "/image/generate_with_reference") return true;
+    if (p === "/files/ingest") return true;
+    if (p === "/crypto/predict") return true;
+    if (p.startsWith("/crypto/")) return true;
+    if (p === "/websearch" || p === "/fetch_url") return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function isConversationPollUrl(url) {
+  try {
+    const u = new URL(url, location.origin);
+    return /^\/chat\/[^/]+\/(events|turns)$/.test(String(u.pathname || ""));
+  } catch {
+    return false;
   }
 }
 
@@ -1354,7 +2673,9 @@ function authScopeForUrl(url) {
   try {
     const u = new URL(url, location.origin);
     const p = u.pathname || "";
-    return p.startsWith("/files/") || p.startsWith("/tools/") || p.startsWith("/image/") ? "files" : "main";
+    // Conversation endpoints that can read local project state or execute tools should use FILES key.
+    if (p.includes("/execute_tool") || p.includes("/agent_step") || p.includes("/agent_run") || p.endsWith("/project")) return "files";
+    return p.startsWith("/files/") || p.startsWith("/image/") ? "files" : "main";
   } catch {
     return "main";
   }
@@ -1410,6 +2731,10 @@ function clearAuthFailure() {
     state.authDiag.lastError = null;
     updateStatusCenter();
   }
+  if (state.conversationId && !state.convEventsTimer && !state.convTurnsTimer && state.debugTraceEnabled && state.chatSideVisible) {
+    startConversationEventsPolling();
+  }
+  state.convAuthBlockedAt = 0;
 }
 
 function authDebugForUrl(url) {
@@ -1429,6 +2754,7 @@ async function safeJson(res) {
 }
 
 function clearSources() {
+  if (dom.sourceOriginBar) dom.sourceOriginBar.innerHTML = "";
   if (!dom.sourcesContent) return;
   dom.sourcesContent.innerHTML = "";
   dom.sourcesContent.appendChild(el("div", { text: state.lang === LANG.ES ? "Sin recursos externos aún." : "No external resources yet." }));
@@ -1488,8 +2814,28 @@ function tokenExpiresSoon() {
   return msLeft < 120000; // 2 min
 }
 
+function clearAuthRetryCooldown() {
+  if (!state.authRetryFailures && !state.authRetryBlockedUntil) return;
+  state.authRetryFailures = 0;
+  state.authRetryBlockedUntil = 0;
+  updateStatusCenter();
+}
+
+function setAuthRetryCooldown() {
+  state.authRetryFailures = Number(state.authRetryFailures || 0) + 1;
+  const exp = Math.max(0, state.authRetryFailures - 1);
+  const backoffMs = Math.min(AUTH_RETRY_MAX_MS, AUTH_RETRY_BASE_MS * (2 ** exp));
+  state.authRetryBlockedUntil = Date.now() + backoffMs;
+  updateStatusCenter();
+}
+
+function isAuthRetryBlocked() {
+  return Number(state.authRetryBlockedUntil || 0) > Date.now();
+}
+
 async function fetchNewAccessToken() {
   const key = cleanKey(state.apiKey);
+  if (isAuthRetryBlocked()) return false;
   if (!key) return false;
   try {
     const res = await fetch(endpoints.authToken, {
@@ -1498,15 +2844,19 @@ async function fetchNewAccessToken() {
         "Content-Type": "application/json",
         "X-API-Key": key,
       },
-      body: JSON.stringify({ scopes: ["chat", "files", "crypto", "admin"], refresh: true }),
+      // Self-issued JWT scopes are intentionally limited server-side; keep this list
+      // aligned with allowed non-privileged UI capabilities.
+      body: JSON.stringify({ scopes: ["chat", "files", "crypto"], refresh: true }),
     });
     const data = await safeJson(res);
     if (!res.ok || !data?.access_token) throw new Error("token failed");
     const now = Math.floor(Date.now() / 1000);
     const exp = now + (Number(data.expires_in) || 1800);
     storeTokens({ access_token: data.access_token, refresh_token: data.refresh_token, exp });
+    clearAuthRetryCooldown();
     return true;
   } catch {
+    setAuthRetryCooldown();
     clearTokens();
     return false;
   }
@@ -1514,6 +2864,7 @@ async function fetchNewAccessToken() {
 
 async function tryRefreshAccessToken() {
   const key = cleanKey(state.apiKey);
+  if (isAuthRetryBlocked()) return false;
   if (!state.refreshToken || !key) return false;
   try {
     const res = await fetch(endpoints.authRefresh, {
@@ -1529,14 +2880,17 @@ async function tryRefreshAccessToken() {
     const now = Math.floor(Date.now() / 1000);
     const exp = now + (Number(data.expires_in) || 1800);
     storeTokens({ access_token: data.access_token, refresh_token: data.refresh_token, exp });
+    clearAuthRetryCooldown();
     return true;
   } catch {
+    setAuthRetryCooldown();
     clearTokens();
     return false;
   }
 }
 
 async function ensureAccessToken() {
+  if (isAuthRetryBlocked()) return;
   if (!state.apiKey) return;
   if (!state.accessToken || tokenExpiresSoon()) {
     const ok = state.refreshToken ? await tryRefreshAccessToken() : await fetchNewAccessToken();
@@ -1546,6 +2900,26 @@ async function ensureAccessToken() {
   }
 }
 
+async function refreshAuthedPanels() {
+  if (hasAuthForScope("main")) {
+    await ensureAccessToken();
+    await loadConversationList(state.conversationsIncludeArchived);
+    if (state.conversationId) {
+      await syncConversationState(state.conversationId);
+      startConversationEventsPolling();
+    }
+  }
+
+  if (hasAuthForScope("files")) {
+    await loadRegisteredProjects();
+    if (state.activeProjectId || getEffectiveProjectRoot()) {
+      await loadProjectTree();
+    }
+  }
+
+  updateStatusCenter();
+}
+
 function startTokenAutoRefresh() {
   if (state.tokenRefreshTimer) clearInterval(state.tokenRefreshTimer);
   state.tokenRefreshTimer = setInterval(() => {
@@ -1553,50 +2927,1525 @@ function startTokenAutoRefresh() {
   }, 5 * 60 * 1000); // every 5 min best-effort
 }
 
-function setProjectRoot(newRoot) {
-  if (!newRoot) return;
-  state.currentProjectRoot = newRoot;
-  if (!dom.projectSelect) return;
+function syncProjectSelectValue(rootValue) {
+  const nextRoot = String(rootValue || "").trim();
+  if (!dom.projectSelect) {
+    renderProjectList();
+    return;
+  }
 
-  let opt = Array.from(dom.projectSelect.options || []).find((o) => o.value === newRoot);
-  if (!opt) {
+  let opt = Array.from(dom.projectSelect.options || []).find((o) => o.value === nextRoot);
+  if (nextRoot && !opt) {
     opt = document.createElement("option");
-    opt.value = newRoot;
-    opt.textContent = newRoot;
+    opt.value = nextRoot;
+    opt.textContent = nextRoot;
     dom.projectSelect.appendChild(opt);
   }
-  dom.projectSelect.value = newRoot;
+  dom.projectSelect.value = nextRoot;
   renderProjectList();
 }
 
-function addUploadedProject(path) {
+function setManualProjectRoot(newRoot) {
+  const nextRoot = String(newRoot || "").trim();
+  state.manualProjectRoot = nextRoot;
+  if (nextRoot) localStorage.setItem("aegis_project_root", nextRoot);
+  else localStorage.removeItem("aegis_project_root");
+  syncProjectSelectValue(nextRoot);
+}
+
+function clearManualProjectRoot({ syncSelect = false } = {}) {
+  state.manualProjectRoot = "";
+  localStorage.removeItem("aegis_project_root");
+  if (syncSelect) syncProjectSelectValue("");
+}
+
+function getActiveProjectRecord() {
+  return state.projectRecords.find((item) => String(item?.project_id || "") === String(state.activeProjectId || "")) || null;
+}
+
+function getEffectiveProjectRoot() {
+  const detailRoot = String(
+    state.activeProjectDetail?.project?.root_path
+    || state.activeProjectDetail?.root_path
+    || ""
+  ).trim();
+  if (detailRoot) return detailRoot;
+  const projectRoot = String(getActiveProjectRecord()?.root_path || "").trim();
+  if (projectRoot) return projectRoot;
+  // Prevent "two-project" drift: manual root is only a fallback when no active project is selected.
+  if (state.activeProjectId) return "";
+  return String(state.manualProjectRoot || "").trim();
+}
+
+function addUploadedProject(path, projectId = null) {
   if (!path) return;
   if (!state.uploadedProjects.includes(path)) {
     state.uploadedProjects.push(path);
   }
-  setProjectRoot(path);
-  renderProjectList();
+  if (projectId) syncProjectSelectValue(path);
+  else setManualProjectRoot(path);
+  if (projectId) {
+    state.activeProjectId = String(projectId);
+    localStorage.setItem("aegis_active_project_id", state.activeProjectId);
+  }
+  loadRegisteredProjects();
+}
+
+async function loadRegisteredProjects() {
+  if (!hasAuthForScope("files")) {
+    state.projectRecords = [];
+    renderProjectList();
+    renderActiveProjectSelect();
+    return;
+  }
+  try {
+    const res = await fetchWithTimeout(endpoints.filesProjects, {}, { timeout: 10000, retries: 0 });
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error(data?.detail || "projects failed");
+    state.projectRecords = Array.isArray(data?.items) ? data.items : [];
+    renderProjectList();
+    renderActiveProjectSelect();
+    if (state.activeProjectId) {
+      const exists = state.projectRecords.some((item) => String(item?.project_id || "") === state.activeProjectId);
+      if (exists) {
+        await loadActiveProjectDetail(state.activeProjectId);
+      } else {
+        await setActiveProject("", { bindConversation: false, loadDetail: false });
+      }
+    } else {
+      renderActiveProjectBadge();
+      renderProjectMeta();
+    }
+  } catch (err) {
+    console.error("load-projects-error", err);
+    renderProjectList();
+  }
+}
+
+function renderActiveProjectSelect() {
+  if (!dom.activeProjectSelect) return;
+  const current = state.activeProjectId || "";
+  dom.activeProjectSelect.innerHTML = "";
+  const emptyOpt = document.createElement("option");
+  emptyOpt.value = "";
+  emptyOpt.textContent = state.lang === LANG.ES ? "Sin proyecto activo" : "No active project";
+  dom.activeProjectSelect.appendChild(emptyOpt);
+  state.projectRecords.forEach((project) => {
+    const opt = document.createElement("option");
+    opt.value = String(project.project_id || "");
+    opt.textContent = `${project.project_id} • ${project.status || "uploaded"}`;
+    dom.activeProjectSelect.appendChild(opt);
+  });
+  dom.activeProjectSelect.value = current;
+  // Keep badge + manual-root UX in sync whenever the selector is rendered.
+  renderActiveProjectBadge();
+}
+
+function renderActiveProjectBadge() {
+  if (!dom.activeProjectBadge) return;
+  const es = state.lang === LANG.ES;
+  const manualRoot = String(state.manualProjectRoot || "").trim();
+  dom.activeProjectBadge.className = `project-badge ${state.activeProjectId ? "project-badge-active" : "project-badge-empty"}`;
+  dom.activeProjectBadge.textContent = state.activeProjectId
+    ? `${es ? "Proyecto activo" : "Active project"}: ${state.activeProjectId}`
+    : manualRoot
+      ? (es ? `Sin proyecto activo • root manual: ${manualRoot}` : `No active project • manual root: ${manualRoot}`)
+      : (es ? "Sin proyecto activo" : "No active project");
+  updateManualRootControlState();
+}
+
+function updateManualRootControlState() {
+  const es = state.lang === LANG.ES;
+  if (!dom.projectSelect) return;
+  const hasActive = !!String(state.activeProjectId || "").trim();
+  // Manual root is only a fallback path to register a project_id; once active_project_id exists,
+  // we disable it to prevent "two-project" mental model drift.
+  dom.projectSelect.disabled = hasActive;
+  // Also de-emphasize it visually when a canonical project_id is active.
+  dom.projectSelect.style.opacity = hasActive ? "0.55" : "";
+  dom.projectSelect.title = hasActive
+    ? (es ? "Root manual está deshabilitado mientras haya un proyecto activo. Cambia el proyecto usando el selector de proyecto activo." : "Manual root is disabled while an active project exists. Switch projects using the active project selector.")
+    : (es ? "Root manual (fallback): úsalo solo si no hay proyecto activo." : "Manual root (fallback): use only when no active project is selected.");
+}
+
+function getRuntimeCapabilityItems() {
+  const snap = state.lastSnapshot?.snapshot || null;
+  if (!snap || typeof snap !== "object") return [];
+  const readyz = state.lastSnapshot?.readyz || {};
+  const checks = readyz?.checks || {};
+  const levels = readyz?.levels || snap?.levels || {};
+  const projectTools = snap?.project_tools || {};
+  const image = snap?.image || {};
+  const web = snap?.web_search || {};
+  const llm = snap?.llm || {};
+  const clamav = snap?.clamav || {};
+  const browserRuntime = snap?.browser_runtime || {};
+  return [
+    { label: "LLM", value: llm.status || "unknown", ok: !!checks.llm, level: levels.llm || llm.status || "unknown" },
+    { label: "Web", value: web.status || "unknown", ok: !!checks.web_search, level: levels.web_search || web.status || "unknown" },
+    { label: "Image", value: image.status || "unknown", ok: !!checks.image_backend, level: levels.image || image.status || "unknown" },
+    { label: "Browser", value: browserRuntime.status || "unknown", ok: !!checks.browser_runtime, level: levels.browser_runtime || browserRuntime.status || "unknown" },
+    { label: "ClamAV", value: clamav.status || "unknown", ok: !!checks.clamav, level: levels.clamav || clamav.status || "unknown" },
+    { label: "Projects", value: String(projectTools.registered_projects ?? 0), ok: !!checks.project_tools, level: levels.project_tools || projectTools.status || "unknown" },
+  ];
+}
+
+function capabilityChipClass(item) {
+  const level = String(item?.level || "").toLowerCase();
+  if (level === "error") return "danger";
+  if (level === "degraded" || level === "fallback-only" || level === "missing" || level === "cooldown") return "warn";
+  return "";
+}
+
+function getValidationItems() {
+  const snap = state.lastSnapshot?.snapshot || null;
+  const validation = snap?.validation || state.lastSnapshot?.readyz?.validation || null;
+  if (!validation || typeof validation !== "object") return null;
+  return {
+    startupGate: Array.isArray(validation.startup_gate) ? validation.startup_gate : [],
+    verifyFull: Array.isArray(validation.verify_full) ? validation.verify_full : [],
+    browserSmokeDefault: !!validation.browser_smoke_default,
+    browserSmokeStrictDefault: !!validation.browser_smoke_strict_default,
+    lastRuns: validation.last_runs && typeof validation.last_runs === "object" ? validation.last_runs : {},
+    lastUpdatedMs: Number(validation.last_updated_ms || 0),
+    scripts: validation.scripts && typeof validation.scripts === "object" ? validation.scripts : {},
+  };
+}
+
+function validationFlowStatus(flow) {
+  const value = String(flow?.status || "").toLowerCase();
+  if (value === "passed") return "success";
+  if (value === "failed") return "danger";
+  if (value === "running") return "warn";
+  if (value === "skipped") return "neutral";
+  return "neutral";
+}
+
+function plannerStopReason(context) {
+  if (!context || typeof context !== "object") return "";
+  const flat = String(context.stop_reason || "").trim();
+  if (flat) return flat;
+  const loop = context.planner_loop && typeof context.planner_loop === "object" ? context.planner_loop : null;
+  return String(loop?.stop_reason || "").trim();
+}
+
+function plannerLoopMetrics(context) {
+  if (!context || typeof context !== "object") return {};
+  const loop = context.planner_loop && typeof context.planner_loop === "object" ? context.planner_loop : {};
+  const asNum = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  return {
+    iterationsCompleted: asNum(context.iterations_completed ?? loop.iterations_completed),
+    totalToolCalls: asNum(context.total_tool_calls ?? loop.total_tool_calls),
+    maxIterations: asNum(loop.max_iterations),
+    maxTotalToolCalls: asNum(loop.max_total_tool_calls),
+    budgetExhausted: Boolean(context.budget_exhausted ?? loop.budget_exhausted),
+  };
+}
+
+function renderProjectMeta() {
+  if (!dom.projectMeta) return;
+  const es = state.lang === LANG.ES;
+  const detail = state.activeProjectDetail;
+  const capabilityItems = getRuntimeCapabilityItems();
+  const validationItems = getValidationItems();
+  const context = state.lastChatContext && typeof state.lastChatContext === "object" ? state.lastChatContext : null;
+  dom.projectMeta.innerHTML = "";
+
+  const buildPlannerCard = () => {
+    if (!context) return null;
+    const stopReason = plannerStopReason(context);
+    const loopMetrics = plannerLoopMetrics(context);
+    const hasPlannerData = Boolean(
+      context.source_plan
+      || (Array.isArray(context.source_origin) && context.source_origin.length)
+      || context.current_task
+      || context.current_subtask
+      || context.next_step
+      || context.next_tool
+      || context.current_file_focus
+      || context.current_symbol_focus
+      || context.current_artifact_focus
+      || (Array.isArray(context.web_findings) && context.web_findings.length)
+      || (Array.isArray(context.recent_tool_failures) && context.recent_tool_failures.length)
+      || (Array.isArray(context.missing_evidence) && context.missing_evidence.length)
+      || (Array.isArray(context.tool_candidates) && context.tool_candidates.length)
+      || stopReason
+      || loopMetrics.iterationsCompleted != null
+      || loopMetrics.totalToolCalls != null
+    );
+    if (!hasPlannerData) return null;
+
+    const card = el("div", { class: "project-meta-card" });
+    card.appendChild(el("strong", { text: es ? "Plan actual" : "Current plan" }));
+    const list = el("div", { class: "mini-list" });
+    if (context.source_plan) {
+      list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Plan de fuente" : "Source plan"}: ${prettySourcePlan(context.source_plan)}` }));
+    }
+    if (context.current_task) list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Tarea" : "Task"}: ${context.current_task}` }));
+    if (context.current_subtask) list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Subtarea" : "Subtask"}: ${context.current_subtask}` }));
+    if (context.current_file_focus) list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Archivo" : "File"}: ${context.current_file_focus}` }));
+    if (context.current_symbol_focus) list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Símbolo" : "Symbol"}: ${context.current_symbol_focus}` }));
+    if (context.current_artifact_focus) list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Artefacto" : "Artifact"}: ${context.current_artifact_focus}` }));
+    if (context.next_tool) list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Tool" : "Tool"}: ${context.next_tool}` }));
+    if (stopReason) list.appendChild(el("span", { class: "mini-chip subtle", text: `${es ? "Stop" : "Stop"}: ${stopReason}` }));
+    if (loopMetrics.iterationsCompleted != null) {
+      const maxIt = loopMetrics.maxIterations != null ? `/${loopMetrics.maxIterations}` : "";
+      list.appendChild(
+        el("span", { class: "mini-chip subtle", text: `${es ? "Iteraciones" : "Iterations"}: ${loopMetrics.iterationsCompleted}${maxIt}` })
+      );
+    }
+    if (loopMetrics.totalToolCalls != null) {
+      const maxTools = loopMetrics.maxTotalToolCalls != null ? `/${loopMetrics.maxTotalToolCalls}` : "";
+      list.appendChild(
+        el("span", { class: "mini-chip subtle", text: `${es ? "Tools" : "Tools"}: ${loopMetrics.totalToolCalls}${maxTools}` })
+      );
+    }
+    if (loopMetrics.budgetExhausted) {
+      list.appendChild(el("span", { class: "mini-chip warn", text: es ? "Presupuesto agotado" : "Budget exhausted" }));
+    }
+    if (context.llm_required === false) {
+      list.appendChild(el("span", { class: "mini-chip", text: "LLM: bypassed" }));
+    } else if (context.llm_required === true) {
+      list.appendChild(el("span", { class: "mini-chip", text: "LLM: required" }));
+    }
+    const candidates = Array.isArray(context.tool_candidates) ? context.tool_candidates : [];
+    if (candidates.length) {
+      list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Candidatas" : "Candidates"}: ${candidates.slice(0, 3).join(", ")}` }));
+    }
+    const toolRisks = context.tool_risks && typeof context.tool_risks === "object" ? context.tool_risks : null;
+    if (toolRisks) {
+      const pairs = Object.entries(toolRisks)
+        .map(([k, v]) => `${k}:${String(v || "")}`)
+        .filter(Boolean)
+        .slice(0, 3);
+      if (pairs.length) {
+        list.appendChild(el("span", { class: "mini-chip subtle", text: `${es ? "Riesgo" : "Risk"}: ${pairs.join(", ")}` }));
+      }
+    }
+    const approvals = Array.isArray(context.approval_required) ? context.approval_required : [];
+    if (approvals.length) {
+      list.appendChild(el("span", { class: "mini-chip warn", text: `${es ? "Requiere approval" : "Approval required"}: ${approvals.slice(0, 3).join(", ")}` }));
+    }
+    const pending = context.pending_approval && typeof context.pending_approval === "object" ? context.pending_approval : null;
+    if (pending && pending.tool) {
+      list.appendChild(el("span", { class: "mini-chip warn", text: `${es ? "Approval pendiente" : "Pending approval"}: ${pending.tool}` }));
+    }
+    card.appendChild(list);
+    const origins = Array.isArray(context.source_origin) ? context.source_origin : [];
+    if (origins.length) {
+      card.appendChild(el("div", { class: "project-summary-text subtle", text: `${es ? "Origen usado" : "Origin used"}: ${origins.map(prettyOriginLabel).join(", ")}` }));
+    }
+    if (context.next_step) {
+      card.appendChild(el("div", { class: "project-summary-text", text: `${es ? "Siguiente paso" : "Next step"}: ${context.next_step}` }));
+    }
+    if (Array.isArray(context.missing_evidence) && context.missing_evidence.length) {
+      card.appendChild(
+        el("div", {
+          class: "project-summary-text",
+          text: `${es ? "Falta evidencia" : "Missing evidence"}: ${context.missing_evidence.join(", ")}`,
+        })
+      );
+    }
+    if (Array.isArray(context.web_findings) && context.web_findings.length) {
+      card.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: `${es ? "Hallazgos web" : "Web findings"}: ${context.web_findings.slice(0, 3).join(" • ")}`,
+        })
+      );
+    }
+    if (Array.isArray(context.recent_tool_failures) && context.recent_tool_failures.length) {
+      const recent = context.recent_tool_failures
+        .slice(-2)
+        .map((item) => String(item || "").trim())
+        .filter(Boolean);
+      if (recent.length) {
+        card.appendChild(
+          el("div", {
+            class: "project-summary-text subtle danger",
+            text: `${es ? "Fallos recientes" : "Recent failures"}: ${recent.join(" | ")}`,
+          })
+        );
+      }
+    }
+
+    if (candidates.length) {
+      const actions = el("div", { class: "mini-list" });
+      candidates.slice(0, 5).forEach((toolName) => {
+        const name = String(toolName || "").trim();
+        if (!name) return;
+        const btn = el("button", { class: "icon-btn small", text: `▶ ${name}`, attrs: { type: "button" } });
+        btn.addEventListener("click", () => runProjectQuickTool(name, context));
+        actions.appendChild(btn);
+      });
+      card.appendChild(actions);
+    }
+
+    const action = buildPlannerAction(context);
+    if (action) {
+      const actions = el("div", { class: "mini-list" });
+      const btn = el("button", { class: "icon-btn small", text: action.label, attrs: { type: "button" } });
+      btn.addEventListener("click", action.run);
+      actions.appendChild(btn);
+      card.appendChild(actions);
+    }
+    return card;
+  };
+
+  if (!state.activeProjectId || !detail) {
+    const manualRoot = String(state.manualProjectRoot || "").trim();
+    const wrap = el("div", { class: "project-meta-grid" });
+    const infoCard = el("div", { class: "project-meta-card" });
+    infoCard.appendChild(el("strong", { text: es ? "Contexto local" : "Local context" }));
+    infoCard.appendChild(
+      el("div", {
+        class: "project-summary-text",
+        text: manualRoot
+          ? (es
+              ? `Root manual activo: ${manualRoot}. Registra o activa un proyecto para ver resumen, entrypoints, dependencias y configs.`
+              : `Manual root active: ${manualRoot}. Register or activate a project to view summary, entrypoints, dependencies, and configs.`)
+          : (es
+              ? "Selecciona un proyecto activo o un root manual para empezar."
+              : "Select an active project or a manual root to begin."),
+      })
+    );
+    wrap.appendChild(infoCard);
+    if (capabilityItems.length) {
+      const capCard = el("div", { class: "project-meta-card" });
+      capCard.appendChild(el("strong", { text: es ? "Capabilities" : "Capabilities" }));
+      const list = el("div", { class: "mini-list" });
+      capabilityItems.forEach((item) => {
+        list.appendChild(el("span", { class: `mini-chip ${capabilityChipClass(item) || (!item.ok ? "warn" : "")}`, text: `${item.label}: ${item.value}` }));
+      });
+      capCard.appendChild(list);
+      wrap.appendChild(capCard);
+    }
+    if (validationItems) {
+      const validationCard = el("div", { class: "project-meta-card" });
+      validationCard.appendChild(el("strong", { text: es ? "Validación" : "Validation" }));
+      const list = el("div", { class: "mini-list" });
+      list.appendChild(
+        el("span", {
+          class: `mini-chip ${validationItems.browserSmokeStrictDefault ? "" : "warn"}`,
+          text: `${es ? "Browser gate" : "Browser gate"}: ${validationItems.browserSmokeStrictDefault ? "strict" : "soft"}`,
+        })
+      );
+      if (validationItems.startupGate.length) {
+        list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Startup" : "Startup"}: ${validationItems.startupGate.join(" → ")}` }));
+      }
+      if (validationItems.verifyFull.length) {
+        list.appendChild(el("span", { class: "mini-chip", text: `verify_full: ${validationItems.verifyFull.join(" → ")}` }));
+      }
+      const startupRun = validationItems.lastRuns?.startup_gate || null;
+      const verifyRun = validationItems.lastRuns?.verify_full || null;
+      if (startupRun?.status) {
+        list.appendChild(el("span", { class: `mini-chip ${validationFlowStatus(startupRun)}`, text: `${es ? "Último startup" : "Last startup"}: ${startupRun.status}` }));
+      }
+      if (verifyRun?.status) {
+        list.appendChild(el("span", { class: `mini-chip ${validationFlowStatus(verifyRun)}`, text: `verify_full: ${verifyRun.status}` }));
+      }
+      validationCard.appendChild(list);
+      if (validationItems.lastUpdatedMs) {
+        validationCard.appendChild(
+          el("div", {
+            class: "project-summary-text",
+            text: `${es ? "Última validación" : "Last validation"}: ${formatAgo(validationItems.lastUpdatedMs)}`,
+          })
+        );
+      }
+      wrap.appendChild(validationCard);
+    }
+    const plannerCard = buildPlannerCard();
+    if (plannerCard) wrap.appendChild(plannerCard);
+    dom.projectMeta.appendChild(wrap);
+    return;
+  }
+
+  const summaryText = detail.summary || detail.context?.project_summary || "—";
+  const grid = el("div", { class: "project-meta-grid" });
+
+  const summaryCard = el("div", { class: "project-meta-card" });
+  summaryCard.appendChild(el("strong", { text: es ? "Resumen" : "Summary" }));
+  summaryCard.appendChild(el("div", { class: "project-summary-text", text: summaryText }));
+  const projectStatus = String(detail?.project_status || detail?.project?.status || "").trim().toLowerCase();
+  if (projectStatus && !["ingested", "ready", "indexed"].includes(projectStatus)) {
+    summaryCard.appendChild(
+      el("div", {
+        class: "project-summary-text subtle",
+        text: es
+          ? `Estado del proyecto: ${projectStatus}. Ejecuta ingest para habilitar entrypoints/dependencias/configs.`
+          : `Project status: ${projectStatus}. Run ingest to enable entrypoints/dependencies/configs.`,
+      })
+    );
+  }
+  grid.appendChild(summaryCard);
+
+  const ideaRows = Array.isArray(detail.ideas) ? detail.ideas : [];
+  if (ideaRows.length) {
+    const ideasCard = el("div", { class: "project-meta-card" });
+    ideasCard.appendChild(el("strong", { text: es ? "Ideas de mejora" : "Improvement ideas" }));
+    ideaRows.slice(0, 6).forEach((item) => {
+      if (!item || typeof item !== "object") return;
+      const priority = String(item.priority || "").trim().toUpperCase();
+      const title = String(item.title || "").trim();
+      const detailText = String(item.detail || "").trim();
+      const row = el("div", { class: "project-idea-row" });
+      const text = el("div", { class: "project-summary-text" });
+      text.textContent = [priority ? `[${priority}]` : "", title, detailText].filter(Boolean).join(" ");
+      row.appendChild(text);
+      if (isIdeaStarterSupported(item)) {
+        const applyBtn = el("button", {
+          class: "action-btn",
+          text: es ? "Aplicar" : "Apply",
+          attrs: { type: "button" },
+        });
+        applyBtn.addEventListener("click", () => {
+          void applyProjectIdeaStarter(item.id);
+        });
+        row.appendChild(applyBtn);
+      }
+      ideasCard.appendChild(row);
+    });
+    grid.appendChild(ideasCard);
+  }
+
+  const intelligence = detail.intelligence && typeof detail.intelligence === "object" ? detail.intelligence : null;
+  if (intelligence) {
+    const intelligenceCard = el("div", { class: "project-meta-card" });
+    intelligenceCard.appendChild(el("strong", { text: es ? "Inteligencia del proyecto" : "Project intelligence" }));
+    const list = el("div", { class: "mini-list" });
+    list.appendChild(
+      el("span", {
+        class: "mini-chip",
+        text: `${es ? "Archivos" : "Files"}: ${Number(intelligence.files_scanned || 0)}`,
+      })
+    );
+    list.appendChild(
+      el("span", {
+        class: "mini-chip",
+        text: `${es ? "Relaciones" : "Links"}: ${Number(intelligence.internal_edge_count || 0)}`,
+      })
+    );
+    list.appendChild(
+      el("span", {
+        class: "mini-chip",
+        text: `${es ? "Hotspots" : "Hotspots"}: ${Array.isArray(intelligence.hotspots) ? intelligence.hotspots.length : 0}`,
+      })
+    );
+    list.appendChild(
+      el("span", {
+        class: "mini-chip",
+        text: `${es ? "Rutas" : "Routes"}: ${Number(intelligence.route_count || 0)}`,
+      })
+    );
+    if (Array.isArray(intelligence.mutual_edges) && intelligence.mutual_edges.length) {
+      list.appendChild(
+        el("span", {
+          class: "mini-chip warn",
+          text: `${es ? "Ciclos simples" : "Simple cycles"}: ${intelligence.mutual_edges.length}`,
+        })
+      );
+    }
+    if (Array.isArray(intelligence.shared_symbol_clusters) && intelligence.shared_symbol_clusters.length) {
+      list.appendChild(
+        el("span", {
+          class: "mini-chip",
+          text: `${es ? "Símbolos repetidos" : "Shared symbols"}: ${intelligence.shared_symbol_clusters.length}`,
+        })
+      );
+    }
+    intelligenceCard.appendChild(list);
+
+    const hotspotRows = Array.isArray(intelligence.hotspots) ? intelligence.hotspots.slice(0, 4) : [];
+    if (hotspotRows.length) {
+      intelligenceCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: es ? "Archivos más conectados" : "Most connected files",
+        })
+      );
+      const hotspotList = el("div", { class: "mini-list" });
+      hotspotRows.forEach((item) => {
+        hotspotList.appendChild(
+          el("span", {
+            class: "mini-chip",
+            text: `${item.path} (${es ? "in" : "in"}:${Number(item.inbound_refs || 0)} ${es ? "out" : "out"}:${Number(item.outbound_refs || 0)})`,
+          })
+        );
+      });
+      intelligenceCard.appendChild(hotspotList);
+    }
+
+    const clusterRows = Array.isArray(intelligence.shared_symbol_clusters) ? intelligence.shared_symbol_clusters.slice(0, 3) : [];
+    if (clusterRows.length) {
+      intelligenceCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: es ? "Símbolos compartidos que merecen revisión" : "Shared symbols worth reviewing",
+        })
+      );
+      const clusterList = el("div", { class: "mini-list" });
+      clusterRows.forEach((item) => {
+        clusterList.appendChild(
+          el("span", {
+            class: "mini-chip subtle",
+            text: `${item.symbol} (${Number(item.count || 0)})`,
+          })
+        );
+      });
+      intelligenceCard.appendChild(clusterList);
+    }
+
+    const symbolHotspots = Array.isArray(intelligence.symbol_hotspots) ? intelligence.symbol_hotspots.slice(0, 3) : [];
+    if (symbolHotspots.length) {
+      intelligenceCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: es ? "Símbolos con mayor alcance" : "Highest-reach symbols",
+        })
+      );
+      const symbolList = el("div", { class: "mini-list" });
+      symbolHotspots.forEach((item) => {
+        symbolList.appendChild(
+          el("span", {
+            class: "mini-chip",
+            text: `${item.symbol} (${es ? "refs" : "refs"}:${Number(item.reference_count || 0)})`,
+          })
+        );
+      });
+      intelligenceCard.appendChild(symbolList);
+    }
+
+    const publicApiSymbols = Array.isArray(intelligence.public_api_symbols) ? intelligence.public_api_symbols.slice(0, 3) : [];
+    if (publicApiSymbols.length) {
+      intelligenceCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: es ? "Superficie pública detectada" : "Detected public surface",
+        })
+      );
+      const publicApiList = el("div", { class: "mini-list" });
+      publicApiSymbols.forEach((item) => {
+        publicApiList.appendChild(
+          el("span", {
+            class: "mini-chip",
+            text: `${item.symbol}@${item.path} [${(item.reasons || []).join("/")}]`,
+          })
+        );
+      });
+      intelligenceCard.appendChild(publicApiList);
+    }
+
+    const symbolCallHotspots = Array.isArray(intelligence.symbol_call_hotspots) ? intelligence.symbol_call_hotspots.slice(0, 3) : [];
+    if (symbolCallHotspots.length) {
+      intelligenceCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: es ? "Símbolos con llamadas detectadas" : "Symbols with detected calls",
+        })
+      );
+      const callList = el("div", { class: "mini-list" });
+      symbolCallHotspots.forEach((item) => {
+        callList.appendChild(
+          el("span", {
+            class: "mini-chip",
+            text: `${item.symbol} (${es ? "calls" : "calls"}:${Number(item.call_edge_count || 0)})`,
+          })
+        );
+      });
+      intelligenceCard.appendChild(callList);
+    }
+
+    const routeHotspots = Array.isArray(intelligence.route_hotspots) ? intelligence.route_hotspots.slice(0, 3) : [];
+    if (routeHotspots.length) {
+      intelligenceCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: es ? "Superficie API detectada" : "Detected API surface",
+        })
+      );
+      const routeList = el("div", { class: "mini-list" });
+      routeHotspots.forEach((item) => {
+        const routePreview = Array.isArray(item.routes)
+          ? item.routes.slice(0, 2).map((row) => `${row.method} ${row.resolved_route || row.route}`).join(", ")
+          : "";
+        routeList.appendChild(
+          el("span", {
+            class: "mini-chip",
+            text: `${item.path} (${Number(item.route_count || 0)})${routePreview ? ` - ${routePreview}` : ""}`,
+          })
+        );
+      });
+      intelligenceCard.appendChild(routeList);
+    }
+
+    const runtimeSurfaceHotspots = Array.isArray(intelligence.runtime_surface_hotspots) ? intelligence.runtime_surface_hotspots.slice(0, 3) : [];
+    if (runtimeSurfaceHotspots.length) {
+      intelligenceCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: es ? "Superficies runtime detectadas" : "Detected runtime surfaces",
+        })
+      );
+      const runtimeList = el("div", { class: "mini-list" });
+      runtimeSurfaceHotspots.forEach((item) => {
+        const appNames = Array.isArray(item.apps) ? item.apps.map((app) => app.app_name).filter(Boolean).join(", ") : "";
+        runtimeList.appendChild(
+          el("span", {
+            class: "mini-chip",
+            text: `${item.path}${appNames ? `#${appNames}` : ""} (${Number(item.served_route_count || 0)})`,
+          })
+        );
+      });
+      intelligenceCard.appendChild(runtimeList);
+    }
+
+    const envVarHotspots = Array.isArray(intelligence.env_var_hotspots) ? intelligence.env_var_hotspots.slice(0, 3) : [];
+    if (envVarHotspots.length) {
+      intelligenceCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: es ? "Contrato de entorno detectado" : "Detected environment contract",
+        })
+      );
+      const envList = el("div", { class: "mini-list" });
+      envVarHotspots.forEach((item) => {
+        envList.appendChild(
+          el("span", {
+            class: "mini-chip",
+            text: `${item.env} (${es ? "files" : "files"}:${Number(item.file_count || 0)})`,
+          })
+        );
+      });
+      intelligenceCard.appendChild(envList);
+    }
+
+    const duplicateLogicClusters = Array.isArray(intelligence.duplicate_logic_clusters) ? intelligence.duplicate_logic_clusters.slice(0, 3) : [];
+    if (duplicateLogicClusters.length) {
+      intelligenceCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: es ? "Lógica duplicada detectada" : "Detected duplicate logic",
+        })
+      );
+      const duplicateList = el("div", { class: "mini-list" });
+      duplicateLogicClusters.forEach((item) => {
+        duplicateList.appendChild(
+          el("span", {
+            class: "mini-chip warn",
+            text: `${(item.symbols || []).join("/") || item.fingerprint} (${Number(item.path_count || 0)})`,
+          })
+        );
+      });
+      intelligenceCard.appendChild(duplicateList);
+    }
+
+    const refactorRows = Array.isArray(intelligence.refactor_candidates) ? intelligence.refactor_candidates.slice(0, 3) : [];
+    if (refactorRows.length) {
+      intelligenceCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: es ? "Candidatas de refactor" : "Refactor candidates",
+        })
+      );
+      const refactorList = el("div", { class: "mini-list" });
+      refactorRows.forEach((item) => {
+        refactorList.appendChild(
+          el("span", {
+            class: "mini-chip warn",
+            text: `${item.symbol} (${es ? "defs" : "defs"}:${Number(item.definition_count || 0)} ${es ? "refs" : "refs"}:${Number(item.reference_count || 0)})`,
+          })
+        );
+      });
+      intelligenceCard.appendChild(refactorList);
+    }
+
+    const isolatedSymbols = Array.isArray(intelligence.isolated_symbol_candidates) ? intelligence.isolated_symbol_candidates.slice(0, 3) : [];
+    if (isolatedSymbols.length) {
+      intelligenceCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: es ? "Símbolos aislados" : "Isolated symbols",
+        })
+      );
+      const isolatedList = el("div", { class: "mini-list" });
+      isolatedSymbols.forEach((item) => {
+        isolatedList.appendChild(
+          el("span", {
+            class: "mini-chip subtle",
+            text: `${item.symbol}@${item.path} (${item.confidence})`,
+          })
+        );
+      });
+      intelligenceCard.appendChild(isolatedList);
+    }
+    grid.appendChild(intelligenceCard);
+  }
+
+  const impact = state.activeProjectImpact && typeof state.activeProjectImpact === "object" ? state.activeProjectImpact : null;
+  if (impact && String(impact.query || "").trim()) {
+    const impactCard = el("div", { class: "project-meta-card" });
+    impactCard.appendChild(el("strong", { text: es ? "Impacto del foco actual" : "Current focus impact" }));
+    impactCard.appendChild(
+      el("div", {
+        class: "project-summary-text",
+        text: `${es ? "Consulta" : "Query"}: ${String(impact.query || "").trim()}`,
+      })
+    );
+    const touched = Array.isArray(impact.likely_touched_files) ? impact.likely_touched_files.slice(0, 8) : [];
+    if (touched.length) {
+      const touchedList = el("div", { class: "mini-list" });
+      touched.forEach((item) => touchedList.appendChild(el("span", { class: "mini-chip", text: String(item) })));
+      impactCard.appendChild(touchedList);
+    }
+    const importedBy = Array.isArray(impact.imported_by) ? impact.imported_by : [];
+    if (importedBy.length) {
+      impactCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: `${es ? "Consumido por" : "Imported by"}: ${importedBy.map((item) => item.path).join(", ")}`,
+        })
+      );
+    }
+    const importsTo = Array.isArray(impact.imports_to) ? impact.imports_to : [];
+    if (importsTo.length) {
+      impactCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: `${es ? "Depende de" : "Imports"}: ${importsTo.map((item) => item.path).join(", ")}`,
+        })
+      );
+    }
+    const neighbors = Array.isArray(impact.same_symbol_neighbors) ? impact.same_symbol_neighbors : [];
+    if (neighbors.length) {
+      impactCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: `${es ? "Símbolos relacionados" : "Related symbols"}: ${neighbors.join(", ")}`,
+        })
+      );
+    }
+    const definedIn = Array.isArray(impact.defined_in) ? impact.defined_in : [];
+    if (definedIn.length) {
+      impactCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: `${es ? "Definido en" : "Defined in"}: ${definedIn.map((item) => `${item.path}:${item.line_start}`).join(", ")}`,
+        })
+      );
+    }
+    const referencedByFiles = Array.isArray(impact.referenced_by_files) ? impact.referenced_by_files : [];
+    if (referencedByFiles.length) {
+      impactCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: `${es ? "Referenciado por símbolo" : "Symbol referenced by"}: ${referencedByFiles.map((item) => `${item.path} (${item.count})`).join(", ")}`,
+        })
+      );
+    }
+    const callEdgesTo = Array.isArray(impact.call_edges_to) ? impact.call_edges_to : [];
+    if (callEdgesTo.length) {
+      impactCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: `${es ? "Llamado desde" : "Called from"}: ${callEdgesTo.map((item) => `${item.from_path} (${item.count})`).join(", ")}`,
+        })
+      );
+    }
+    const callEdgesFrom = Array.isArray(impact.call_edges_from) ? impact.call_edges_from : [];
+    if (callEdgesFrom.length) {
+      impactCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: `${es ? "Llama a" : "Calls into"}: ${callEdgesFrom.map((item) => `${item.to_path}:${item.symbol}`).join(", ")}`,
+        })
+      );
+    }
+    const envVarsInScope = Array.isArray(impact.env_vars_in_scope) ? impact.env_vars_in_scope : [];
+    if (envVarsInScope.length) {
+      impactCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: `${es ? "Variables de entorno" : "Environment variables"}: ${envVarsInScope.map((item) => `${item.env}@${item.path}`).join(", ")}`,
+        })
+      );
+    }
+    const routesInScope = Array.isArray(impact.routes_in_scope) ? impact.routes_in_scope : [];
+    if (routesInScope.length) {
+      impactCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: `${es ? "Rutas en foco" : "Routes in scope"}: ${routesInScope.map((item) => `${item.method} ${item.resolved_route || item.route}@${item.path}${item.handler ? `#${item.handler}` : ""}`).join(", ")}`,
+        })
+      );
+    }
+    const runtimeSurfacesInScope = Array.isArray(impact.runtime_surfaces_in_scope) ? impact.runtime_surfaces_in_scope : [];
+    if (runtimeSurfacesInScope.length) {
+      impactCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: `${es ? "Runtime owner" : "Runtime owner"}: ${runtimeSurfacesInScope.map((item) => `${item.path}#${item.app_name} (${Number(item.served_route_count || 0)})`).join(", ")}`,
+        })
+      );
+    }
+    const publicApiSymbolsInScope = Array.isArray(impact.public_api_symbols_in_scope) ? impact.public_api_symbols_in_scope : [];
+    if (publicApiSymbolsInScope.length) {
+      impactCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: `${es ? "Símbolos públicos en foco" : "Public symbols in scope"}: ${publicApiSymbolsInScope.map((item) => `${item.symbol}@${item.path}[${(item.reasons || []).join("/")}]`).join(", ")}`,
+        })
+      );
+    }
+    const isolatedSymbolsInScope = Array.isArray(impact.isolated_symbols_in_scope) ? impact.isolated_symbols_in_scope : [];
+    if (isolatedSymbolsInScope.length) {
+      impactCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: `${es ? "Símbolos aislados" : "Isolated symbols"}: ${isolatedSymbolsInScope.map((item) => `${item.symbol}@${item.path}`).join(", ")}`,
+        })
+      );
+    }
+    const refactorCandidates = Array.isArray(impact.refactor_candidates) ? impact.refactor_candidates : [];
+    if (refactorCandidates.length) {
+      impactCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: `${es ? "Refactor sugerido" : "Suggested refactor"}: ${refactorCandidates.map((item) => `${item.symbol} (${item.definition_count}/${item.reference_count})`).join(", ")}`,
+        })
+      );
+    }
+    const duplicateLogicNeighbors = Array.isArray(impact.duplicate_logic_neighbors) ? impact.duplicate_logic_neighbors : [];
+    if (duplicateLogicNeighbors.length) {
+      impactCard.appendChild(
+        el("div", {
+          class: "project-summary-text subtle",
+          text: `${es ? "Vecinos con lógica duplicada" : "Duplicate-logic neighbors"}: ${duplicateLogicNeighbors.map((item) => `${(item.symbols || []).join("/") || item.fingerprint} (${item.path_count})`).join(", ")}`,
+        })
+      );
+    }
+    const renameScope = impact.rename_scope && typeof impact.rename_scope === "object" ? impact.rename_scope : null;
+    if (renameScope?.safety) {
+      const safety = renameScope.safety;
+      impactCard.appendChild(
+        el("div", {
+          class: `project-summary-text subtle${String(safety.level || "") === "low" ? " danger" : String(safety.level || "") === "medium" ? " warn" : ""}`,
+          text: `${es ? "Seguridad de rename" : "Rename safety"}: ${String(safety.level || "").toUpperCase()} (${Number(safety.score || 0)})`,
+        })
+      );
+      if (Array.isArray(safety.warnings) && safety.warnings.length) {
+        impactCard.appendChild(
+          el("div", {
+            class: "project-summary-text subtle",
+            text: `${es ? "Warnings" : "Warnings"}: ${safety.warnings.join(", ")}`,
+          })
+        );
+      }
+    }
+    const renameSymbol = String((impact.matched_symbols?.[0]?.symbol) || (refactorCandidates?.[0]?.symbol) || "").trim();
+    if (renameSymbol) {
+      const actions = el("div", { class: "mini-list" });
+      const renameBtn = el("button", {
+        class: "icon-btn small",
+        text: es ? `Renombrar ${renameSymbol}` : `Rename ${renameSymbol}`,
+        attrs: { type: "button" },
+      });
+      renameBtn.addEventListener("click", () => {
+        void prepareSymbolRenamePlan(renameSymbol);
+      });
+      actions.appendChild(renameBtn);
+      impactCard.appendChild(actions);
+    }
+    grid.appendChild(impactCard);
+  }
+
+  const sections = [
+    { label: es ? "Entrypoints" : "Entrypoints", items: detail.entrypoints || [] },
+    { label: es ? "Dependencias" : "Dependencies", items: detail.dependencies || [] },
+    { label: es ? "Configs" : "Configs", items: detail.configs || [] },
+  ];
+  sections.forEach((section) => {
+    const card = el("div", { class: "project-meta-card" });
+    card.appendChild(el("strong", { text: section.label }));
+    const list = el("div", { class: "mini-list" });
+    const rows = Array.isArray(section.items) ? section.items : [];
+    if (!rows.length) {
+      list.appendChild(el("span", { class: "mini-chip", text: "—" }));
+    } else {
+      rows.slice(0, 8).forEach((item) => list.appendChild(el("span", { class: "mini-chip", text: String(item) })));
+    }
+    card.appendChild(list);
+    grid.appendChild(card);
+  });
+
+  if (capabilityItems.length) {
+    const capCard = el("div", { class: "project-meta-card" });
+    capCard.appendChild(el("strong", { text: es ? "Capabilities" : "Capabilities" }));
+    const list = el("div", { class: "mini-list" });
+    capabilityItems.forEach((item) => {
+      list.appendChild(el("span", { class: `mini-chip ${capabilityChipClass(item) || (!item.ok ? "warn" : "")}`, text: `${item.label}: ${item.value}` }));
+    });
+    capCard.appendChild(list);
+    grid.appendChild(capCard);
+  }
+
+  if (validationItems) {
+    const validationCard = el("div", { class: "project-meta-card" });
+    validationCard.appendChild(el("strong", { text: es ? "Validación" : "Validation" }));
+    const list = el("div", { class: "mini-list" });
+    list.appendChild(
+      el("span", {
+        class: `mini-chip ${validationItems.browserSmokeStrictDefault ? "" : "warn"}`,
+        text: `${es ? "Browser gate" : "Browser gate"}: ${validationItems.browserSmokeStrictDefault ? "strict" : "soft"}`,
+      })
+    );
+    if (validationItems.startupGate.length) {
+      list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Startup" : "Startup"}: ${validationItems.startupGate.join(" → ")}` }));
+    }
+    if (validationItems.verifyFull.length) {
+      list.appendChild(el("span", { class: "mini-chip", text: `verify_full: ${validationItems.verifyFull.join(" → ")}` }));
+    }
+    const startupRun = validationItems.lastRuns?.startup_gate || null;
+    const verifyRun = validationItems.lastRuns?.verify_full || null;
+    if (startupRun?.status) {
+      list.appendChild(el("span", { class: `mini-chip ${validationFlowStatus(startupRun)}`, text: `${es ? "Último startup" : "Last startup"}: ${startupRun.status}` }));
+    }
+    if (verifyRun?.status) {
+      list.appendChild(el("span", { class: `mini-chip ${validationFlowStatus(verifyRun)}`, text: `verify_full: ${verifyRun.status}` }));
+    }
+    validationCard.appendChild(list);
+    if (validationItems.lastUpdatedMs) {
+      validationCard.appendChild(
+        el("div", {
+          class: "project-summary-text",
+          text: `${es ? "Última validación" : "Last validation"}: ${formatAgo(validationItems.lastUpdatedMs)}`,
+        })
+      );
+    }
+    grid.appendChild(validationCard);
+  }
+
+  const plannerCard = buildPlannerCard();
+  if (plannerCard) grid.appendChild(plannerCard);
+
+  dom.projectMeta.appendChild(grid);
+}
+
+function buildPlannerAction(context = null) {
+  if (!context || typeof context !== "object") return null;
+  const es = state.lang === LANG.ES;
+  const nextTool = String(context.next_tool || "").trim();
+  if (!nextTool) return null;
+
+  if (nextTool === "web_search") {
+    return {
+      label: es ? "Usar prefijo web:" : "Use web: prefix",
+      run: () => {
+        const current = String(dom.msgInput?.value || "").trim();
+        const draft = current.toLowerCase().startsWith("web:") ? current : `web: ${current}`.trim();
+        if (dom.msgInput) {
+          dom.msgInput.value = draft;
+          autoSizeTextarea(dom.msgInput);
+        }
+        dom.msgInput?.focus();
+      },
+    };
+  }
+
+  if (["project_manifest", "project_files", "project_symbols", "project_excerpt", "file_search"].includes(nextTool)) {
+    return {
+      label: es ? "Abrir proyecto" : "Open project",
+      run: async () => {
+        activateTab("files");
+        if (!state.sidebarVisible) toggleSidebarVisibility();
+        if (state.activeProjectId) {
+          await loadActiveProjectDetail(state.activeProjectId);
+        }
+        await loadProjectTree();
+      },
+    };
+  }
+
+  if (nextTool === "agent_continue") {
+    return {
+      label: es ? "Continuar agente" : "Continue agent",
+      run: async () => {
+        if (!state.conversationId) return;
+        await handleAgentContinue({ useWeb: state.mode === MODES.WEB, synthesize: true });
+      },
+    };
+  }
+
+  if (nextTool === "ingest_log") {
+    return {
+      label: es ? "Ver log de ingesta" : "Open ingest log",
+      run: () => {
+        activateTab("files");
+        dom.ingestLogBtn?.click();
+      },
+    };
+  }
+
+  if (nextTool === "clamav_status") {
+    return {
+      label: es ? "Abrir snapshot" : "Open snapshot",
+      run: () => loadSnapshot(),
+    };
+  }
+
+  return null;
+}
+
+async function runProjectQuickTool(toolName, context = null) {
+  const es = state.lang === LANG.ES;
+  const tool = String(toolName || "").trim();
+  if (!tool) return;
+
+  if (tool === "delete_project") {
+    if (!state.activeProjectId) {
+      appendBubble(es ? "No hay proyecto activo." : "No active project.", "error");
+      return;
+    }
+    // Always require explicit user confirmation for sensitive actions.
+    const ok = window.confirm(es ? "Esto eliminará el proyecto (requiere aprobación). ¿Continuar?" : "This will delete the project (requires approval). Continue?");
+    if (!ok) return;
+    if (state.conversationId) {
+      await executeConversationTool("delete_project", { project_id: state.activeProjectId }, { autoApprove: false });
+    } else {
+      await deleteProject();
+    }
+    await loadRegisteredProjects();
+    await setActiveProject("", { bindConversation: false, loadDetail: true });
+    loadProjectTree();
+    return;
+  }
+
+  if (tool === "web_search") {
+    if (state.chatOnlyExperience) {
+      const current = String(dom.msgInput?.value || "").trim();
+      if (dom.msgInput && !current.toLowerCase().startsWith("web:")) {
+        dom.msgInput.value = `web: ${current}`.trim();
+        autoSizeTextarea(dom.msgInput);
+      }
+    } else {
+      setMode(MODES.WEB);
+    }
+    dom.msgInput?.focus();
+    return;
+  }
+
+  if (tool === "ingest_log") {
+    // Prefer agent-style tool execution (records a turn) when conversation exists.
+    if (state.conversationId) {
+      await executeConversationTool("ingest_log", {}, { title: es ? "Ingest log" : "Ingest log" });
+      return;
+    }
+    activateTab("files");
+    if (!state.sidebarVisible) toggleSidebarVisibility();
+    dom.ingestLogBtn?.click();
+    return;
+  }
+
+  if (tool === "clamav_status") {
+    if (state.conversationId) {
+      await executeConversationTool("clamav_status", {}, { title: "ClamAV" });
+      return;
+    }
+    await loadSnapshot();
+    return;
+  }
+
+  // Project-scoped tools
+  if (!state.activeProjectId) {
+    appendBubble(es ? "No hay proyecto activo." : "No active project.", "error");
+    return;
+  }
+
+  if (tool === "project_manifest" || tool === "project_files") {
+    if (state.conversationId && tool === "project_files") {
+      const q = prompt(es ? "Buscar archivo (ej: auth.py, deps.py, main) :" : "File search (e.g. auth.py, deps.py, main):", String(context?.current_file_focus || "").trim());
+      if (!q) return;
+      await executeConversationTool("project_files", { project_id: state.activeProjectId, q, limit: 80 }, { title: es ? `Files: ${q}` : `Files: ${q}` });
+      return;
+    }
+    activateTab("files");
+    if (!state.sidebarVisible) toggleSidebarVisibility();
+    await loadActiveProjectDetail(state.activeProjectId);
+    await loadProjectTree();
+    return;
+  }
+
+  if (tool === "project_symbols") {
+    const q = prompt(es ? "Buscar símbolo (ej: auth, login, SessionLocal) :" : "Symbol search (e.g. auth, login, SessionLocal):", String(context?.current_symbol_focus || "").trim());
+    if (!q) return;
+    if (state.conversationId) {
+      await executeConversationTool("project_symbols", { project_id: state.activeProjectId, q, limit: 80 }, { title: es ? `Symbols: ${q}` : `Symbols: ${q}` });
+      return;
+    }
+    try {
+      const url = new URL(endpoints.filesProjectSymbols(state.activeProjectId), location.origin);
+      url.searchParams.set("q", q);
+      url.searchParams.set("limit", "80");
+      const res = await fetchWithTimeout(url.toString(), { headers: { Accept: "application/json" } }, { timeout: 20000, retries: 0 });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+      renderSimpleList(data, es ? `Symbols: ${q}` : `Symbols: ${q}`);
+    } catch (err) {
+      console.error(err);
+      appendBubble(es ? "No se pudo buscar símbolos." : "Could not search symbols.", "error");
+    }
+    return;
+  }
+
+  if (tool === "file_search") {
+    const q = prompt(es ? "Buscar archivo (ej: auth.py, deps.py, main) :" : "File search (e.g. auth.py, deps.py, main):", String(context?.current_file_focus || "").trim());
+    if (!q) return;
+    if (state.conversationId) {
+      await executeConversationTool("project_files", { project_id: state.activeProjectId, q, limit: 80 }, { title: es ? `Files: ${q}` : `Files: ${q}` });
+      return;
+    }
+    try {
+      const url = new URL(endpoints.filesProjectFiles(state.activeProjectId), location.origin);
+      url.searchParams.set("q", q);
+      url.searchParams.set("limit", "80");
+      const res = await fetchWithTimeout(url.toString(), { headers: { Accept: "application/json" } }, { timeout: 20000, retries: 0 });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+      renderSimpleList(data, es ? `Files: ${q}` : `Files: ${q}`);
+    } catch (err) {
+      console.error(err);
+      appendBubble(es ? "No se pudo buscar archivos." : "Could not search files.", "error");
+    }
+    return;
+  }
 }
 
 function renderProjectList() {
   if (!dom.projectList) return;
-  const list = [];
-  if (state.currentProjectRoot) list.push(state.currentProjectRoot);
-  state.uploadedProjects.forEach((p) => {
-    if (!list.includes(p)) list.push(p);
-  });
-  if (!list.length) {
-    dom.projectList.textContent = state.lang === LANG.ES ? "Sin proyectos cargados." : "No projects loaded.";
+  dom.projectList.innerHTML = "";
+  const es = state.lang === LANG.ES;
+
+  if (!state.projectRecords.length) {
+    dom.projectList.textContent = es ? "Sin proyectos cargados." : "No projects loaded.";
+    renderActiveProjectBadge();
+    renderProjectMeta();
     return;
   }
-  const lines = list.map((p) => `• ${p}`);
-  dom.projectList.textContent = lines.join("\n");
+
+  state.projectRecords.forEach((project) => {
+    const id = String(project.project_id || "");
+    const rootPath = String(project.root_path || "");
+    const card = el("div", { class: `project-list-card ${id === state.activeProjectId ? "active" : ""}` });
+    card.addEventListener("click", () => setActiveProject(id, { rootPath }));
+
+    const head = el("div", { class: "project-list-head" });
+    head.appendChild(el("div", { class: "project-list-id", text: id || "project" }));
+    const status = el("span", { class: "origin-pill local", text: String(project.status || "uploaded") });
+    head.appendChild(status);
+    card.appendChild(head);
+
+    const meta = el("div", { class: "project-list-meta" });
+    meta.appendChild(el("span", { text: `${es ? "Fuente" : "Source"}: ${project.source || "-"}` }));
+    meta.appendChild(el("span", { text: `${es ? "Chunks" : "Chunks"}: ${project.chunk_count ?? 0}` }));
+    card.appendChild(meta);
+
+    if (rootPath) {
+      card.appendChild(el("div", { class: "project-list-path", text: rootPath }));
+    }
+    dom.projectList.appendChild(card);
+  });
+  renderActiveProjectBadge();
+  renderProjectMeta();
+}
+
+async function bindConversationProject(projectId) {
+  if (!state.conversationId) return;
+  const payload = { project_id: projectId || null };
+  const res = await fetchWithTimeout(endpoints.bindConversationProject(state.conversationId), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(payload),
+  }, { timeout: 10000, retries: 0 });
+  if (!res.ok) {
+    const data = await safeJson(res);
+    throw new Error(data?.detail || "bind failed");
+  }
+}
+
+function isAbsoluteProjectRootPath(path) {
+  const p = String(path || "").trim();
+  if (!p) return false;
+  if (p.startsWith("/")) return true;
+  return /^[A-Za-z]:[\\/]/.test(p);
+}
+
+async function ensureCurrentRootRegistered() {
+  const rootPath = String(state.manualProjectRoot || "").trim();
+  if (!rootPath) throw new Error("missing root");
+  if (!isAbsoluteProjectRootPath(rootPath)) {
+    clearManualProjectRoot({ syncSelect: true });
+    throw new Error("manual-root-must-be-absolute");
+  }
+  const existing = state.projectRecords.find((item) => String(item?.root_path || "") === rootPath);
+  if (existing?.project_id) {
+    if (String(existing.project_id) !== state.activeProjectId) {
+      await setActiveProject(String(existing.project_id), {
+        rootPath,
+        bindConversation: false,
+        loadDetail: false,
+      });
+    }
+    return { project_id: String(existing.project_id), path: rootPath };
+  }
+
+  const res = await fetchWithTimeout(endpoints.filesRegisterRoot, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ path: rootPath }),
+  }, { timeout: 15000, retries: 0 });
+  const data = await safeJson(res);
+  if (!res.ok) {
+    if (res.status === 400) {
+      clearManualProjectRoot({ syncSelect: true });
+    }
+    throw new Error(data?.detail || "register-root failed");
+  }
+  if (data?.project_id) {
+    await loadRegisteredProjects();
+    await setActiveProject(String(data.project_id), {
+      rootPath: String(data.path || rootPath),
+      bindConversation: false,
+      loadDetail: true,
+    });
+  }
+  return data;
+}
+
+async function syncConversationState(convId) {
+  if (!convId) return;
+  try {
+    const res = await fetchWithTimeout(endpoints.conversationState(convId), { headers: { Accept: "application/json" } }, { timeout: 10000, retries: 0 });
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error();
+    const remoteProjectId = String(data?.state?.active_project_id || "");
+    state.activeProjectId = remoteProjectId;
+    if (remoteProjectId) localStorage.setItem("aegis_active_project_id", remoteProjectId);
+    else localStorage.removeItem("aegis_active_project_id");
+    if (remoteProjectId) clearManualProjectRoot({ syncSelect: false });
+    renderActiveProjectSelect();
+    renderProjectList();
+    renderActiveProjectBadge();
+    if (remoteProjectId) await loadActiveProjectDetail(remoteProjectId);
+    else {
+      state.activeProjectDetail = null;
+      state.activeProjectImpact = null;
+      renderProjectMeta();
+    }
+  } catch (err) {
+    console.error("conversation-state-sync-error", err);
+  }
+}
+
+async function loadActiveProjectDetail(projectId) {
+  if (!projectId) {
+    state.activeProjectDetail = null;
+    state.activeProjectImpact = null;
+    renderProjectMeta();
+    return;
+  }
+  if (!hasAuthForScope("files")) {
+    state.activeProjectDetail = null;
+    state.activeProjectImpact = null;
+    renderProjectMeta();
+    return;
+  }
+  try {
+    const detailRes = await fetchWithTimeout(
+      new URL(endpoints.filesProjectDetail(projectId), location.origin).toString() + `?lang=${state.lang}`,
+      {},
+      { timeout: 12000, retries: 0 }
+    );
+    const detailData = await safeJson(detailRes);
+    if (!detailRes.ok) throw new Error(detailData?.detail || "detail failed");
+
+    const projectStatus = String(detailData?.project?.status || "").trim().toLowerCase();
+    const manifestReady =
+      ["ingested", "ready", "indexed"].includes(projectStatus)
+      || !!(detailData?.manifest && typeof detailData.manifest === "object");
+
+    let entryData = { items: [] };
+    let depsData = { items: [] };
+    let cfgData = { items: [] };
+    let ideasData = { items: [] };
+
+    if (manifestReady) {
+      const [entryRes, depsRes, cfgRes, ideasRes] = await Promise.all([
+        fetchWithTimeout(endpoints.filesProjectEntrypoints(projectId), {}, { timeout: 12000, retries: 0 }),
+        fetchWithTimeout(endpoints.filesProjectDependencies(projectId), {}, { timeout: 12000, retries: 0 }),
+        fetchWithTimeout(endpoints.filesProjectConfigs(projectId), {}, { timeout: 12000, retries: 0 }),
+        fetchWithTimeout(new URL(endpoints.filesProjectIdeas(projectId), location.origin).toString() + `?lang=${state.lang}`, {}, { timeout: 12000, retries: 0 }),
+      ]);
+      const [entryJson, depsJson, cfgJson, ideasJson] = await Promise.all([
+        safeJson(entryRes),
+        safeJson(depsRes),
+        safeJson(cfgRes),
+        safeJson(ideasRes),
+      ]);
+      if (entryRes.ok && entryJson && typeof entryJson === "object") entryData = entryJson;
+      if (depsRes.ok && depsJson && typeof depsJson === "object") depsData = depsJson;
+      if (cfgRes.ok && cfgJson && typeof cfgJson === "object") cfgData = cfgJson;
+      if (ideasRes.ok && ideasJson && typeof ideasJson === "object") ideasData = ideasJson;
+    }
+
+    state.activeProjectDetail = {
+      ...(detailData || {}),
+      entrypoints: Array.isArray(entryData?.items) ? entryData.items : [],
+      dependencies: Array.isArray(depsData?.items) ? depsData.items : [],
+      configs: Array.isArray(cfgData?.items) ? cfgData.items : [],
+      ideas: Array.isArray(ideasData?.items) ? ideasData.items : [],
+      intelligence: detailData?.intelligence && typeof detailData.intelligence === "object"
+        ? detailData.intelligence
+        : null,
+      manifest_ready: manifestReady,
+      project_status: projectStatus,
+    };
+    const resolvedRoot = getEffectiveProjectRoot();
+    if (resolvedRoot) syncProjectSelectValue(resolvedRoot);
+    void loadProjectImpact();
+  } catch (err) {
+    console.error("active-project-detail-error", err);
+    state.activeProjectDetail = null;
+    state.activeProjectImpact = null;
+  }
+  renderProjectMeta();
+}
+
+async function setActiveProject(projectId, { rootPath = null, bindConversation = true, loadDetail = true } = {}) {
+  const nextProjectId = String(projectId || "");
+  if (nextProjectId !== String(state.activeProjectId || "") && !confirmDiscardFileEdits()) {
+    return false;
+  }
+
+  state.activeProjectId = nextProjectId;
+  if (state.activeProjectId) localStorage.setItem("aegis_active_project_id", state.activeProjectId);
+  else localStorage.removeItem("aegis_active_project_id");
+  if (state.activeProjectId) {
+    // Canonical identity: once project_id is active, manual root must not remain persisted.
+    clearManualProjectRoot({ syncSelect: false });
+  }
+  state.treeSelectionPath = "";
+  state.treeSelectionIsDir = false;
+  if (!state.activeProjectId) {
+    setFileViewerContent(
+      "",
+      state.lang === LANG.ES ? "Selecciona un archivo en Archivos" : "Select a file in Files"
+    );
+  }
+
+  const project = getActiveProjectRecord();
+  const nextRoot = rootPath || project?.root_path || null;
+  if (nextRoot) syncProjectSelectValue(String(nextRoot));
+  else if (!state.manualProjectRoot) syncProjectSelectValue("");
+
+  renderActiveProjectSelect();
+  renderProjectList();
+  renderSourceOriginBar(state.lastChatContext);
+
+  if (loadDetail) await loadActiveProjectDetail(state.activeProjectId);
+  else if (!state.activeProjectId) {
+    state.activeProjectDetail = null;
+    state.activeProjectImpact = null;
+  }
+  loadProjectTree();
+  if (bindConversation && state.conversationId) {
+    try {
+      await bindConversationProject(state.activeProjectId || null);
+    } catch (err) {
+      console.error("bind-project-error", err);
+    }
+  }
+  return true;
+}
+
+function trimAttachmentAnalysis(text, maxChars = 2400) {
+  const raw = String(text || "").trim();
+  if (!raw) return "";
+  if (raw.length <= maxChars) return raw;
+  return `${raw.slice(0, maxChars)}\n… [truncated]`;
+}
+
+function updateChatAttachmentBar() {
+  if (!dom.chatAttachmentBar || !dom.chatAttachmentLabel) return;
+  const es = state.lang === LANG.ES;
+  const a = state.chatAttachment && typeof state.chatAttachment === "object" ? state.chatAttachment : null;
+  if (!a) {
+    dom.chatAttachmentBar.hidden = true;
+    return;
+  }
+  const kind = String(a.kind || "attachment").trim();
+  const name = String(a.name || "attachment").trim();
+  dom.chatAttachmentBar.hidden = false;
+  dom.chatAttachmentLabel.textContent = es
+    ? `Adjunto ${kind}: ${name}`
+    : `Attached ${kind}: ${name}`;
+  if (dom.chatAttachmentAutoWeb) dom.chatAttachmentAutoWeb.checked = !!state.chatAttachmentAutoWeb;
+}
+
+function setChatAttachment(attachment) {
+  if (!attachment || typeof attachment !== "object") return;
+  const analysis = trimAttachmentAnalysis(attachment.analysis || "");
+  if (!analysis) return;
+  state.chatAttachment = {
+    kind: String(attachment.kind || "attachment").trim() || "attachment",
+    name: String(attachment.name || "attachment").trim() || "attachment",
+    analysis,
+  };
+  updateChatAttachmentBar();
+}
+
+function clearChatAttachment({ clearImageRef = false } = {}) {
+  state.chatAttachment = null;
+  if (clearImageRef) state.imageReferenceFile = null;
+  updateChatAttachmentBar();
+}
+
+function buildMessageWithAttachment(message, mode = "general") {
+  const base = String(message || "").trim();
+  const modeValue = String(mode || "").trim().toLowerCase();
+  const a = state.chatAttachment && typeof state.chatAttachment === "object" ? state.chatAttachment : null;
+  if (!base || !a || !a.analysis) return base;
+  if (modeValue === "url" || modeValue === "crypto") return base;
+  if (/\[(?:attached|adjunto)\s+/i.test(base)) return base;
+
+  const es = state.lang === LANG.ES;
+  const head = es
+    ? `[Contexto de adjunto ${a.kind || "archivo"}: ${a.name || "attachment"}]`
+    : `[Attachment context ${a.kind || "file"}: ${a.name || "attachment"}]`;
+  const block = [head, a.analysis].filter(Boolean).join("\n");
+  return `${base}\n\n${block}`;
+}
+
+function updateImageQuickBar() {
+  if (!dom.imageQuickBar) return;
+  const show = state.mode === MODES.IMAGE;
+  dom.imageQuickBar.hidden = !show;
+  if (dom.imageModeGuide) dom.imageModeGuide.hidden = !show;
+  if (dom.attachBtn) {
+    dom.attachBtn.hidden = !show;
+    dom.attachBtn.setAttribute("aria-hidden", String(!show));
+    dom.attachBtn.setAttribute("aria-pressed", String(show));
+    dom.attachBtn.classList.toggle("active", show);
+  }
 }
 
 /* ------------------------- SEND / CHAT ------------------------- */
 
 async function onSend() {
   if (state.pending) return;
+  if (!ensureApiKeyOrPrompt({ action: "chat" })) return;
   const raw = (dom.msgInput?.value || "").trim();
   if (!raw) return;
 
@@ -1606,6 +4455,13 @@ async function onSend() {
 
   if (/^web:\s*/i.test(raw)) { modeForThis = MODES.WEB; text = raw.replace(/^web:\s*/i, "").trim(); }
   if (/^url:\s*/i.test(raw)) { modeForThis = MODES.URL; text = raw.replace(/^url:\s*/i, "").trim(); }
+
+  // image generation shortcut in any mode
+  if (await tryHandleImageCommand(raw)) {
+    dom.msgInput.value = "";
+    autoSizeTextarea(dom.msgInput);
+    return;
+  }
 
   // trade command shortcut in any mode
   if (await tryHandleTradeCommand(text)) {
@@ -1619,7 +4475,7 @@ async function onSend() {
   autoSizeTextarea(dom.msgInput);
 
   setPending(true);
-  appendTyping();
+  appendTyping(getPendingBubbleLabel(modeForThis, text));
 
   const t0 = performance.now();
   try {
@@ -1633,21 +4489,347 @@ async function onSend() {
       await handleChat(text, { mode: "general" });
     }
   } catch (err) {
-    appendBubble(state.lang === LANG.ES ? "Error de red." : "Network error.", "error");
+    appendBubble(formatNetworkError(err), "error");
     console.error(err);
   } finally {
     removeTyping();
     setPending(false);
     state.lastLatencyMs = performance.now() - t0;
-    updateLatencyLabel();
   }
 }
 
+function formatNetworkError(err) {
+  const es = state.lang === LANG.ES;
+  const msg = String(err?.message || "").toLowerCase();
+  const backend = (() => {
+    try {
+      return `${window.location.protocol}//${window.location.hostname}:${window.location.port || "8000"}`;
+    } catch {
+      return "http://127.0.0.1:8000";
+    }
+  })();
+  if (err?.name === "AbortError") {
+    return es ? "Timeout: la petición tardó demasiado." : "Timeout: request took too long.";
+  }
+  if (msg.includes("failed to fetch") || msg.includes("networkerror")) {
+    return es
+      ? `Error de conexión al backend (${backend}). No es un fallo del modo web: el servidor está caído o no es alcanzable.`
+      : `Backend connection error (${backend}). This is not a web-mode issue: server is down or unreachable.`;
+  }
+  return es ? "Error de red." : "Network error.";
+}
+
+function looksProjectScopedMessage(text) {
+  if (!state.activeProjectId) return false;
+  const lower = String(text || "").toLowerCase();
+  return [
+    "project",
+    "proyecto",
+    "repo",
+    "repository",
+    "ingested",
+    "ingest",
+    "file",
+    "files",
+    "archivo",
+    "archivos",
+    "path",
+    "ruta",
+    "symbol",
+    "símbolo",
+    "dependency",
+    "dependencia",
+    "entrypoint",
+    "config",
+    "architecture",
+    "arquitectura",
+    "codebase",
+    "this code",
+    "este codigo",
+    "este código",
+  ].some((kw) => lower.includes(kw));
+}
+
+function shouldAutoUseWebForMessage(text, mode = "general") {
+  const modeValue = String(mode || "").trim().toLowerCase();
+  if (modeValue === "crypto" || modeValue === "url") return false;
+  if (modeValue === "web") return true;
+  const raw = String(text || "").trim();
+  if (!raw) return false;
+  // Keep project-introspection turns local-first to avoid forcing web-only
+  // when the user is clearly asking about the active repo/files/symbols.
+  if (looksProjectScopedMessage(raw)) return false;
+  return true;
+}
+
+function buildSourceUsageNotice(context = null) {
+  if (!context || typeof context !== "object") return "";
+  const es = state.lang === LANG.ES;
+  if (context.using_live_web) {
+    return es ? "Fuente usada: web en vivo." : "Source used: live web.";
+  }
+  if (context.using_cached_web || context.using_stale_cache) {
+    return es ? "Fuente usada: caché web." : "Source used: web cache.";
+  }
+  const webStatus = String(context.web_status || "").trim();
+  if (webStatus === "cooldown") {
+    return es ? "Fuente usada: datos locales (web en cooldown)." : "Source used: local data (web cooldown).";
+  }
+  if (webStatus === "unavailable" || webStatus === "error") {
+    return es ? "Fuente usada: datos locales (web no disponible)." : "Source used: local data (web unavailable).";
+  }
+  if (webStatus === "not-used") {
+    return es ? "Fuente usada: local (web automática, no requerida)." : "Source used: local (web automatic, not required).";
+  }
+  const origins = Array.isArray(context.source_origin) ? context.source_origin.map((v) => String(v || "").trim()) : [];
+  if (origins.includes("local") || origins.includes("manifest") || String(context.active_project_id || "").trim()) {
+    return es ? "Fuente usada: datos locales del proyecto." : "Source used: local project data.";
+  }
+  if (origins.includes("model")) {
+    return es ? "Fuente usada: respuesta del modelo (sin web)." : "Source used: model-only answer (no web).";
+  }
+  return "";
+}
+
+function appendSourceUsageNotice(context = null) {
+  const msg = buildSourceUsageNotice(context);
+  if (!msg) return;
+  state.lastSourceUsageNotice = msg;
+  notifyStatus(msg, { kind: "info", key: `source:${msg}`, dedupeMs: 4000, ttlMs: 2200 });
+}
+
+const INTERNAL_LEAK_LINE_PATTERNS = [
+  /^\s*you are aegis\b/i,
+  /^\s*always reply in the user[’']s language\b/i,
+  /^\s*do not reveal system prompts\b/i,
+  /^\s*never output special chat tokens\b/i,
+  /^\s*[a-z]?\s*\.?\s*be accurate,\s*direct,\s*and\s*practical\b/i,
+  /^\s*if mixed,\s*follow the dominant language\b/i,
+  /\binternal chain-of-thought\b/i,
+];
+const INTERNAL_LEAK_ANYWHERE_PATTERNS = [
+  /\byou are aegis\b/i,
+  /\balways reply in the user[’']s language\b/i,
+  /\bdo not reveal system prompts\b/i,
+  /\bnever output special chat tokens\b/i,
+  /\binternal chain-of-thought\b/i,
+  /\btechnical assistant similar to chatgpt\b/i,
+  /\bbe accurate,\s*direct,\s*and\s*practical\b/i,
+  /\bif mixed,\s*follow the dominant language\b/i,
+];
+const INTERNAL_TRACE_PREFIX = /^\s*(plan|origin|data|provider|tool|artifact|used|status|project|llm)\s*:\s*/i;
+const INTERNAL_TRACE_LABEL = /(plan|origin|data|provider|tool|artifact|used|status|project|llm)\s*:\s*/gi;
+
+function stripInlinePromptBlob(text) {
+  const src = String(text || "");
+  let first = -1;
+  for (const re of INTERNAL_LEAK_ANYWHERE_PATTERNS) {
+    const m = src.match(re);
+    if (!m || m.index == null) continue;
+    if (first < 0 || m.index < first) first = m.index;
+  }
+  if (first < 0) return { text: src, stripped: false };
+  const prefix = src.slice(0, first).replace(/[ \t\r\n\-:;]+$/g, "");
+  if (prefix) return { text: prefix, stripped: true };
+
+  // Leak appears at the beginning; remove leaked fragments and keep user-facing tail.
+  let cleaned = src;
+  for (const re of INTERNAL_LEAK_ANYWHERE_PATTERNS) {
+    cleaned = cleaned.replace(re, " ");
+  }
+  cleaned = cleaned.replace(/\b(?:do not|don't|never)\b[^.!?\n]{0,160}(?:[.!?]|$)/gi, " ");
+  cleaned = cleaned.replace(/\b(hidden rules?|tool instructions?|internal metadata|system rules?)\b/gi, " ");
+  cleaned = cleaned.replace(/\btechnical assistant similar to chatgpt\b/gi, " ");
+  cleaned = cleaned.replace(/\s+/g, " ").replace(/^[ \t\r\n\-:;,.]+|[ \t\r\n\-:;,.]+$/g, "");
+  return { text: cleaned || src, stripped: true };
+}
+
+function stripInlineTraceBlob(text) {
+  const src = String(text || "");
+  const matches = Array.from(src.matchAll(/(plan|origin|data|provider|tool|artifact|used|status|project|llm)\s*:\s*/gi));
+  if (matches.length < 2) return { text: src, stripped: false };
+  const first = Number(matches[0]?.index ?? -1);
+  const second = Number(matches[1]?.index ?? -1);
+  const closeCluster = first >= 0 && second >= 0 && (second - first) <= 120;
+  if (matches.length >= 3 || closeCluster) {
+    return { text: src.slice(0, Math.max(0, first)).replace(/[ \t\r\n\-:;]+$/g, ""), stripped: true };
+  }
+  return { text: src, stripped: false };
+}
+
+function sanitizeAssistantAnswerText(rawText) {
+  const es = state.lang === LANG.ES;
+  let text = String(rawText || "").trim();
+  if (!text) return "";
+
+  const inlinePrompt = stripInlinePromptBlob(text);
+  text = inlinePrompt.text;
+  const inlineTrace = stripInlineTraceBlob(text);
+  text = inlineTrace.text;
+
+  const lines = text.split(/\r?\n/);
+  const kept = [];
+  let stripped = false;
+  for (const raw of lines) {
+    const line = String(raw || "");
+    const norm = line.trim();
+    if (!norm) {
+      kept.push(line);
+      continue;
+    }
+    if (INTERNAL_TRACE_PREFIX.test(norm) || INTERNAL_LEAK_LINE_PATTERNS.some((re) => re.test(norm))) {
+      stripped = true;
+      continue;
+    }
+    kept.push(line);
+  }
+  text = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  if (INTERNAL_LEAK_ANYWHERE_PATTERNS.some((re) => re.test(text))) {
+    return es
+      ? "No puedo mostrar instrucciones internas. Reformula en una frase concreta y te respondo limpio."
+      : "I can’t expose internal instructions. Rephrase your request in one clear sentence and I’ll answer cleanly.";
+  }
+  const traceCount = Array.from(text.matchAll(INTERNAL_TRACE_LABEL)).length;
+  if (traceCount >= 3) {
+    return es
+      ? "No puedo mostrar trazas internas en la respuesta. Reformula en una frase concreta y te respondo limpio."
+      : "I can’t expose internal traces in the answer. Rephrase your request in one clear sentence and I’ll answer cleanly.";
+  }
+  if (!text && (stripped || inlinePrompt.stripped || inlineTrace.stripped)) {
+    return es
+      ? "Respuesta sanitizada por seguridad. Reformula en una frase concreta y te respondo limpio."
+      : "Response sanitized for safety. Rephrase your request in one clear sentence and I’ll answer cleanly.";
+  }
+  return text;
+}
+
+async function onAgentStep(evt = null) {
+  if (state.pending) return;
+  if (!ensureApiKeyOrPrompt({ action: "agent" })) return;
+  const es = state.lang === LANG.ES;
+  const raw = (dom.msgInput?.value || "").trim();
+  if (!raw) return;
+  if (!state.conversationId) {
+    appendBubble(es ? "No hay conversación activa. Envía un mensaje primero." : "No active conversation. Send a message first.", "error");
+    return;
+  }
+
+  appendBubble(raw, "user");
+  dom.msgInput.value = "";
+  autoSizeTextarea(dom.msgInput);
+
+  setPending(true);
+  appendTyping(getWorkPendingLabel("agent"));
+  const t0 = performance.now();
+  try {
+    const msgWithAttachment = buildMessageWithAttachment(raw, "agent");
+    const useWeb = state.mode === MODES.WEB;
+    const wantsRun = !!(evt && typeof evt === "object" && evt.shiftKey);
+    if (wantsRun) {
+      await handleAgentRun(msgWithAttachment, { useWeb, synthesize: true, maxIterations: 4, maxTotalToolCalls: 10 });
+    } else {
+      await handleAgentStep(msgWithAttachment, { useWeb, synthesize: true });
+    }
+  } catch (err) {
+    appendBubble(formatNetworkError(err), "error");
+    console.error(err);
+  } finally {
+    removeTyping();
+    setPending(false);
+    state.lastLatencyMs = performance.now() - t0;
+  }
+}
+
+async function onAgentRun(evt = null) {
+  if (state.pending) return;
+  if (!ensureApiKeyOrPrompt({ action: "agent_run" })) return;
+  const es = state.lang === LANG.ES;
+  const raw = (dom.msgInput?.value || "").trim();
+  if (!raw) return;
+  if (!state.conversationId) {
+    appendBubble(es ? "No hay conversación activa. Envía un mensaje primero." : "No active conversation. Send a message first.", "error");
+    return;
+  }
+
+  appendBubble(raw, "user");
+  dom.msgInput.value = "";
+  autoSizeTextarea(dom.msgInput);
+
+  setPending(true);
+  appendTyping(getWorkPendingLabel("agent"));
+  const t0 = performance.now();
+  try {
+    const msgWithAttachment = buildMessageWithAttachment(raw, "agent");
+    const useWeb = state.mode === MODES.WEB;
+    await handleAgentRun(msgWithAttachment, { useWeb, synthesize: true, maxIterations: 6, maxTotalToolCalls: 16 });
+  } catch (err) {
+    appendBubble(formatNetworkError(err), "error");
+    console.error(err);
+  } finally {
+    removeTyping();
+    setPending(false);
+    state.lastLatencyMs = performance.now() - t0;
+  }
+}
+
+async function handleAgentContinue({ useWeb = false, synthesize = true } = {}) {
+  const es = state.lang === LANG.ES;
+  const convId = state.conversationId;
+  if (!convId) throw new Error("missing conversation");
+
+  const res = await fetchWithTimeout(endpoints.conversationAgentContinue(convId), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({
+      lang: state.lang,
+      use_web: !!useWeb,
+      max_iterations: 2,
+      max_total_tool_calls: 6,
+      synthesize: !!synthesize,
+    }),
+  }, { timeout: 0, retries: 0 });
+
+  const data = await safeJson(res);
+  if (!res.ok) {
+    const msg = data?.detail || data?.error || `HTTP ${res.status}`;
+    appendBubble(String(msg), "error");
+    return;
+  }
+
+  const ctx = deriveContextFromAgentStep(data);
+  ctx.source_plan = "tool-first-continue";
+  const answer = sanitizeAssistantAnswerText(data?.response || "");
+  if (answer) appendBubble(answer, "bot", true, ctx);
+  else appendBubble(es ? "Sin respuesta del agente." : "Agent returned empty response.", "error");
+  appendSourceUsageNotice(ctx);
+
+  state.lastChatContext = ctx;
+  updateModeIndicator();
+
+  const sources = normalizeWebResults(data?.sources || []);
+  renderResponseSources("continue", sources, ctx, data);
+  loadConversationTurns({ force: true });
+  loadConversationEvents({ force: true });
+}
+
 async function handleChat(text, { mode = "general" } = {}) {
+  const modeValue = String(mode || "general").trim().toLowerCase();
+  const autoByMessage = shouldAutoUseWebForMessage(text, modeValue);
+  const attachmentPrefersWeb = !!(
+    state.chatAttachment
+    && state.chatAttachmentAutoWeb
+    && modeValue !== "url"
+    && modeValue !== "crypto"
+  );
+  const autoUseWeb = autoByMessage || attachmentPrefersWeb;
+  const effectiveMode = autoByMessage ? "web" : modeValue;
+  const messageForBackend = buildMessageWithAttachment(text, effectiveMode);
   const payload = {
-    message: text,
+    message: messageForBackend,
     lang: state.lang,
-    mode,
+    mode: effectiveMode,
+    use_web: autoUseWeb,
+    active_project_id: state.activeProjectId || "",
     conversation_id: state.conversationId || undefined,
     use_existing: !!state.conversationId,
   };
@@ -1676,12 +4858,29 @@ async function handleChat(text, { mode = "general" } = {}) {
     updateConversationIndicators(conv);
   }
 
-  const answer = data?.response ?? data?.answer ?? data?.text ?? data?.message ?? "";
-  if (answer) appendBubble(String(answer), "bot", true);
+  const context = data?.context && typeof data.context === "object" ? data.context : null;
+  const answer = sanitizeAssistantAnswerText(data?.response ?? data?.answer ?? data?.text ?? data?.message ?? "");
+  if (answer) appendBubble(String(answer), "bot", true, context);
+  appendSourceUsageNotice(context);
+
+  state.lastChatContext = context;
+  updateModeIndicator();
+  if (context?.active_project_id != null) {
+    const nextProject = String(context.active_project_id || "");
+    if (nextProject !== state.activeProjectId) {
+      state.activeProjectId = nextProject;
+      if (nextProject) localStorage.setItem("aegis_active_project_id", nextProject);
+      else localStorage.removeItem("aegis_active_project_id");
+      renderActiveProjectSelect();
+      renderProjectList();
+      if (nextProject) await loadActiveProjectDetail(nextProject);
+      else renderProjectMeta();
+    }
+  }
 
   // if backend returns sources, show them
   const sources = normalizeWebResults(data?.sources || data?.results || data?.web_results || data?.items || null);
-  if (sources.length) renderWebSources(text, sources, data);
+  renderResponseSources(text, sources, context, data);
 
   // crypto side-effects
   if (state.mode === MODES.CRYPTO) {
@@ -1689,15 +4888,210 @@ async function handleChat(text, { mode = "general" } = {}) {
   }
 }
 
+function normalizeEvidence(items) {
+  if (!Array.isArray(items)) return [];
+  return items
+    .filter((it) => it && typeof it === "object")
+    .map((it) => ({
+      origin: String(it.origin || "").trim(),
+      kind: String(it.kind || "").trim(),
+      project_id: String(it.project_id || "").trim(),
+      path: String(it.path || "").trim(),
+      title: String(it.title || "").trim(),
+      text: typeof it.text === "string" ? it.text : "",
+      meta: it.meta && typeof it.meta === "object" ? it.meta : {},
+    }))
+    .filter((it) => it.origin || it.kind || it.path || it.title || it.text);
+}
+
+function deriveContextFromAgentStep(step) {
+  const evidence = normalizeEvidence(step?.evidence || []);
+  const origins = Array.from(new Set(evidence.map((e) => e.origin).filter(Boolean)));
+  const webMeta = step?.web_meta && typeof step.web_meta === "object" ? step.web_meta : {};
+  const plan = step?.plan && typeof step.plan === "object" ? step.plan : {};
+  const actions = Array.isArray(plan?.actions) ? plan.actions : [];
+
+  const ctx = {
+    source_plan: "tool-first",
+    source_origin: origins,
+    effective_tool: String(plan?.effective_tool || plan?.tool || "").trim() || null,
+    effective_tool_status: String(plan?.tool_status || "").trim() || null,
+    next_tool: String(plan?.next_tool || "").trim() || null,
+    next_step: String(plan?.next_step || "").trim() || null,
+    tool_candidates: Array.isArray(plan?.tool_candidates) ? plan.tool_candidates : [],
+    tool_risks: plan?.tool_risks && typeof plan.tool_risks === "object" ? plan.tool_risks : null,
+    approval_required: Array.isArray(plan?.approval_required) ? plan.approval_required : [],
+    actions,
+    web_status: String(webMeta?.status || webMeta?.source || "").trim() || "",
+    web_source: String(webMeta?.source || "").trim() || "",
+    web_provider: String(webMeta?.provider || "").trim() || "",
+    using_live_web: webMeta?.source === "live",
+    using_cached_web: webMeta?.source === "cache",
+    using_stale_cache: webMeta?.source === "stale-cache",
+    stop_reason: String(step?.stop_reason || "").trim() || null,
+    budget_exhausted: !!step?.budget_exhausted,
+    total_tool_calls: Number(step?.total_tool_calls || 0),
+    iterations_completed: Number(step?.iterations_completed || 0),
+  };
+
+  // keep existing project summary context when present
+  if (state.activeProjectDetail && typeof state.activeProjectDetail === "object") {
+    ctx.project_summary = String(state.activeProjectDetail.summary || "").trim();
+    ctx.entrypoints = state.activeProjectDetail.entrypoints || [];
+    ctx.dependencies = state.activeProjectDetail.dependencies || [];
+    ctx.configs = state.activeProjectDetail.configs || [];
+  }
+  return ctx;
+}
+
+async function handleAgentStep(text, { useWeb = false, synthesize = true } = {}) {
+  const es = state.lang === LANG.ES;
+  const convId = state.conversationId;
+  if (!convId) throw new Error("missing conversation");
+
+  const payload = {
+    message: String(text || "").trim(),
+    lang: state.lang,
+    use_web: !!useWeb,
+    max_tool_calls: 3,
+    synthesize: !!synthesize,
+  };
+
+  const res = await fetchWithTimeout(endpoints.conversationAgentStep(convId), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(payload),
+  }, { timeout: 0, retries: 0 });
+
+  const data = await safeJson(res);
+  if (!res.ok) {
+    const msg = data?.detail || data?.error || `HTTP ${res.status}`;
+    appendBubble(String(msg), "error");
+    return;
+  }
+
+  const ctx = deriveContextFromAgentStep(data);
+  const answer = sanitizeAssistantAnswerText(data?.response || "");
+  if (answer) appendBubble(answer, "bot", true, ctx);
+  else appendBubble(es ? "Sin respuesta del agente." : "Agent returned empty response.", "error");
+  appendSourceUsageNotice(ctx);
+
+  state.lastChatContext = ctx;
+  updateModeIndicator();
+
+  const sources = normalizeWebResults(data?.sources || []);
+  renderResponseSources(text, sources, ctx, data);
+
+  // refresh session/turns view so you can inspect the trace immediately
+  loadConversationTurns({ force: true });
+  loadConversationEvents({ force: true });
+}
+
+async function handleAgentRun(text, { useWeb = false, synthesize = true, maxIterations = 4, maxTotalToolCalls = 10 } = {}) {
+  const es = state.lang === LANG.ES;
+  const convId = state.conversationId;
+  if (!convId) throw new Error("missing conversation");
+
+  const payload = {
+    message: String(text || "").trim(),
+    lang: state.lang,
+    use_web: !!useWeb,
+    max_iterations: Number(maxIterations || 3),
+    max_total_tool_calls: Number(maxTotalToolCalls || 8),
+    synthesize: !!synthesize,
+  };
+
+  const res = await fetchWithTimeout(endpoints.conversationAgentRun(convId), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(payload),
+  }, { timeout: 0, retries: 0 });
+
+  const data = await safeJson(res);
+  if (!res.ok) {
+    const msg = data?.detail || data?.error || `HTTP ${res.status}`;
+    appendBubble(String(msg), "error");
+    return;
+  }
+
+  const ctx = deriveContextFromAgentStep(data);
+  ctx.source_plan = "tool-first-run";
+  ctx.next_step = String(data?.iterations?.slice(-1)?.[0]?.plan?.next_step || ctx.next_step || "").trim() || ctx.next_step;
+  ctx.stop_reason =
+    String(data?.stop_reason || "").trim()
+    || String(data?.iterations?.slice(-1)?.[0]?.stop_candidate || "").trim()
+    || null;
+  const answer = sanitizeAssistantAnswerText(data?.response || "");
+  if (answer) appendBubble(answer, "bot", true, ctx);
+  else appendBubble(es ? "Sin respuesta del agente." : "Agent returned empty response.", "error");
+  appendSourceUsageNotice(ctx);
+
+  state.lastChatContext = ctx;
+  updateModeIndicator();
+
+  const sources = normalizeWebResults(data?.sources || []);
+  renderResponseSources(text, sources, ctx, data);
+
+  loadConversationTurns({ force: true });
+  loadConversationEvents({ force: true });
+}
+
 async function handleWeb(query) {
-  // Try /websearch for sources
-  const results = await webSearch(query);
+  // Try /websearch for sources (best-effort). Even if it fails or returns 0 items,
+  // we still want to surface "web unavailable → using local" to avoid confusion.
+  let results = [];
+  let meta = null;
+  try {
+    const res = await webSearch(query);
+    results = Array.isArray(res?.results) ? res.results : [];
+    meta = res?.meta && typeof res.meta === "object" ? res.meta : null;
+  } catch (err) {
+    meta = { status: "unavailable", source: "unavailable", provider: "", results: 0 };
+    console.warn("webSearch failed; continuing in backend web mode", err);
+  }
+
+  const ctx = {
+    source_plan: state.activeProjectId ? "local+web" : "web_only",
+    source_origin: state.activeProjectId ? ["local", "web"] : ["web"],
+    active_project_id: state.activeProjectId || null,
+    web_status: meta?.status || (results.length ? "live" : "unavailable"),
+    web_source: meta?.source || (results.length ? "live" : "not-used"),
+    web_provider: meta?.provider || "",
+    web_results: meta?.results || results.length,
+    using_live_web: meta?.source === "live",
+    using_cached_web: meta?.source === "cache",
+    using_stale_cache: meta?.source === "stale-cache",
+    data_notice: buildDataNoticeFromMeta(meta, !!state.activeProjectId),
+    project_summary: state.activeProjectDetail?.summary || "",
+    entrypoints: state.activeProjectDetail?.entrypoints || [],
+    dependencies: state.activeProjectDetail?.dependencies || [],
+    configs: state.activeProjectDetail?.configs || [],
+  };
+
+  renderResponseSources(query, results, ctx, null);
+
   if (results.length) {
-    renderWebSources(query, results, null);
+    // Keep chat bubbles clean; source discovery is already visible in the sources panel.
+    if (state.debugTraceEnabled) {
+      appendBubble(
+        state.lang === LANG.ES
+          ? `Encontré ${results.length} fuentes. Ahora te respondo con contexto.`
+          : `Found ${results.length} sources. Now answering with context.`,
+        "bot"
+      );
+    }
+  } else if (String(ctx.web_status || "") === "unavailable" || String(ctx.web_status || "") === "error") {
     appendBubble(
       state.lang === LANG.ES
-        ? `Encontré ${results.length} fuentes. Ahora te respondo con contexto.`
-        : `Found ${results.length} sources. Now answering with context.`,
+        ? "Web no disponible ahora mismo; continúo con datos locales/caché."
+        : "Web is unavailable right now; continuing with local/cache data.",
+      "bot"
+    );
+  } else if (String(ctx.web_status || "") === "cooldown") {
+    appendBubble(
+      state.lang === LANG.ES
+        ? "Web en cooldown; continúo con datos locales/caché."
+        : "Web is in cooldown; continuing with local/cache data.",
       "bot"
     );
   }
@@ -1719,7 +5113,10 @@ async function webSearch(query) {
     res = await fetchWithTimeout(url2.toString(), { headers: { Accept: "application/json" } }, { timeout: 12000, retries: 0 });
   }
   const data = await safeJson(res);
-  return normalizeWebResults(data);
+  return {
+    results: normalizeWebResults(data),
+    meta: data?.meta && typeof data.meta === "object" ? data.meta : null,
+  };
 }
 
 async function handleUrl(urlText) {
@@ -1745,7 +5142,12 @@ async function handleUrl(urlText) {
   // Show as a “source”
   const title = data?.title || "";
   const snippet = (data?.summary || data?.text || data?.content || "").slice(0, 800);
-  renderWebSources(url, [{ url, title, snippet }], data);
+  renderResponseSources(url, [{ url, title, snippet }], {
+    source_plan: "web_only",
+    source_origin: ["web"],
+    active_project_id: state.activeProjectId || null,
+    project_summary: state.activeProjectDetail?.summary || "",
+  }, data);
 
   appendBubble(
     state.lang === LANG.ES ? `Leído: ${title || getDomainFromUrl(url)}.\n\n${snippet}` : `Read: ${title || getDomainFromUrl(url)}.\n\n${snippet}`,
@@ -1793,8 +5195,212 @@ function normalizeWebResults(raw) {
   return norm;
 }
 
-function renderWebSources(query, results, raw = null) {
+function prettySourcePlan(plan) {
+  const es = state.lang === LANG.ES;
+  const value = String(plan || "").trim();
+  if (value === "local+web") return es ? "híbrido" : "hybrid";
+  if (value === "local_only") return es ? "local" : "local";
+  if (value === "web_only") return es ? "web" : "web";
+  return value || (es ? "desconocido" : "unknown");
+}
+
+function prettyOriginLabel(origin) {
+  const es = state.lang === LANG.ES;
+  const value = String(origin || "").trim();
+  const labels = {
+    manifest: es ? "manifiesto" : "manifest",
+    local: es ? "local" : "local",
+    web: es ? "web" : "web",
+    log: es ? "logs" : "logs",
+    model: es ? "modelo" : "model",
+  };
+  return labels[value] || value;
+}
+
+function prettyWebStatusLabel(context) {
+  const es = state.lang === LANG.ES;
+  const source = String(context?.web_source || "").trim();
+  const status = String(context?.web_status || "").trim();
+  const labels = {
+    live: es ? "web en vivo" : "live web",
+    cache: es ? "web en caché" : "cached web",
+    "stale-cache": es ? "caché web vieja" : "stale web cache",
+    cooldown: es ? "web en cooldown" : "web cooldown",
+    unavailable: es ? "solo local (web no disponible)" : "local only (web unavailable)",
+    error: es ? "solo local (error web)" : "local only (web error)",
+    "not-used": es ? "web auto (solo local)" : "web auto (local only)",
+  };
+  return labels[source || status] || labels[status] || "";
+}
+
+function buildDataNoticeFromMeta(meta, hasLocalProject = false) {
+  const es = state.lang === LANG.ES;
+  const source = String(meta?.source || "").trim();
+  const status = String(meta?.status || "").trim();
+  if (source === "live") return es ? "Usando fuentes web en vivo." : "Using live web sources.";
+  if (source === "cache") return es ? "Usando fuentes web en caché." : "Using cached web sources.";
+  if (source === "stale-cache") return es ? "La web en vivo no estuvo disponible; usando caché almacenada." : "Live web was unavailable; using stored cache.";
+  if (status === "cooldown") {
+    if (hasLocalProject) {
+      return es ? "La web está en cooldown; respondiendo con datos locales del proyecto (y/o caché)." : "Web is in cooldown; answering with local project data (and/or cache).";
+    }
+    return es ? "La web está en cooldown; respondiendo con datos locales almacenados (y/o caché)." : "Web is in cooldown; answering with local stored data (and/or cache).";
+  }
+  if (status === "unavailable" || status === "error") {
+    if (hasLocalProject) {
+      return es ? "La web no estuvo disponible; respondiendo con datos locales del proyecto." : "Web was unavailable; answering with local project data.";
+    }
+    return es ? "La web no estuvo disponible; respondiendo con datos locales almacenados." : "Web was unavailable; answering with local stored data.";
+  }
+  if (hasLocalProject) return es ? "Respondiendo con datos locales del proyecto." : "Answering with local project data.";
+  return es ? "Respondiendo con datos locales almacenados." : "Answering with local stored data.";
+}
+
+function formatModeRuntimeHint(context) {
+  if (!context || typeof context !== "object") return "";
+  const es = state.lang === LANG.ES;
+  if (context.using_live_web) return es ? "web en vivo" : "live web";
+  if (context.using_cached_web) return es ? "web en caché" : "cached web";
+  if (context.using_stale_cache) return es ? "caché web" : "web cache";
+  if (String(context.web_status || "") === "cooldown") {
+    return es ? "cooldown → local" : "cooldown → local";
+  }
+  if (String(context.web_status || "") === "unavailable") {
+    return es ? "web no disp. → local" : "web unavailable → local";
+  }
+  if (String(context.web_status || "") === "not-used" && context.active_project_id) {
+    return es ? "web auto → proyecto local" : "web auto → local project";
+  }
+  if (String(context.web_status || "") === "not-used") {
+    return es ? "web auto → local" : "web auto → local";
+  }
+  return "";
+}
+
+function renderSourceOriginBar(context = null) {
+  if (!dom.sourceOriginBar) return;
+  dom.sourceOriginBar.innerHTML = "";
+  const es = state.lang === LANG.ES;
+  const debugMode = !!state.debugTraceEnabled;
+  if (!context || typeof context !== "object") return;
+
+  const addPill = (className, label, value) => {
+    const text = String(value || "").trim();
+    if (!text) return;
+    dom.sourceOriginBar.appendChild(el("span", { class: `origin-pill ${className}`, text: `${label}: ${text}` }));
+  };
+
+  const addNote = (text) => {
+    const value = String(text || "").trim();
+    if (!value) return;
+    dom.sourceOriginBar.appendChild(el("div", { class: "origin-note", text: value }));
+  };
+
+  if (debugMode && context.source_plan) {
+    dom.sourceOriginBar.appendChild(el("span", { class: "origin-pill plan", text: `${es ? "Plan" : "Plan"}: ${prettySourcePlan(context.source_plan)}` }));
+  }
+  const origins = Array.isArray(context.source_origin) ? context.source_origin : [];
+  origins.forEach((origin) => {
+    dom.sourceOriginBar.appendChild(el("span", { class: `origin-pill ${origin}`, text: prettyOriginLabel(origin) }));
+  });
+  const webStatusLabel = prettyWebStatusLabel(context);
+  if (webStatusLabel) {
+    const webStatusClass =
+      context.using_live_web ? "web-live" :
+      context.using_cached_web ? "web-cache" :
+      context.using_stale_cache ? "web-stale" :
+      String(context.web_status || "") === "unavailable" ? "web-unavailable" :
+      "web-local";
+    dom.sourceOriginBar.appendChild(el("span", { class: `origin-pill ${webStatusClass}`, text: webStatusLabel }));
+  }
+  if (debugMode && context.web_provider) {
+    dom.sourceOriginBar.appendChild(el("span", { class: "origin-pill provider", text: `${es ? "Provider" : "Provider"}: ${context.web_provider}` }));
+  }
+  if (debugMode) {
+    addPill("plan", es ? "Tarea" : "Task", context.current_task);
+    addPill("plan", es ? "Subtarea" : "Subtask", context.current_subtask);
+    addPill("focus", es ? "Archivo" : "File", context.current_file_focus);
+    addPill("focus", es ? "Símbolo" : "Symbol", context.current_symbol_focus);
+    addPill("focus", es ? "Artefacto" : "Artifact", context.current_artifact_focus);
+    addPill("provider", es ? "Tool usada" : "Used tool", context.effective_tool);
+    addPill("provider", es ? "Estado tool" : "Tool status", context.effective_tool_status);
+    addPill("provider", es ? "Siguiente tool" : "Next tool", context.next_tool);
+    addPill("plan", es ? "Siguiente paso" : "Next step", context.next_step);
+    addPill("plan", es ? "Stop" : "Stop", plannerStopReason(context));
+    if (Array.isArray(context.tool_candidates) && context.tool_candidates.length) {
+      addNote(`${es ? "Tools candidatas" : "Tool candidates"}: ${context.tool_candidates.slice(0, 4).join(", ")}`);
+    }
+    addPill(context.llm_required ? "provider" : "plan", es ? "LLM" : "LLM", context.llm_required ? "required" : "bypassed");
+  }
+  if (context.active_project_id) {
+    dom.sourceOriginBar.appendChild(
+      el("span", { class: "project-badge project-badge-active", text: `${es ? "Proyecto" : "Project"}: ${context.active_project_id}` })
+    );
+  }
+  if (context.data_notice) {
+    addNote(context.data_notice);
+  }
+  if (debugMode && Array.isArray(context.missing_evidence) && context.missing_evidence.length) {
+    addNote(`${es ? "Falta evidencia" : "Missing evidence"}: ${context.missing_evidence.join(", ")}`);
+  }
+  if (debugMode && Array.isArray(context.recent_tool_failures) && context.recent_tool_failures.length) {
+    const recent = context.recent_tool_failures
+      .slice(-2)
+      .map((item) => {
+        if (!item || typeof item !== "object") return "";
+        const tool = String(item.tool || item.kind || "").trim();
+        const reason = String(item.reason || item.status || "").trim();
+        return [tool, reason].filter(Boolean).join(" -> ");
+      })
+      .filter(Boolean);
+    if (recent.length) {
+      addNote(`${es ? "Fallos recientes" : "Recent tool failures"}: ${recent.join(" | ")}`);
+    }
+  }
+  if (debugMode && context.web_query) {
+    dom.sourceOriginBar.appendChild(el("div", { class: "origin-query", text: `${es ? "Query" : "Query"}: ${context.web_query}` }));
+  }
+}
+
+function renderBubbleTrace(node, context = null) {
+  if (!node || !context || typeof context !== "object") return;
+  const es = state.lang === LANG.ES;
+  const wrap = el("div", { class: "bubble-trace" });
+
+  const addTracePill = (className, label, value) => {
+    const text = String(value || "").trim();
+    if (!text) return;
+    wrap.appendChild(el("span", { class: `bubble-trace-pill ${className}`.trim(), text: `${label}: ${text}` }));
+  };
+
+  if (context.source_plan) addTracePill("plan", es ? "Plan" : "Plan", prettySourcePlan(context.source_plan));
+  const origins = Array.isArray(context.source_origin) ? context.source_origin : [];
+  if (origins.length) addTracePill("origin", es ? "Origen" : "Origin", origins.map(prettyOriginLabel).join(", "));
+
+  const webLabel = prettyWebStatusLabel(context);
+  if (webLabel) addTracePill("web", es ? "Datos" : "Data", webLabel);
+  if (context.web_provider) addTracePill("provider", "Provider", context.web_provider);
+  if (context.next_tool) addTracePill("tool", es ? "Tool" : "Tool", context.next_tool);
+  const stopReason = plannerStopReason(context);
+  if (stopReason) addTracePill("plan", es ? "Stop" : "Stop", stopReason);
+  if (context.current_artifact_focus) addTracePill("focus", es ? "Artefacto" : "Artifact", context.current_artifact_focus);
+  if (context.effective_tool) addTracePill("tool", es ? "Usada" : "Used", context.effective_tool);
+  if (context.effective_tool_status) addTracePill("provider", es ? "Estado" : "Status", context.effective_tool_status);
+  if (context.active_project_id) addTracePill("project", es ? "Proyecto" : "Project", context.active_project_id);
+  addTracePill("llm", "LLM", context.llm_required ? "required" : "bypassed");
+
+  if (context.data_notice) {
+    wrap.appendChild(el("div", { class: "bubble-trace-note", text: context.data_notice }));
+  }
+
+  if (wrap.childNodes.length) {
+    node.appendChild(wrap);
+  }
+}
+
+function renderResponseSources(query, results, context = null, raw = null) {
   if (!dom.sourcesContent) return;
+  renderSourceOriginBar(context);
 
   const seen = new Set();
   const rows = [];
@@ -1807,15 +5413,425 @@ function renderWebSources(query, results, raw = null) {
 
   dom.sourcesContent.innerHTML = "";
 
-  const label = state.lang === LANG.ES ? `Fuentes web para: "${query}"` : `Web sources for: "${query}"`;
+  const es = state.lang === LANG.ES;
+  const label = rows.length
+    ? (es ? `Fuentes para: "${query}"` : `Sources for: "${query}"`)
+    : (es ? "Contexto de respuesta" : "Response context");
   const header = el("div", { text: label });
   header.style.marginBottom = "6px";
   header.style.fontWeight = "600";
   dom.sourcesContent.appendChild(header);
 
+  if (state.mode === MODES.WEB && context && typeof context === "object") {
+    const src = String(context.web_source || context.web_status || "").trim();
+    const esWarn = (msgEs, msgEn) => (es ? msgEs : msgEn);
+    let warn = "";
+    if (src === "unavailable" || src === "error") {
+      warn = esWarn(
+        "Web no disponible ahora mismo; respondiendo con datos locales/caché.",
+        "Web is unavailable right now; answering with local/cache data."
+      );
+    } else if (src === "stale-cache") {
+      warn = esWarn(
+        "Web en vivo no estuvo disponible; usando caché almacenada.",
+        "Live web was unavailable; using stored cache."
+      );
+    } else if (src === "not-used" && !context.using_live_web && !context.using_cached_web) {
+      warn = esWarn(
+        "Estás en modo Web, pero no se usó web en esta respuesta.",
+        "You are in Web mode, but web was not used for this response."
+      );
+    }
+    if (warn) dom.sourcesContent.appendChild(el("div", { class: "notice-warn", text: warn }));
+  }
+
+  if (context && typeof context === "object") {
+    const debugMode = !!state.debugTraceEnabled;
+    const evidenceCard = el("div", { class: "project-meta-card" });
+    const evidenceHead = el("div", { class: "project-meta-head" });
+    evidenceHead.appendChild(el("strong", { text: es ? "Evidencia usada" : "Evidence used" }));
+    if (AGENT_UI_ENABLED && state.conversationId) {
+      const btn = el("button", { class: "icon-btn small", text: es ? "Ver turn" : "View turn" });
+      btn.type = "button";
+      btn.title = es ? "Abrir el último turn (traza del agente)" : "Open latest turn (agent trace)";
+      btn.addEventListener("click", () => openLatestTurnDetail());
+      evidenceHead.appendChild(btn);
+    }
+    evidenceCard.appendChild(evidenceHead);
+    const list = el("div", { class: "mini-list" });
+    if (context.source_plan) {
+      list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Plan" : "Plan"}: ${prettySourcePlan(context.source_plan)}` }));
+    }
+    const origins = Array.isArray(context.source_origin) ? context.source_origin : [];
+    if (origins.length) {
+      list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Origen" : "Origin"}: ${origins.map(prettyOriginLabel).join(", ")}` }));
+    }
+    if (debugMode && context.web_provider) {
+      list.appendChild(el("span", { class: "mini-chip", text: `Provider: ${context.web_provider}` }));
+    }
+    if (debugMode && context.effective_tool) {
+      list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Tool usada" : "Used tool"}: ${context.effective_tool}` }));
+    }
+    if (debugMode && context.effective_tool_status) {
+      list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Estado tool" : "Tool status"}: ${context.effective_tool_status}` }));
+    }
+    if (debugMode && context.current_file_focus) {
+      list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Archivo" : "File"}: ${context.current_file_focus}` }));
+    }
+    if (debugMode && context.current_symbol_focus) {
+      list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Símbolo" : "Symbol"}: ${context.current_symbol_focus}` }));
+    }
+    if (debugMode && context.current_artifact_focus) {
+      list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Artefacto" : "Artifact"}: ${context.current_artifact_focus}` }));
+    }
+    if (debugMode && context.next_tool) {
+      list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Tool" : "Tool"}: ${context.next_tool}` }));
+    }
+    const stopReason = debugMode ? plannerStopReason(context) : "";
+    if (debugMode && stopReason) {
+      list.appendChild(el("span", { class: "mini-chip subtle", text: `${es ? "Stop" : "Stop"}: ${stopReason}` }));
+    }
+    if (debugMode && context.llm_required === false) {
+      list.appendChild(el("span", { class: "mini-chip", text: "LLM: bypassed" }));
+    } else if (debugMode && context.llm_required === true) {
+      list.appendChild(el("span", { class: "mini-chip", text: "LLM: required" }));
+    }
+    if (list.childNodes.length) {
+      evidenceCard.appendChild(list);
+    }
+    if (debugMode && context.next_step) {
+      evidenceCard.appendChild(el("div", { class: "project-summary-text", text: `${es ? "Siguiente paso" : "Next step"}: ${context.next_step}` }));
+    }
+    if (debugMode && Array.isArray(context.missing_evidence) && context.missing_evidence.length) {
+      evidenceCard.appendChild(el("div", { class: "project-summary-text subtle", text: `${es ? "Falta evidencia" : "Missing evidence"}: ${context.missing_evidence.join(", ")}` }));
+    }
+    if (debugMode && Array.isArray(context.web_findings) && context.web_findings.length) {
+      evidenceCard.appendChild(el("div", { class: "project-summary-text subtle", text: `${es ? "Hallazgos web" : "Web findings"}: ${context.web_findings.slice(0, 3).join(" • ")}` }));
+    }
+
+    // Codex-like: big CTA for pending approvals (sensitive tools).
+    const pending = context.pending_approval && typeof context.pending_approval === "object" ? context.pending_approval : null;
+    if (AGENT_UI_ENABLED && pending && pending.tool && state.conversationId) {
+      const toolName = String(pending.tool || "").trim();
+      if (toolName) {
+        const btn = el("button", {
+          class: "action-btn danger",
+          text: es ? `Aprobar y ejecutar: ${toolName}` : `Approve & run: ${toolName}`,
+          attrs: { type: "button" },
+        });
+        btn.title = es ? "Ejecuta la acción sensible con aprobación explícita." : "Runs the sensitive action with explicit approval.";
+        btn.addEventListener("click", async () => {
+          if (state.pending) return;
+          const args = {};
+          if (toolName === "delete_project" && state.activeProjectId) args.project_id = state.activeProjectId;
+          try {
+            setPending(true);
+            appendTyping(getWorkPendingLabel("action"));
+            const resp = await executeConversationTool(toolName, args, {
+              autoApprove: true,
+              title: toolName,
+              continueAfter: true,
+              continueUseWeb: state.mode === MODES.WEB,
+              continueSynthesize: true,
+              continueMaxIterations: 2,
+              continueMaxTotalToolCalls: 6,
+              continueMaxToolRetries: 1,
+              continueToolRetryBackoffMs: 150,
+            });
+            const execCtx = resp && typeof resp === "object" && resp.context && typeof resp.context === "object"
+              ? resp.context
+              : (state.lastChatContext && typeof state.lastChatContext === "object" ? state.lastChatContext : null);
+            if (!resp?.continued && (execCtx?.next_step || execCtx?.next_tool)) {
+              await handleAgentContinue({ useWeb: state.mode === MODES.WEB, synthesize: true });
+            }
+          } catch (err) {
+            console.error(err);
+          } finally {
+            removeTyping();
+            setPending(false);
+            updateStatusCenter();
+          }
+        });
+        evidenceCard.appendChild(btn);
+      }
+    }
+
+    // Codex-like: suggested actions from the backend plan (1-click tools + optional continue).
+    const actions = Array.isArray(context.actions) ? context.actions : [];
+    if (AGENT_UI_ENABLED && actions.length && state.conversationId) {
+      const actionWrap = el("div", { class: "mini-actions" });
+      const needsProjectId = new Set([
+        "project_files",
+        "project_symbols",
+        "project_excerpt",
+        "project_entrypoints",
+        "project_dependencies",
+        "project_configs",
+        "project_architecture",
+        "delete_project",
+      ]);
+
+      const labelFor = (a) => {
+        const raw = es ? a?.label_es : a?.label_en;
+        return String(raw || a?.tool || "tool").trim();
+      };
+
+      const pickNextSafeAction = (ctx) => {
+        const items = Array.isArray(ctx?.actions) ? ctx.actions : [];
+        return items.find((a) => {
+          const tool = String(a?.tool || "").trim();
+          const risk = String(a?.risk || "").trim().toLowerCase();
+          if (!tool) return false;
+          if (risk === "sensitive") return false;
+          if (tool === "delete_project") return false;
+          return true;
+        }) || null;
+      };
+
+      const autoRunSafeChain = async (maxSteps = 3) => {
+        if (state.pending) return;
+        if (!state.conversationId) return;
+        setPending(true);
+        appendTyping(getWorkPendingLabel("action"));
+        try {
+          for (let i = 0; i < maxSteps; i++) {
+            const ctx = state.lastChatContext && typeof state.lastChatContext === "object" ? state.lastChatContext : null;
+            if (!ctx) break;
+            if (ctx.pending_approval) {
+              appendBubble(es ? "Hay una aprobación pendiente. Ejecuta la acción sensible manualmente." : "There is a pending approval. Run the sensitive action manually.", "error");
+              break;
+            }
+            const next = pickNextSafeAction(ctx);
+            if (!next) {
+              appendBubble(es ? "No hay más acciones seguras para ejecutar." : "No more safe actions to run.", "bot");
+              break;
+            }
+            // Reuse the existing single-action path (it keeps project UI in sync + continues when needed).
+            await runSuggestedAction(next);
+            // If the last continue produced another approval gate, stop here.
+            const after = state.lastChatContext && typeof state.lastChatContext === "object" ? state.lastChatContext : null;
+            if (after?.pending_approval) break;
+          }
+        } finally {
+          removeTyping();
+          setPending(false);
+          updateStatusCenter();
+        }
+      };
+
+      const runSuggestedAction = async (a) => {
+        const tool = String(a?.tool || "").trim();
+        if (!tool) return;
+        if (state.pending) return;
+        if (!state.conversationId) return;
+        if (needsProjectId.has(tool) && !state.activeProjectId) {
+          appendBubble(es ? "No hay proyecto activo para ejecutar esa tool." : "No active project for that tool.", "error");
+          return;
+        }
+        const baseArgs = (a?.args && typeof a.args === "object") ? a.args : {};
+        const args = { ...baseArgs };
+        if (needsProjectId.has(tool) && !args.project_id) {
+          args.project_id = state.activeProjectId;
+        }
+
+        setPending(true);
+        appendTyping(getWorkPendingLabel("action"));
+        try {
+          const shouldContinueRequested =
+            tool === "delete_project"
+            || !!(state.lastChatContext && state.lastChatContext.next_step)
+            || !!(state.lastChatContext && state.lastChatContext.next_tool);
+          const toolResp = await executeConversationTool(tool, args, {
+            autoApprove: false,
+            title: labelFor(a),
+            continueAfter: shouldContinueRequested,
+            continueUseWeb: state.mode === MODES.WEB,
+            continueSynthesize: true,
+            continueMaxIterations: 2,
+            continueMaxTotalToolCalls: 6,
+            continueMaxToolRetries: 1,
+            continueToolRetryBackoffMs: 150,
+          });
+          // Keep UI in sync after side-effect tools.
+          if (tool === "delete_project") {
+            await setActiveProject("", { bindConversation: false, loadDetail: true });
+            setManualProjectRoot("");
+            await loadRegisteredProjects();
+            loadProjectTree();
+          } else if (state.activeProjectId) {
+            await loadActiveProjectDetail(state.activeProjectId);
+          }
+          scheduleSnapshot(700);
+
+          const execCtx = toolResp && typeof toolResp === "object" && toolResp.context && typeof toolResp.context === "object"
+            ? toolResp.context
+            : (state.lastChatContext && typeof state.lastChatContext === "object" ? state.lastChatContext : null);
+          const shouldContinue =
+            tool === "delete_project"
+            || !!execCtx?.next_step
+            || !!execCtx?.next_tool;
+          const alreadyContinued = !!(toolResp && typeof toolResp === "object" && toolResp.continued);
+          if ((shouldContinue || shouldContinueRequested) && !alreadyContinued && !(execCtx && execCtx.pending_approval)) {
+            await handleAgentContinue({ useWeb: state.mode === MODES.WEB, synthesize: true });
+          }
+        } catch (err) {
+          if (err?.name === "AbortError") return;
+          console.error(err);
+        } finally {
+          removeTyping();
+          setPending(false);
+          updateStatusCenter();
+        }
+      };
+
+      // Primary CTA: run the next safe action (reduces clicks in long dev sessions).
+      const nextSafe = actions.find((a) => {
+        const tool = String(a?.tool || "").trim();
+        const risk = String(a?.risk || "").trim().toLowerCase();
+        if (!tool) return false;
+        if (risk === "sensitive") return false;
+        if (tool === "delete_project") return false;
+        return true;
+      });
+      if (nextSafe) {
+        const btn = el("button", { class: "action-btn", text: es ? "Ejecutar siguiente (safe)" : "Run next (safe)" });
+        btn.type = "button";
+        btn.title = es ? "Ejecuta la siguiente acción segura y continúa el agente" : "Run the next safe action and continue the agent";
+        btn.addEventListener("click", () => runSuggestedAction(nextSafe));
+        actionWrap.appendChild(btn);
+
+        const autoBtn = el("button", { class: "action-btn", text: es ? "Auto-run safe ×3" : "Auto-run safe ×3" });
+        autoBtn.type = "button";
+        autoBtn.title = es
+          ? "Ejecuta hasta 3 acciones seguras + continuar agente automáticamente."
+          : "Runs up to 3 safe actions + auto-continues the agent.";
+        autoBtn.addEventListener("click", () => autoRunSafeChain(3));
+        actionWrap.appendChild(autoBtn);
+      }
+
+      actions.slice(0, 5).forEach((a) => {
+        const tool = String(a?.tool || "").trim();
+        if (!tool) return;
+        const risk = String(a?.risk || "").trim().toLowerCase();
+        const btn = el("button", { class: `action-btn ${risk === "sensitive" ? "danger" : ""}`, text: labelFor(a) });
+        btn.type = "button";
+        btn.title = es ? `Ejecutar tool: ${tool}` : `Run tool: ${tool}`;
+        btn.addEventListener("click", () => runSuggestedAction(a));
+        actionWrap.appendChild(btn);
+      });
+
+      evidenceCard.appendChild(el("div", { class: "project-summary-text", text: es ? "Acciones sugeridas:" : "Suggested actions:" }));
+      evidenceCard.appendChild(actionWrap);
+    }
+
+    if (AGENT_UI_ENABLED && context.next_step && state.conversationId) {
+      const btn = el("button", { class: "action-btn", text: es ? "Continuar agente" : "Continue agent" });
+      btn.type = "button";
+      btn.title = es ? "Continuar desde next_step (tool-first)" : "Continue from next_step (tool-first)";
+      btn.addEventListener("click", async () => {
+        if (state.pending) return;
+        try {
+          setPending(true);
+          appendTyping(getWorkPendingLabel("agent"));
+          await handleAgentContinue({ useWeb: state.mode === MODES.WEB, synthesize: true });
+        } finally {
+          removeTyping();
+          setPending(false);
+        }
+      });
+      evidenceCard.appendChild(btn);
+    }
+
+    const toolOut = debugMode ? String(context.effective_tool_output || "").trim() : "";
+    if (debugMode && toolOut) {
+      evidenceCard.appendChild(el("div", { class: "project-summary-text", text: es ? "Salida de tool:" : "Tool output:" }));
+      evidenceCard.appendChild(el("pre", { class: "tool-output-pre", text: toolOut }));
+    }
+
+    // Agent step evidence ledger (when available).
+    const rawEvidence = debugMode && raw && typeof raw === "object" ? normalizeEvidence(raw?.evidence || []) : [];
+    const rawIterations = debugMode && raw && typeof raw === "object" && Array.isArray(raw?.iterations) ? raw.iterations : [];
+    if (debugMode && AGENT_UI_ENABLED && rawEvidence.length) {
+      evidenceCard.appendChild(el("div", { class: "project-summary-text", text: es ? "Ledger de evidencia:" : "Evidence ledger:" }));
+      const evList = el("div", { class: "mini-list" });
+      rawEvidence.slice(0, 10).forEach((ev) => {
+        const origin = ev.origin ? prettyOriginLabel(ev.origin) : "local";
+        const head = [origin, ev.kind].filter(Boolean).join(" • ");
+        const tail = ev.path || ev.title || "";
+        const label = tail ? `${head}: ${tail}` : head;
+        evList.appendChild(el("span", { class: `mini-chip ${ev.origin === "web" ? "warn" : ""}`, text: label }));
+      });
+      evidenceCard.appendChild(evList);
+      const firstText = rawEvidence.find((ev) => (ev.text || "").trim())?.text || "";
+      if (firstText) {
+        evidenceCard.appendChild(el("pre", { class: "tool-output-pre", text: String(firstText).trim().slice(0, 1200) }));
+      }
+    }
+    if (debugMode && AGENT_UI_ENABLED && rawIterations.length) {
+      evidenceCard.appendChild(el("div", { class: "project-summary-text", text: es ? "Iteraciones:" : "Iterations:" }));
+      const itList = el("div", { class: "mini-list" });
+      rawIterations.slice(0, 8).forEach((it) => {
+        const n = Number(it?.iteration || 0) || 0;
+        const toolCalls = Number(it?.tool_calls || 0) || 0;
+        const newEv = Number(it?.new_evidence || 0) || 0;
+        const nextTool = String(it?.plan?.next_tool || "").trim();
+        const missing = Array.isArray(it?.plan?.missing_evidence) ? it.plan.missing_evidence : [];
+        const label = [
+          n ? `#${n}` : "#",
+          nextTool ? `next:${nextTool}` : "",
+          `tools:${toolCalls}`,
+          `+ev:${newEv}`,
+          missing.length ? `missing:${missing.slice(0, 2).join("|")}` : "",
+        ].filter(Boolean).join(" • ");
+        itList.appendChild(el("span", { class: "mini-chip", text: label }));
+      });
+      evidenceCard.appendChild(itList);
+    }
+    dom.sourcesContent.appendChild(evidenceCard);
+  }
+
+  const sourcePlan = String(context?.source_plan || "").trim();
+  const showProjectContext = sourcePlan === "local_only";
+
+  const summary = showProjectContext ? String(context?.project_summary || "").trim() : "";
+  if (summary) {
+    const summaryCard = el("div", { class: "project-meta-card" });
+    summaryCard.appendChild(el("strong", { text: es ? "Proyecto activo" : "Active project" }));
+    summaryCard.appendChild(el("div", { class: "project-summary-text", text: summary }));
+    dom.sourcesContent.appendChild(summaryCard);
+  }
+
+  const architectureSummary = showProjectContext ? String(context?.architecture_summary || "").trim() : "";
+  if (architectureSummary) {
+    const architectureCard = el("div", { class: "project-meta-card" });
+    architectureCard.appendChild(el("strong", { text: es ? "Arquitectura" : "Architecture" }));
+    architectureCard.appendChild(el("div", { class: "project-summary-text", text: architectureSummary }));
+    dom.sourcesContent.appendChild(architectureCard);
+  }
+
+  const sections = [
+    { label: es ? "Entrypoints" : "Entrypoints", items: showProjectContext ? (context?.entrypoints || []) : [] },
+    { label: es ? "Dependencias" : "Dependencies", items: showProjectContext ? (context?.dependencies || []) : [] },
+    { label: es ? "Configs" : "Configs", items: showProjectContext ? (context?.configs || []) : [] },
+    { label: es ? "Hallazgos web" : "Web findings", items: context?.web_findings || [] },
+  ];
+  if (sections.some((section) => Array.isArray(section.items) && section.items.length)) {
+    const grid = el("div", { class: "project-meta-grid" });
+    sections.forEach((section) => {
+      if (!Array.isArray(section.items) || !section.items.length) return;
+      const card = el("div", { class: "project-meta-card" });
+      card.appendChild(el("strong", { text: section.label }));
+      const list = el("div", { class: "mini-list" });
+      section.items.slice(0, 8).forEach((item) => list.appendChild(el("span", { class: "mini-chip", text: String(item) })));
+      card.appendChild(list);
+      grid.appendChild(card);
+    });
+    dom.sourcesContent.appendChild(grid);
+  }
+
   if (!rows.length) {
-    dom.sourcesContent.appendChild(el("div", { text: state.lang === LANG.ES ? "Sin URLs." : "No URLs." }));
-    if (raw != null) {
+    dom.sourcesContent.appendChild(el("div", { text: es ? "Sin URLs adicionales." : "No additional URLs." }));
+    if (state.debugTraceEnabled && raw != null) {
       const pre = el("pre", { class: "sources-content" });
       pre.style.whiteSpace = "pre-wrap";
       pre.textContent = JSON.stringify(raw, null, 2);
@@ -1847,149 +5863,292 @@ function renderWebSources(query, results, raw = null) {
   });
 }
 
+function renderWebSources(query, results, raw = null) {
+  renderResponseSources(query, results, state.lastChatContext, raw);
+}
+
 /* ------------------------- IMAGE OCR ------------------------- */
 
-async function analyzeImage(file) {
-  appendBubble(state.lang === LANG.ES ? "Analizando imagen…" : "Analyzing image…", "bot");
-  const fd = new FormData();
-  fd.append("file", file);
-  fd.append("lang", state.lang);
+async function analyzeAttachment(file, { showPreview = false } = {}) {
+  const es = state.lang === LANG.ES;
+  const filename = String(file?.name || "").trim() || "attachment";
+  appendBubble(
+    es ? `Extrayendo contexto del adjunto: ${filename}...` : `Extracting attachment context: ${filename}...`,
+    "bot"
+  );
 
-  const res = await fetchWithTimeout(endpoints.analyzeImage, {
-    method: "POST",
-    body: fd,
-  }, { timeout: 60000, retries: 0 });
-
-  const data = await safeJson(res);
-  if (!res.ok) {
-    appendBubble(data?.detail || data?.error || (state.lang === LANG.ES ? "Falló OCR." : "OCR failed."), "error");
-    return;
-  }
-  const text = data?.text || data?.ocr || data?.result || JSON.stringify(data, null, 2);
-  appendBubble(text, "bot", false);
-}
-
-/* ------------------------- IMAGE GENERATION (DEMO) ------------------------- */
-
-function setImageStatus(text, kind = "muted") {
-  if (!dom.imageStatus) return;
-  dom.imageStatus.textContent = text || "—";
-  const cls =
-    kind === "warn" ? "pill sell" :
-    kind === "success" ? "pill buy" :
-    "pill muted";
-  dom.imageStatus.className = cls;
-}
-
-async function generateImageFromUI() {
-  if (!dom.imagePrompt) return;
-  const prompt = dom.imagePrompt.value.trim();
-  const negative = dom.imageNegative?.value.trim() || "";
-  const steps = parseInt(dom.imageSteps?.value || "20", 10) || 20;
-  const seed = dom.imageSeed?.value ? parseInt(dom.imageSeed.value, 10) : null;
-  const apiKeyForImage = cleanKey(state.filesApiKey || state.apiKey);
-  if (!apiKeyForImage && !state.accessToken) {
-    setImageStatus(state.lang === LANG.ES ? "Falta API key (icono llave)." : "Missing API key (key icon).", "warn");
-    return;
-  }
-  if (!prompt) {
-    setImageStatus(state.lang === LANG.ES ? "Falta prompt" : "Prompt required", "warn");
-    return;
-  }
-  setImageStatus(state.lang === LANG.ES ? "Generando..." : "Generating...", "muted");
+  setPending(true);
+  appendTyping(getWorkPendingLabel("attachment"));
   try {
-    const body = { prompt, negative_prompt: negative || undefined, steps, seed };
-    const res = await fetchWithTimeout(endpoints.imageGenerate, {
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("lang", state.lang);
+
+    const res = await fetchWithTimeout(endpoints.analyzeAttachment, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    }, { timeout: 60000, retries: 0 });
+      body: fd,
+    }, { timeout: 90000, retries: 0 });
+
     const data = await safeJson(res);
     if (!res.ok) {
-      if (res.status === 401 || res.status === 403) {
-        const dbg = `auth=${authDebugForUrl(endpoints.imageGenerate)}`;
-        setImageStatus(
-          state.lang === LANG.ES
-            ? `API key inválida/faltante (usa el icono llave). ${dbg}`
-            : `Invalid/missing API key (use the key icon). ${dbg}`,
-          "warn"
-        );
-        return;
-      }
-      setImageStatus(data?.detail || data?.error || "Error", "warn");
+      const msg = data?.detail || data?.error || (es ? "Falló extracción de contexto del adjunto." : "Attachment context extraction failed.");
+      appendBubble(String(msg), "error");
       return;
     }
-    if (data?.fallback_used) {
-      const msg = state.lang === LANG.ES
-        ? `Fallback local (${data?.backend_error || "backend no disponible"})`
-        : `Local fallback (${data?.backend_error || "backend unavailable"})`;
-      setImageStatus(msg, "warn");
-    } else {
-      setImageStatus(state.lang === LANG.ES ? "Listo" : "Done", "success");
-    }
-    if (dom.imagePrompt) dom.imagePrompt.value = "";
-    loadRecentImages();
-  } catch (err) {
-    console.error(err);
-    setImageStatus("Error", "warn");
-  }
-}
 
-async function loadRecentImages() {
-  if (!dom.imageGallery) return;
-  try {
-    const res = await fetchWithTimeout(endpoints.imageRecent, {}, { timeout: 10000, retries: 0 });
-    const data = await safeJson(res);
-    if (!res.ok) {
-      if (res.status === 401 || res.status === 403) {
-        const dbg = `auth=${authDebugForUrl(endpoints.imageRecent)}`;
-        setImageStatus(
-          state.lang === LANG.ES
-            ? `API key inválida/faltante (usa el icono llave). ${dbg}`
-            : `Invalid/missing API key (use the key icon). ${dbg}`,
-          "warn"
-        );
-        return;
-      }
-      setImageStatus(data?.detail || data?.error || "Error", "warn");
-      return;
-    }
-    renderImageGallery(Array.isArray(data) ? data : []);
-    setImageStatus(state.lang === LANG.ES ? "Listo" : "Ready", "muted");
-  } catch (err) {
-    console.error(err);
-    setImageStatus("Error", "warn");
-  }
-}
+    const description = String(
+      data?.description
+      || data?.text
+      || data?.ocr
+      || data?.result
+      || ""
+    ).trim() || JSON.stringify(data, null, 2);
 
-function renderImageGallery(items) {
-  if (!dom.imageGallery) return;
-  dom.imageGallery.innerHTML = "";
-  if (!items.length) {
-    dom.imageGallery.textContent = state.lang === LANG.ES ? "Sin imágenes recientes." : "No recent images.";
-    return;
-  }
-  items.forEach((item) => {
-    const card = el("div", { class: "image-card" });
-    const path = item.path || item.image_path;
-    if (path && path.endsWith(".png")) {
-      const img = document.createElement("img");
-      img.src = `/${path}`;
-      img.alt = item.prompt || "generated";
-      card.appendChild(img);
+    const kind = String(data?.kind || (String(file.type || "").startsWith("image/") ? "image" : "document")).trim();
+
+    if (kind === "image") {
+      state.imageReferenceFile = file;
     }
-    const meta = el("div", { class: "image-meta", text: (item.prompt || "").slice(0, 80) });
-    card.appendChild(meta);
-    const modeTag = item?.fallback_used ? " • fallback" : (item?.backend_ok ? " • backend" : "");
-    const info = el("div", { class: "image-meta", text: `seed: ${item.seed ?? "rnd"} • steps: ${item.steps ?? "-"}${modeTag}` });
-    card.appendChild(info);
-    dom.imageGallery.appendChild(card);
-  });
+
+    setChatAttachment({
+      kind,
+      name: filename,
+      analysis: description,
+    });
+
+    if (showPreview && kind === "image") {
+      appendImageBubble({
+        localFile: file,
+        caption: es
+          ? `Imagen de referencia${filename ? `: ${filename}` : ""}`
+          : `Reference image${filename ? `: ${filename}` : ""}`,
+      });
+    }
+
+    appendBubble(
+      es
+        ? `Adjunto listo: ${filename}. Lo usaré como contexto en chat.`
+        : `Attachment ready: ${filename}. I will use it as chat context.`,
+      "bot"
+    );
+  } finally {
+    removeTyping();
+    setPending(false);
+  }
 }
 
 /* ------------------------- CRYPTO: MODELS / PREDICT / TRADE ------------------------- */
+
+function tokenizeCommandArgs(input) {
+  const src = String(input || "");
+  const out = [];
+  const re = /"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|(\S+)/g;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    out.push((m[1] ?? m[2] ?? m[3] ?? "").replace(/\\(["'])/g, "$1"));
+  }
+  return out.filter(Boolean);
+}
+
+function parseImageCommand(rawText, { allowNatural = false } = {}) {
+  const raw = String(rawText || "").trim();
+  if (!raw) return null;
+  let style3d = false;
+  let matched =
+    raw.match(/^\/img3d\b\s*(.*)$/i)
+    || raw.match(/^\/(?:img|image)\b\s*(.*)$/i)
+    || raw.match(/^img:\s*(.*)$/i)
+    || raw.match(/^image:\s*(.*)$/i)
+    || raw.match(/^generate\s+image:\s*(.*)$/i);
+  if (raw.match(/^\/img3d\b/i)) style3d = true;
+  if (!matched && allowNatural) {
+    matched =
+      raw.match(/^(?:generate|create|draw|make)\s+(?:an?\s+)?(?:image\s+(?:of\s+)?)?(.+)$/i)
+      || raw.match(/^(?:genera|crea|dibuja|haz)\s+(?:una?\s+)?(?:imagen\s+(?:de\s+)?)?(.+)$/i);
+  }
+  if (!matched && allowNatural) {
+    const looksDirectivePrefix = /^(?:web|url)\s*:|^\/(?!img(?:3d)?\b|image\b)/i.test(raw);
+    if (!looksDirectivePrefix && !isImageQuestionPrompt(raw)) {
+      matched = [raw, raw];
+    }
+  }
+  if (!matched) return null;
+
+  const tail = String(matched[1] || "").trim();
+  const tokens = tokenizeCommandArgs(tail);
+  if (!tokens.length) {
+    return {
+      prompt: "",
+      steps: 24,
+      seed: null,
+      cfg: 7.0,
+      width: 512,
+      height: 512,
+      negative: "",
+      style3d,
+    };
+  }
+
+  const promptTokens = [];
+  let steps = 24;
+  let seed = null;
+  let cfg = 7.0;
+  let width = 512;
+  let height = 512;
+  let negative = "";
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = String(tokens[i] || "");
+    const next = String(tokens[i + 1] || "");
+    const lower = token.toLowerCase();
+
+    if ((lower === "--steps" || lower === "-s") && next) {
+      const v = Number.parseInt(next, 10);
+      if (Number.isFinite(v)) steps = Math.max(1, Math.min(50, v));
+      i += 1;
+      continue;
+    }
+    if (lower === "--seed" && next) {
+      const v = Number.parseInt(next, 10);
+      if (Number.isFinite(v)) seed = v;
+      i += 1;
+      continue;
+    }
+    if (lower === "--cfg" && next) {
+      const v = Number.parseFloat(next);
+      if (Number.isFinite(v)) cfg = Math.max(1, Math.min(20, v));
+      i += 1;
+      continue;
+    }
+    if ((lower === "--width" || lower === "-w") && next) {
+      const v = Number.parseInt(next, 10);
+      if (Number.isFinite(v)) width = Math.max(256, Math.min(1024, v));
+      i += 1;
+      continue;
+    }
+    if ((lower === "--height" || lower === "-h") && next) {
+      const v = Number.parseInt(next, 10);
+      if (Number.isFinite(v)) height = Math.max(256, Math.min(1024, v));
+      i += 1;
+      continue;
+    }
+    if ((lower === "--negative" || lower === "--neg" || lower === "-n") && next) {
+      negative = next;
+      i += 1;
+      continue;
+    }
+    promptTokens.push(token);
+  }
+
+  return {
+    prompt: promptTokens.join(" ").trim(),
+    steps,
+    seed,
+    cfg,
+    width,
+    height,
+    negative: String(negative || "").trim(),
+    style3d,
+  };
+}
+
+async function tryHandleImageCommand(text) {
+  const cmd = parseImageCommand(text, { allowNatural: state.mode === MODES.IMAGE });
+  if (!cmd) return false;
+  const es = state.lang === LANG.ES;
+  if (!cmd.prompt) {
+    appendBubble(
+      es
+        ? "Falta prompt para imagen. Ejemplo: /img ciudad futurista --steps 28 --seed 42 o /img3d robot en ciudad neon"
+        : "Image prompt is missing. Example: /img futuristic city --steps 28 --seed 42 or /img3d robot in neon city",
+      "error"
+    );
+    return true;
+  }
+
+  appendBubble(text, "user");
+  appendBubble(es ? "Generando imagen..." : "Generating image...", "bot");
+
+  setPending(true);
+  try {
+    const finalPrompt = cmd.style3d
+      ? `high-detail 3d render, cinematic lighting, physically based shading, ${cmd.prompt}`
+      : cmd.prompt;
+    const hasReference = state.imageReferenceFile instanceof File;
+    let res;
+    if (hasReference) {
+      const fd = new FormData();
+      fd.append("prompt", finalPrompt);
+      fd.append("lang", state.lang);
+      fd.append("include_ocr", "1");
+      fd.append("steps", String(cmd.steps));
+      fd.append("cfg", String(cmd.cfg));
+      fd.append("width", String(cmd.width));
+      fd.append("height", String(cmd.height));
+      if (cmd.seed != null) fd.append("seed", String(cmd.seed));
+      if (cmd.negative) fd.append("negative_prompt", cmd.negative);
+      fd.append("file", state.imageReferenceFile, state.imageReferenceFile.name || "reference.png");
+      res = await fetchWithTimeout(endpoints.imageGenerateWithReference, {
+        method: "POST",
+        body: fd,
+      }, { timeout: 0, retries: 0 });
+    } else {
+      const body = {
+        prompt: finalPrompt,
+        negative_prompt: cmd.negative || undefined,
+        steps: cmd.steps,
+        cfg: cmd.cfg,
+        width: cmd.width,
+        height: cmd.height,
+        seed: cmd.seed,
+      };
+      res = await fetchWithTimeout(endpoints.imageGenerate, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }, { timeout: 0, retries: 0 });
+    }
+
+    const data = await safeJson(res);
+    if (!res.ok) {
+      const msg = data?.detail || data?.error || `HTTP ${res.status}`;
+      appendBubble(String(msg), "error");
+      return true;
+    }
+
+    const imagePath = String(data?.image_path || "").trim();
+    const backendOk = !!data?.backend_ok;
+    const fallbackUsed = !!data?.fallback_used;
+    const seedUsed = data?.seed != null ? String(data.seed) : (cmd.seed != null ? String(cmd.seed) : "rnd");
+    const metaBits = [
+      `steps:${cmd.steps}`,
+      `seed:${seedUsed}`,
+      cmd.style3d ? "style:3d" : "",
+      fallbackUsed ? (es ? "fallback local" : "local fallback") : (backendOk ? "backend" : ""),
+      data?.checkpoint_selected ? `ckpt:${String(data.checkpoint_selected).slice(0, 28)}` : "",
+    ].filter(Boolean);
+
+    const shown = appendImageBubble({
+      imagePath,
+      caption: es ? "Imagen generada" : "Generated image",
+      meta: metaBits.join(" • "),
+    });
+    if (!shown) {
+      appendBubble(
+        es
+          ? `Imagen generada. Ruta: ${imagePath || "desconocida"}`
+          : `Image generated. Path: ${imagePath || "unknown"}`,
+        "bot"
+      );
+    }
+    return true;
+  } catch (err) {
+    console.error(err);
+    appendBubble(es ? "No se pudo generar la imagen." : "Could not generate image.", "error");
+    return true;
+  } finally {
+    setPending(false);
+  }
+}
 
 function setTradeStatus(text, isError = false) {
   if (!dom.tradeStatus) return;
@@ -1999,12 +6158,21 @@ function setTradeStatus(text, isError = false) {
 
 async function loadCryptoModels() {
   try {
-    const res = await fetchWithTimeout(endpoints.cryptoModels, { headers: { Accept: "application/json" } }, { timeout: 8000, retries: 0 });
-    const data = await safeJson(res);
-    if (res.ok && data) {
+    const [modelsRes, registryRes] = await Promise.all([
+      fetchWithTimeout(endpoints.cryptoModels, { headers: { Accept: "application/json" } }, { timeout: 8000, retries: 0 }),
+      fetchWithTimeout(endpoints.cryptoModelsRegistry, { headers: { Accept: "application/json" } }, { timeout: 8000, retries: 0 }).catch(() => null),
+    ]);
+    const data = await safeJson(modelsRes);
+    if (modelsRes.ok && data) {
       const available = data.available || data.models || ["ensemble"];
       state.cryptoModelsMeta.available = Array.isArray(available) ? available : ["ensemble"];
       state.cryptoModelsMeta.default = data.default || state.cryptoModelsMeta.available[0] || "ensemble";
+    }
+    if (registryRes) {
+      const registryData = await safeJson(registryRes);
+      if (registryRes.ok && Array.isArray(registryData)) {
+        state.cryptoModelRegistry = registryData;
+      }
     }
   } catch {}
   const saved = localStorage.getItem("aegis_crypto_model");
@@ -2026,74 +6194,332 @@ function updateChartTitle(symbol) {
   if (dom.chartSymbol) dom.chartSymbol.value = symbol;
 }
 
+const chartHoverGuidePlugin = {
+  id: "chartHoverGuide",
+  afterDatasetsDraw(chart, _args, pluginOptions) {
+    const active = chart?.tooltip?.getActiveElements?.() || [];
+    if (!active.length) return;
+    const x = active[0]?.element?.x;
+    const area = chart?.chartArea;
+    if (!Number.isFinite(x) || !area) return;
+
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.beginPath();
+    if (ctx.setLineDash) ctx.setLineDash([5, 4]);
+    ctx.lineWidth = pluginOptions?.lineWidth || 1;
+    ctx.strokeStyle = pluginOptions?.color || "rgba(148, 163, 184, 0.35)";
+    ctx.moveTo(x, area.top);
+    ctx.lineTo(x, area.bottom);
+    ctx.stroke();
+    ctx.restore();
+  },
+};
+
+function normalizeTimestampMs(ts) {
+  if (ts == null) return NaN;
+  if (typeof ts === "number" && Number.isFinite(ts)) return ts < 1e12 ? ts * 1000 : ts;
+  if (typeof ts === "string") {
+    const trimmed = ts.trim();
+    if (!trimmed) return NaN;
+    const asNum = Number(trimmed);
+    if (Number.isFinite(asNum)) return asNum < 1e12 ? asNum * 1000 : asNum;
+    const parsed = Date.parse(trimmed);
+    return Number.isFinite(parsed) ? parsed : NaN;
+  }
+  const fallback = Number(ts);
+  if (!Number.isFinite(fallback)) return NaN;
+  return fallback < 1e12 ? fallback * 1000 : fallback;
+}
+
+function getPriceDigits(value) {
+  const n = Math.abs(Number(value));
+  if (!Number.isFinite(n)) return 2;
+  if (n >= 1000) return 2;
+  if (n >= 1) return 3;
+  return 5;
+}
+
+function formatPrice(value, { compact = false } = {}) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "—";
+  const locale = state.lang === LANG.ES ? "es-CO" : "en-US";
+  if (compact) {
+    return new Intl.NumberFormat(locale, {
+      notation: "compact",
+      maximumFractionDigits: 2,
+    }).format(n);
+  }
+  return new Intl.NumberFormat(locale, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: getPriceDigits(n),
+  }).format(n);
+}
+
+function formatChartTooltipTime(ts) {
+  const n = normalizeTimestampMs(ts);
+  if (!Number.isFinite(n)) return "—";
+  const locale = state.lang === LANG.ES ? "es-CO" : "en-US";
+  return new Date(n).toLocaleString(locale, {
+    hour12: false,
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function clampChartWindow(start, end, total, minSpan = 12) {
+  const safeTotal = Math.max(1, Number(total) || 1);
+  let s = Math.max(0, Math.min(safeTotal - 1, Math.floor(Number(start) || 0)));
+  let e = Math.max(0, Math.min(safeTotal - 1, Math.floor(Number(end) || 0)));
+  if (s > e) [s, e] = [e, s];
+
+  const spanTarget = Math.min(Math.max(2, minSpan), safeTotal);
+  const currentSpan = e - s + 1;
+  if (currentSpan < spanTarget) {
+    const missing = spanTarget - currentSpan;
+    s = Math.max(0, s - Math.floor(missing / 2));
+    e = Math.min(safeTotal - 1, s + spanTarget - 1);
+    s = Math.max(0, e - spanTarget + 1);
+  }
+  return { start: s, end: e };
+}
+
+function getAutoChartWindow(points) {
+  const total = points.length;
+  if (!total) return { start: 0, end: 0, mode: "empty" };
+  if (state.chartRangeMinutes > 0) {
+    const lastTs = points[total - 1].t;
+    const cutoff = lastTs - state.chartRangeMinutes * 60_000;
+    let start = points.findIndex((p) => p.t >= cutoff);
+    if (start < 0) start = 0;
+    return { start, end: total - 1, mode: "range" };
+  }
+  return { start: 0, end: total - 1, mode: "all" };
+}
+
+function getEffectiveChartWindow(points) {
+  const total = points.length;
+  if (!total) return { start: 0, end: 0, mode: "empty" };
+  if (state.chartViewMode === "manual" && state.chartWindow) {
+    const manual = clampChartWindow(state.chartWindow.start, state.chartWindow.end, total);
+    state.chartWindow = manual;
+    return { ...manual, mode: "manual" };
+  }
+  return getAutoChartWindow(points);
+}
+
+function updateChartRangeButtons() {
+  const activeMinutes = state.chartRangeMinutes > 0 ? state.chartRangeMinutes : 0;
+  dom.chartRangeButtons?.forEach((btn) => {
+    const minutes = Number(btn.getAttribute("data-chart-range") || "0");
+    const isActive = state.chartViewMode !== "manual" && minutes === activeMinutes;
+    btn.classList.toggle("active", isActive);
+    btn.setAttribute("aria-pressed", String(isActive));
+  });
+  if (dom.chartResetZoom) {
+    const isManual = state.chartViewMode === "manual";
+    dom.chartResetZoom.classList.toggle("active", isManual);
+    dom.chartResetZoom.setAttribute("aria-pressed", String(isManual));
+    dom.chartResetZoom.title = state.lang === LANG.ES
+      ? (isManual ? "Volver al rango automático" : "Reset zoom/pan")
+      : (isManual ? "Return to auto range" : "Reset zoom/pan");
+  }
+}
+
+function setChartRangePreset(minutes, { rerender = false } = {}) {
+  const value = Number(minutes);
+  state.chartRangeMinutes = Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  state.chartViewMode = "auto";
+  state.chartWindow = null;
+  localStorage.setItem("aegis_chart_range_minutes", String(state.chartRangeMinutes));
+  updateChartRangeButtons();
+  if (rerender && state.lastPoints?.length) renderChart(state.lastPoints);
+}
+
+function resetChartZoom({ rerender = false } = {}) {
+  state.chartViewMode = "auto";
+  state.chartWindow = null;
+  updateChartRangeButtons();
+  if (rerender && state.lastPoints?.length) renderChart(state.lastPoints);
+}
+
+function handleChartWheel(event) {
+  if (!state.lastPoints?.length || !state.chartInstance || !dom.priceChart) return;
+  if (!event.ctrlKey && !event.shiftKey && !event.altKey) return;
+  event.preventDefault();
+
+  const points = state.lastPoints;
+  const total = points.length;
+  if (total < 6) return;
+
+  const current = getEffectiveChartWindow(points);
+  const currentSpan = Math.max(2, current.end - current.start + 1);
+  let nextStart = current.start;
+  let nextEnd = current.end;
+
+  if (event.shiftKey || event.altKey) {
+    const step = Math.max(1, Math.round(currentSpan * 0.12));
+    const delta = event.deltaY > 0 ? step : -step;
+    nextStart += delta;
+    nextEnd += delta;
+  } else {
+    const zoomFactor = event.deltaY < 0 ? 0.84 : 1.18;
+    const minSpan = Math.min(20, total);
+    const nextSpan = Math.max(minSpan, Math.min(total, Math.round(currentSpan * zoomFactor)));
+    const rect = dom.priceChart.getBoundingClientRect();
+    const rel = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0.5;
+    const ratio = Math.max(0, Math.min(1, rel));
+    const focusIdx = Math.round(current.start + ratio * (currentSpan - 1));
+    nextStart = Math.round(focusIdx - ratio * (nextSpan - 1));
+    nextEnd = nextStart + nextSpan - 1;
+  }
+
+  const clamped = clampChartWindow(nextStart, nextEnd, total);
+  state.chartViewMode = "manual";
+  state.chartWindow = clamped;
+  updateChartRangeButtons();
+  renderChart(points);
+}
+
+function updateChartModeHint({
+  tradeCount = 0,
+  newsCount = 0,
+  compareCount = 0,
+  windowSize = 0,
+  totalSize = 0,
+  viewMode = "auto",
+} = {}) {
+  if (!dom.chartModeHint) return;
+  const es = state.lang === LANG.ES;
+  const parts = [es ? "Precio" : "Price"];
+  if (tradeCount > 0) parts.push(`Trades ${tradeCount}`);
+  if (newsCount > 0) parts.push(es ? `Noticias ${newsCount}` : `News ${newsCount}`);
+  if (compareCount > 0) parts.push(es ? `Comparación ${compareCount}` : `Compare ${compareCount}`);
+  if (windowSize > 0 && totalSize > 0 && windowSize < totalSize) {
+    parts.push(es ? `Ventana ${windowSize}/${totalSize}` : `Window ${windowSize}/${totalSize}`);
+  }
+  if (viewMode === "manual") {
+    parts.push(es ? "manual" : "manual");
+  } else if (state.chartRangeMinutes > 0) {
+    parts.push(`${state.chartRangeMinutes}m`);
+  }
+  const text = parts.join(" • ");
+  dom.chartModeHint.textContent = text;
+  dom.chartModeHint.title = es
+    ? "Línea de precio con marcadores de trades/noticias/comparación. Ctrl+rueda: zoom, Shift+rueda: pan."
+    : "Price line with trade/news/compare markers. Ctrl+wheel: zoom, Shift+wheel: pan.";
+}
+
 function parseOhlcv(raw) {
   if (!raw) return [];
   const rows = Array.isArray(raw) ? raw : raw.candles || raw.klines || raw.items || [];
-  const points = [];
+  const byTs = new Map();
   rows.forEach((r) => {
     if (Array.isArray(r)) {
-      const ts = r[0];
+      const ts = normalizeTimestampMs(r[0]);
       const close = parseFloat(r[4] ?? r[1]);
-      if (Number.isFinite(close)) points.push({ t: ts, c: close });
+      if (Number.isFinite(close) && Number.isFinite(ts)) byTs.set(ts, { t: ts, c: close });
       return;
     }
-    const ts = r.close_time ?? r.time ?? r.timestamp ?? r.t ?? r.ts;
+    const ts = normalizeTimestampMs(r.close_time ?? r.time ?? r.timestamp ?? r.t ?? r.ts);
     const close = parseFloat(r.close ?? r.c ?? r.price);
-    if (Number.isFinite(close) && ts != null) points.push({ t: ts, c: close });
+    if (Number.isFinite(close) && Number.isFinite(ts)) byTs.set(ts, { t: ts, c: close });
   });
-  return points;
+  return Array.from(byTs.values()).sort((a, b) => a.t - b.t);
 }
 
 function renderChart(points) {
   state.lastPoints = points || [];
   if (!dom.priceChart || typeof Chart === "undefined") return;
   if (!points.length) {
+    if (state.chartInstance) {
+      state.chartInstance.destroy();
+      state.chartInstance = null;
+    }
+    updateChartModeHint();
     setTradeStatus(state.lang === LANG.ES ? "Sin datos de precio." : "No price data.", true);
     return;
   }
 
-  const labels = points.map((p) => formatTimeLabel(p.t));
+  const chartWindow = getEffectiveChartWindow(points);
+  const chartWindowSize = Math.max(1, chartWindow.end - chartWindow.start + 1);
+  const windowStartTs = points[Math.max(0, chartWindow.start)]?.t ?? points[0]?.t;
+  const windowEndTs = points[Math.max(0, chartWindow.end)]?.t ?? points[points.length - 1]?.t;
+  const spanMinutes = Math.max(1, Math.round((windowEndTs - windowStartTs) / 60000));
+  const labelOpts = getChartLabelOptions(spanMinutes);
+  const labels = points.map((p) => formatTimeLabel(p.t, labelOpts));
+  const pointByLabel = new Map();
+  points.forEach((p, idx) => {
+    const ref = { idx, label: labels[idx], price: p.c, t: p.t };
+    pointByLabel.set(labels[idx], ref);
+  });
   const mainData = points.map((p) => p.c);
-
-  const tradePoints = (state.tradesOnChart || []).map((tr) => {
+  const nearestPoint = (targetTs) => {
+    const normalized = normalizeTimestampMs(targetTs);
+    if (!Number.isFinite(normalized)) return { idx: points.length - 1, label: labels[points.length - 1], price: mainData[points.length - 1], t: points[points.length - 1].t };
     let nearestIdx = points.length - 1;
     let bestDiff = Number.POSITIVE_INFINITY;
     points.forEach((p, idx) => {
-      const diff = Math.abs(Number(p.t) - Number(tr.t || Date.now()));
-      if (diff < bestDiff) { bestDiff = diff; nearestIdx = idx; }
+      const diff = Math.abs(p.t - normalized);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        nearestIdx = idx;
+      }
     });
-    return { x: labels[nearestIdx], y: tr.price ?? mainData[nearestIdx], side: tr.side };
+    return { idx: nearestIdx, label: labels[nearestIdx], price: mainData[nearestIdx], t: points[nearestIdx].t };
+  };
+
+  const tradePoints = (state.tradesOnChart || []).map((tr) => {
+    const nearest = nearestPoint(tr.t || Date.now());
+    return { x: nearest.label, y: tr.price ?? nearest.price, side: tr.side, t: nearest.t };
   });
 
   const newsPoints =
     state.showNewsMarkers && state.newsFeed?.length
       ? state.newsFeed.map((n) => {
-          let nearestIdx = points.length - 1;
-          let bestDiff = Number.POSITIVE_INFINITY;
-          points.forEach((p, idx) => {
-            const diff = Math.abs(Number(p.t) - Number(n.ts || Date.now()));
-            if (diff < bestDiff) { bestDiff = diff; nearestIdx = idx; }
-          });
-          return { x: labels[nearestIdx], y: mainData[nearestIdx], title: n.title, sentiment: n.sentiment };
+          const nearest = nearestPoint(n.ts || Date.now());
+          return { x: nearest.label, y: nearest.price, title: n.title, sentiment: n.sentiment, t: nearest.t };
         })
       : [];
 
   const comparePoints =
     state.compareMarkers?.length
-      ? state.compareMarkers.map((m) => ({
-          x: m.x,
-          y: m.y,
-          pairId: m.pairId,
-          kind: m.kind,
-          color: m.color,
-          r: state.compareHighlightId && state.compareHighlightId === m.pairId ? 6 : 4,
-        }))
+      ? state.compareMarkers.map((m) => {
+          const markerTs = normalizeTimestampMs(m.t);
+          const fromLabel = pointByLabel.get(m.x);
+          const nearest = Number.isFinite(markerTs)
+            ? nearestPoint(markerTs)
+            : (fromLabel || nearestPoint(Date.now()));
+          return {
+            x: nearest.label,
+            y: Number.isFinite(m.y) ? m.y : nearest.price,
+            pairId: m.pairId,
+            kind: m.kind,
+            color: m.color,
+            t: nearest.t,
+            r: state.compareHighlightId && state.compareHighlightId === m.pairId ? 6 : 4,
+          };
+        })
       : [];
 
   if (state.chartInstance) state.chartInstance.destroy();
+  updateChartModeHint({
+    tradeCount: tradePoints.length,
+    newsCount: newsPoints.length,
+    compareCount: comparePoints.length,
+    windowSize: chartWindowSize,
+    totalSize: points.length,
+    viewMode: chartWindow.mode,
+  });
+  updateChartRangeButtons();
+  const showLegend = tradePoints.length > 0 || newsPoints.length > 0 || comparePoints.length > 0;
 
   state.chartInstance = new Chart(dom.priceChart, {
     type: "line",
+    plugins: [chartHoverGuidePlugin],
     data: {
       labels,
       datasets: [
@@ -2101,9 +6527,19 @@ function renderChart(points) {
           label: state.chartSymbol,
           data: mainData,
           borderColor: "#22d3ee",
-          backgroundColor: "rgba(34, 211, 238, 0.15)",
-          tension: 0.2,
+          borderWidth: 2,
+          backgroundColor: (ctx) => {
+            const area = ctx?.chart?.chartArea;
+            if (!area) return "rgba(34, 211, 238, 0.20)";
+            const gradient = ctx.chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
+            gradient.addColorStop(0, "rgba(34, 211, 238, 0.35)");
+            gradient.addColorStop(1, "rgba(15, 23, 42, 0.05)");
+            return gradient;
+          },
+          tension: 0.18,
           fill: true,
+          pointRadius: 0,
+          pointHoverRadius: 0,
         },
         ...(tradePoints.length ? [{
           type: "scatter",
@@ -2141,21 +6577,104 @@ function renderChart(points) {
       ],
     },
     options: {
-      interaction: { mode: "index", intersect: false },
-      plugins: { tooltip: { enabled: true }, legend: { display: false } },
+      normalized: true,
+      interaction: { mode: "nearest", axis: "x", intersect: false },
+      plugins: {
+        chartHoverGuide: { color: "rgba(148, 163, 184, 0.35)", lineWidth: 1 },
+        tooltip: {
+          enabled: true,
+          displayColors: true,
+          callbacks: {
+            title(items) {
+              const first = items?.[0];
+              if (!first) return "";
+              const rawTs = normalizeTimestampMs(first.raw?.t);
+              if (Number.isFinite(rawTs)) return formatChartTooltipTime(rawTs);
+              const idx = Number(first.dataIndex);
+              return Number.isInteger(idx) && points[idx] ? formatChartTooltipTime(points[idx].t) : String(first.label || "");
+            },
+            label(ctx) {
+              const ds = ctx.dataset?.label || state.chartSymbol;
+              const value = Number(ctx.parsed?.y ?? ctx.raw?.y ?? ctx.raw);
+              if (ds === "Trades") return `${ctx.raw?.side || "TRADE"} • ${formatPrice(value)}`;
+              if (ds === "News") return `${state.lang === LANG.ES ? "Precio noticia" : "News price"} • ${formatPrice(value)}`;
+              if (ds === "Compare") {
+                const kind = ctx.raw?.kind === "base" ? (state.lang === LANG.ES ? "Base" : "Base") : (state.lang === LANG.ES ? "Resultado" : "Outcome");
+                return `${kind} • ${formatPrice(value)}`;
+              }
+              return `${state.chartSymbol} • ${formatPrice(value)}`;
+            },
+            afterLabel(ctx) {
+              if (ctx.dataset?.label === "News" && ctx.raw?.title) {
+                const lead = state.lang === LANG.ES ? "Titular" : "Headline";
+                return `${lead}: ${String(ctx.raw.title).slice(0, 96)}`;
+              }
+              if (ctx.dataset?.label === "News" && Number.isFinite(ctx.raw?.sentiment)) {
+                const lead = state.lang === LANG.ES ? "Sentimiento" : "Sentiment";
+                const sentiment = Number(ctx.raw.sentiment);
+                return `${lead}: ${sentiment > 0 ? "+" : ""}${sentiment.toFixed(2)}`;
+              }
+              if (ctx.dataset?.label === "Compare" && ctx.raw?.pairId) {
+                return `ID: ${ctx.raw.pairId}`;
+              }
+              return "";
+            },
+          },
+        },
+        legend: {
+          display: showLegend,
+          position: "top",
+          labels: {
+            color: "#cbd5e1",
+            usePointStyle: true,
+            boxWidth: 10,
+            boxHeight: 10,
+          },
+        },
+      },
       scales: {
-        x: { grid: { color: "rgba(148,163,184,0.14)" }, ticks: { color: "#cbd5e1", maxRotation: 0, autoSkip: true, maxTicksLimit: 6 } },
-        y: { grid: { color: "rgba(148,163,184,0.14)" }, ticks: { color: "#cbd5e1" } },
+        x: {
+          min: chartWindow.start,
+          max: chartWindow.end,
+          grid: { color: "rgba(148,163,184,0.10)" },
+          border: { color: "rgba(148,163,184,0.18)" },
+          ticks: {
+            color: "#cbd5e1",
+            maxRotation: 0,
+            autoSkip: true,
+            maxTicksLimit: Math.min(10, Math.max(4, Math.round(chartWindowSize / 14))),
+            padding: 6,
+          },
+        },
+        y: {
+          position: "right",
+          grid: { color: "rgba(148,163,184,0.10)" },
+          border: { color: "rgba(148,163,184,0.18)" },
+          ticks: {
+            color: "#cbd5e1",
+            padding: 8,
+            callback: (v) => formatPrice(v, { compact: false }),
+          },
+        },
       },
       responsive: true,
       maintainAspectRatio: false,
       animation: false,
+      elements: { point: { hitRadius: 12 } },
    },
  });
 }
 
 async function loadChartData(symbolInput) {
-  const symbol = (symbolInput || state.chartSymbol || "BTCUSDT").trim().toUpperCase();
+  const requestedSymbol = (symbolInput || state.chartSymbol || "BTCUSDT").trim().toUpperCase();
+  if (state.chartInFlight) {
+    state.chartQueued = true;
+    state.chartQueuedSymbol = requestedSymbol || state.chartSymbol || "BTCUSDT";
+    return;
+  }
+  state.chartInFlight = true;
+
+  const symbol = requestedSymbol || state.chartSymbol || "BTCUSDT";
   state.chartSymbol = symbol || "BTCUSDT";
   updateChartTitle(state.chartSymbol);
 
@@ -2171,20 +6690,38 @@ async function loadChartData(symbolInput) {
     const points = parseOhlcv(json);
     renderChart(points);
     setTradeStatus(state.lang === LANG.ES ? "Gráfico actualizado." : "Chart updated.");
-    loadNews(state.chartSymbol);
-    if (state.mode === MODES.CRYPTO) {
-      loadCryptoPrediction();
+    await loadNews(state.chartSymbol);
+    if (state.chartVisible) {
+      if (state.mode === MODES.CRYPTO) {
+        await loadCryptoPrediction();
+      }
       loadPredictionComparison(state.chartSymbol, { force: false });
     }
   } catch (err) {
     console.error(err);
     setTradeStatus(state.lang === LANG.ES ? "No se pudo cargar el gráfico." : "Could not load chart.", true);
+  } finally {
+    state.chartInFlight = false;
+    if (state.chartQueued) {
+      const queuedSymbol = state.chartQueuedSymbol || state.chartSymbol;
+      state.chartQueued = false;
+      state.chartQueuedSymbol = "";
+      setTimeout(() => loadChartData(queuedSymbol), 0);
+    }
   }
 }
 
 function startLiveChart() {
   stopLiveChart();
-  state.liveTimer = setInterval(() => loadChartData(state.chartSymbol), 15000);
+  if (!state.chartVisible && state.mode !== MODES.CRYPTO) {
+    updateStatusCenter();
+    return;
+  }
+  state.liveTimer = setInterval(() => {
+    if (document.hidden) return;
+    if (!state.chartVisible && state.mode !== MODES.CRYPTO) return;
+    loadChartData(state.chartSymbol);
+  }, 60000);
   updateStatusCenter();
 }
 function stopLiveChart() {
@@ -2199,12 +6736,27 @@ function toggleChartExpand() {
   if (state.lastPoints?.length) renderChart(state.lastPoints);
 }
 
-async function loadCryptoPrediction() {
-  if (state.mode !== MODES.CRYPTO) return;
+async function loadCryptoPrediction(options = {}) {
+  const force = options.force === true;
+  if (state.mode !== MODES.CRYPTO && !state.chartVisible) return;
 
   const symbol = (dom.chartSymbol?.value || state.chartSymbol || "BTCUSDT").trim().toUpperCase();
   const horizon = parseInt(dom.cryptoHorizon?.value || "15", 10);
   const model = dom.cryptoModelSelect?.value || state.selectedCryptoModel || "ensemble";
+  const reqKey = `${symbol}|${horizon}|${model}|${state.savePredictions ? 1 : 0}`;
+  const now = Date.now();
+
+  // Avoid repeated identical predict calls from rapid UI refresh loops.
+  if (!force && state.lastCryptoPredictionKey === reqKey && (now - Number(state.lastCryptoPredictionAt || 0)) < 12000) {
+    return;
+  }
+  if (state.cryptoPredictionInFlight) {
+    state.cryptoPredictionQueued = true;
+    return;
+  }
+  state.cryptoPredictionInFlight = true;
+  state.lastCryptoPredictionKey = reqKey;
+  state.lastCryptoPredictionAt = now;
 
   try {
     const payload = { symbol, horizon_minutes: horizon, model, save: !!state.savePredictions };
@@ -2230,19 +6782,39 @@ async function loadCryptoPrediction() {
       symbol,
       horizon,
       model,
+      engine: data?.additional_info?.engine || "demo",
       prob,
       px,
       decision,
+      model_decision: data?.additional_info?.model_decision || data?.raw?.model_decision || decision,
+      action_decision: data?.additional_info?.action_decision || data?.raw?.action_decision || decision,
+      actionable: !!data?.additional_info?.actionable,
+      credibility_status: data?.additional_info?.credibility_status || null,
+      credibility_score: data?.additional_info?.credibility_score ?? null,
+      credibility_reasons: Array.isArray(data?.additional_info?.credibility_reasons) ? data.additional_info.credibility_reasons : [],
+      execution_margin: data?.additional_info?.execution_margin ?? data?.raw?.execution_margin ?? null,
+      threshold_edge: data?.additional_info?.threshold_edge ?? data?.raw?.threshold_edge ?? null,
+      execution_gate_reason: data?.additional_info?.execution_gate_reason || data?.raw?.execution_gate_reason || null,
+      consensus: data?.additional_info?.consensus || data?.raw?.consensus || null,
+      credibility: data?.raw?.credibility || null,
       news_sentiment: data?.additional_info?.news_sentiment ?? null,
       news_count: data?.additional_info?.n_news_used ?? null,
       p_base: data?.additional_info?.probability_base ?? null,
       p_final: prob,
+      regime: data?.additional_info?.regime || data?.raw?.regime || null,
+      trained_at: data?.raw?.trained_at || null,
+      dataset_hash: data?.raw?.dataset_hash || null,
+      validation_mode: data?.raw?.validation_mode || null,
+      interval_minutes: data?.raw?.interval_minutes || null,
+      buy_threshold: data?.additional_info?.buy_threshold ?? data?.raw?.buy_threshold ?? null,
+      sell_threshold: data?.additional_info?.sell_threshold ?? data?.raw?.sell_threshold ?? null,
+      threshold_strategy: data?.raw?.threshold_strategy || null,
     };
 
     setTradeStatus(
       state.lang === LANG.ES
-        ? `Señal: ${decision} • p=${probText} • px=${px}`
-        : `Signal: ${decision} • p=${probText} • px=${px}`
+        ? `Señal: ${state.lastPrediction.action_decision || decision} • p=${probText} • px=${px}`
+        : `Signal: ${state.lastPrediction.action_decision || decision} • p=${probText} • px=${px}`
     );
     const priceSource = data?.additional_info?.price_source || data?.price_source || "demo";
     const context = data?.additional_info?.context || null;
@@ -2254,7 +6826,14 @@ async function loadCryptoPrediction() {
       px,
       context,
     });
-  } catch {}
+  } catch {
+  } finally {
+    state.cryptoPredictionInFlight = false;
+    if (state.cryptoPredictionQueued) {
+      state.cryptoPredictionQueued = false;
+      setTimeout(() => loadCryptoPrediction(), 0);
+    }
+  }
 }
 
 function clearSignalHighlight() {
@@ -2292,14 +6871,18 @@ function applySignalHighlight(decision, prob) {
 function updateSignalBar(decision, prob) {
   if (!dom.signalBar) return;
   const pct = typeof prob === "number" ? Math.max(0, Math.min(1, prob)) * 100 : 0;
+  const buyThreshold = Number(state.lastPrediction?.buy_threshold);
+  const sellThreshold = Number(state.lastPrediction?.sell_threshold);
+  const buyText = Number.isFinite(buyThreshold) ? `${(buyThreshold * 100).toFixed(1)}%` : "63.0%";
+  const sellText = Number.isFinite(sellThreshold) ? `${(sellThreshold * 100).toFixed(1)}%` : "37.0%";
   dom.signalBar.style.setProperty("--signal-width", `${pct}%`);
   const fill = dom.signalBar.querySelector(".signal-fill");
   if (fill) fill.style.width = `${pct}%`;
   dom.signalBar.setAttribute("data-decision", decision || "HOLD");
   dom.signalBar.setAttribute("title",
     state.lang === LANG.ES
-      ? `Confianza ${pct.toFixed(1)}% • Regla: BUY si >63%, SELL si <37%, HOLD en medio`
-      : `Confidence ${pct.toFixed(1)}% • Rule: BUY if >63%, SELL if <37%, HOLD otherwise`
+      ? `Confianza ${pct.toFixed(1)}% • Regla: BUY si >=${buyText}, SELL si <=${sellText}, HOLD en medio`
+      : `Confidence ${pct.toFixed(1)}% • Rule: BUY if >=${buyText}, SELL if <=${sellText}, HOLD otherwise`
   );
 }
 
@@ -2317,9 +6900,44 @@ function updateCryptoBadges({ priceSource, model, horizon, probText, px, context
     const newsCount = state.lastPrediction?.news_count ?? null;
     const pBase = state.lastPrediction?.p_base;
     const pFinal = state.lastPrediction?.p_final ?? null;
-    let txt = context || `${model || "ensemble"} • H=${horizon || "-"} • p=${probText || "—"} • px=${px ?? "—"}`;
+    const regime = state.lastPrediction?.regime ? ` • ${state.lastPrediction.regime}` : "";
+    const engine = state.lastPrediction?.engine ? ` • ${String(state.lastPrediction.engine).toUpperCase()}` : "";
+    const modelDecision = state.lastPrediction?.model_decision || null;
+    const actionDecision = state.lastPrediction?.action_decision || null;
+    const credibilityStatus = state.lastPrediction?.credibility_status || null;
+    const executionMargin = Number(state.lastPrediction?.execution_margin);
+    const thresholdEdge = Number(state.lastPrediction?.threshold_edge);
+    const gateReason = state.lastPrediction?.execution_gate_reason || null;
+    const consensus = state.lastPrediction?.consensus || null;
+    let txt = context || `${model || "ensemble"}${engine} • H=${horizon || "-"} • p=${probText || "—"} • px=${px ?? "—"}${regime}`;
     if (pBase != null && pFinal != null && Math.abs(pFinal - pBase) > 0.005) {
       txt += ` • p_adj ${formatProb(pBase)}→${formatProb(pFinal)}`;
+    }
+    const buyThreshold = Number(state.lastPrediction?.buy_threshold);
+    const sellThreshold = Number(state.lastPrediction?.sell_threshold);
+    if (Number.isFinite(buyThreshold) && Number.isFinite(sellThreshold)) {
+      txt += ` • T ${formatProb(buyThreshold)}/${formatProb(sellThreshold)}`;
+    }
+    if (modelDecision && actionDecision && modelDecision !== actionDecision) {
+      txt += state.lang === LANG.ES
+        ? ` • modelo ${modelDecision} → ejecutable ${actionDecision}`
+        : ` • model ${modelDecision} → executable ${actionDecision}`;
+    }
+    if (credibilityStatus) {
+      txt += ` • ${state.lang === LANG.ES ? "credibilidad" : "credibility"} ${credibilityStatus}`;
+    }
+    if (Number.isFinite(executionMargin) && Number.isFinite(thresholdEdge)) {
+      txt += state.lang === LANG.ES
+        ? ` • edge ${formatPct(thresholdEdge, 1)} / req ${formatPct(executionMargin, 1)}`
+        : ` • edge ${formatPct(thresholdEdge, 1)} / req ${formatPct(executionMargin, 1)}`;
+    }
+    if (gateReason) {
+      txt += state.lang === LANG.ES
+        ? ` • gate ${gateReason}`
+        : ` • gate ${gateReason}`;
+    }
+    if (consensus && Number.isFinite(Number(consensus.support_ratio)) && Number.isFinite(Number(consensus.spread))) {
+      txt += ` • consensus ${formatPct(Number(consensus.support_ratio), 0)} / spread ${formatPct(Number(consensus.spread), 1)}`;
     }
     dom.cryptoContextPill.textContent = txt;
     if (sent !== null && dom.cryptoContextPill.querySelector) {
@@ -2442,6 +7060,11 @@ async function submitTrade(side) {
 /* ------------------------- NEWS ------------------------- */
 
 async function loadNews(symbolInput, { force = false } = {}) {
+  if (state.newsInFlight) {
+    if (force) state.newsForceQueued = true;
+    return;
+  }
+  state.newsInFlight = true;
   const symbol = (symbolInput || state.chartSymbol || "BTCUSDT").trim().toUpperCase();
   try {
     const url = new URL(endpoints.cryptoNews, location.origin);
@@ -2461,6 +7084,12 @@ async function loadNews(symbolInput, { force = false } = {}) {
     if (state.lastPoints?.length) renderChart(state.lastPoints);
   } catch (err) {
     if (err?.name !== "AbortError") console.error(err);
+  } finally {
+    state.newsInFlight = false;
+    if (state.newsForceQueued) {
+      state.newsForceQueued = false;
+      setTimeout(() => loadNews(state.chartSymbol, { force: true }), 0);
+    }
   }
 }
 
@@ -2583,12 +7212,32 @@ function formatProb(v) {
   if (!Number.isFinite(v)) return "—";
   return `${(v * 100).toFixed(1)}%`;
 }
-function formatTimeLabel(ts) {
+function getChartLabelOptions(spanMinutes) {
+  const span = Number(spanMinutes);
+  if (!Number.isFinite(span) || span <= 0) return { withDate: false, withSeconds: false };
+  if (span <= 90) return { withDate: false, withSeconds: true };
+  if (span <= 24 * 60) return { withDate: false, withSeconds: false };
+  return { withDate: true, withSeconds: false };
+}
+
+function formatTimeLabel(ts, { withDate = false, withSeconds = false } = {}) {
   if (ts == null) return "—";
   let n = Number(ts);
   if (Number.isFinite(n) && n < 1e12) n *= 1000; // allow seconds
   try {
-    return new Date(n).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const locale = state.lang === LANG.ES ? "es-CO" : "en-US";
+    const base = { hour12: false, hour: "2-digit", minute: "2-digit" };
+    if (withSeconds) {
+      base.second = "2-digit";
+    }
+    if (withDate) {
+      return new Date(n).toLocaleString(locale, {
+        ...base,
+        month: "short",
+        day: "2-digit",
+      });
+    }
+    return new Date(n).toLocaleTimeString(locale, base);
   } catch {
     return "—";
   }
@@ -2685,8 +7334,8 @@ async function loadPredictionComparison(symbolInput, { force = false } = {}) {
       const baseX = nearestLabel(baseTs);
       const actualX = nearestLabel(actualTs);
 
-      markers.push({ x: baseX, y: p.current_price, pairId, kind: "base", color: "#38bdf8" });
-      markers.push({ x: actualX, y: o.actual_price, pairId, kind: "actual", color: actualColor });
+      markers.push({ x: baseX, y: p.current_price, pairId, kind: "base", color: "#38bdf8", t: normalizeTimestampMs(baseTs) });
+      markers.push({ x: actualX, y: o.actual_price, pairId, kind: "actual", color: actualColor, t: normalizeTimestampMs(actualTs) });
 
       const card = el("div", { class: "compare-row", "data-pair-id": pairId });
       const left = el("div", { class: "compare-metric" });
@@ -2718,13 +7367,13 @@ async function loadPredictionComparison(symbolInput, { force = false } = {}) {
       card.appendChild(right);
 
       card.addEventListener("mouseenter", () => {
-        state.compareHighlightId = pairId;
         card.classList.add("compare-highlight");
-        renderChart(state.lastPoints);
       });
       card.addEventListener("mouseleave", () => {
-        state.compareHighlightId = null;
         card.classList.remove("compare-highlight");
+      });
+      card.addEventListener("click", () => {
+        state.compareHighlightId = state.compareHighlightId === pairId ? null : pairId;
         renderChart(state.lastPoints);
       });
 
@@ -2742,35 +7391,74 @@ async function loadPredictionComparison(symbolInput, { force = false } = {}) {
 
 function scheduleSnapshot(delay = 700) {
   if (!state.autoSnapshotEnabled) return;
-  if (!dom.sourcesContent || document.hidden) return;
+  if (document.hidden) return;
   if (state.snapshotTimer) clearTimeout(state.snapshotTimer);
   state.snapshotTimer = setTimeout(() => {
-    if (!dom.sourcesContent || document.hidden) return;
-    loadSnapshot();
+    if (document.hidden) return;
+    loadSnapshot({ renderInSources: false, source: "auto" });
   }, delay);
 }
 
 function disableAutoSnapshot() {
-  state.autoSnapshotEnabled = false;
-  if (state.snapshotTimer) {
-    clearTimeout(state.snapshotTimer);
-    state.snapshotTimer = null;
-  }
+  // Snapshot is intentionally fixed ON in this UX contract.
+  state.autoSnapshotEnabled = true;
+  localStorage.setItem("aegis_auto_snapshot", "1");
   updateSnapshotToggleUI();
 }
 
 function enableAutoSnapshot() {
   state.autoSnapshotEnabled = true;
+  localStorage.setItem("aegis_auto_snapshot", "1");
   updateSnapshotToggleUI();
 }
 
+function startReadyzPolling() {
+  if (state.readyzTimer) return;
+  const pollMs = 45000;
+
+  const tick = async () => {
+    if (document.hidden) return;
+    if (state.readyzInFlight) return;
+    if (!hasAuthForScope("main")) {
+      state.lastReadyz = null;
+      updateStatusCenter();
+      updateModeIndicator();
+      return;
+    }
+    state.readyzInFlight = true;
+    try {
+      const res = await fetchWithTimeout(
+        endpoints.systemReadyz,
+        { headers: { Accept: "application/json" } },
+        { timeout: 7000, retries: 0 }
+      );
+      const data = await safeJson(res);
+      if (res.ok && data && typeof data === "object") {
+        state.lastReadyz = data;
+      } else if (res.status === 401 || res.status === 403) {
+        state.lastReadyz = null;
+      }
+    } catch (err) {
+      // ignore network errors; keep previous state
+    } finally {
+      state.readyzInFlight = false;
+      updateStatusCenter();
+      updateModeIndicator();
+    }
+  };
+
+  setTimeout(tick, 800);
+  state.readyzTimer = setInterval(tick, pollMs);
+}
+
 function updateSnapshotToggleUI() {
-  if (!dom.snapshotBtn) return;
   const es = state.lang === LANG.ES;
-  dom.snapshotBtn.classList.toggle("active", state.autoSnapshotEnabled);
-  dom.snapshotBtn.title = state.autoSnapshotEnabled
-    ? (es ? "Auto-snapshot activado (clic para pausar)" : "Auto snapshot on (click to pause)")
-    : (es ? "Auto-snapshot pausado (clic para reactivar)" : "Auto snapshot paused (click to resume)");
+  if (dom.globalSnapshotBtn) {
+    dom.globalSnapshotBtn.classList.add("active");
+    dom.globalSnapshotBtn.title = es
+      ? "Snapshot automático activo (clic para refrescar vista)"
+      : "Auto snapshot active (click to refresh view)";
+  }
 }
 
 async function loadRecentPredictions() {
@@ -2787,14 +7475,143 @@ async function loadRecentPredictions() {
   }
 }
 
-async function loadStats() {
-  const url = new URL("/crypto/predictions/stats", location.origin);
-  url.searchParams.set("limit", "200");
+function normalizeCryptoStatsEngine(engine) {
+  const raw = String(engine || "").trim().toLowerCase();
+  return raw === "trained" || raw === "demo" ? raw : "all";
+}
+
+function getCurrentCryptoScope() {
+  const symbol = String(dom.chartSymbol?.value || state.chartSymbol || "BTCUSDT").trim().toUpperCase() || "BTCUSDT";
+  const horizonRaw = parseInt(dom.cryptoHorizon?.value || state.lastPrediction?.horizon || "15", 10);
+  const horizon = Number.isFinite(horizonRaw) && horizonRaw > 0 ? horizonRaw : 15;
+  const regime = String(state.lastPrediction?.regime || "").trim().toLowerCase() || null;
+  return { symbol, horizon, regime };
+}
+
+function buildCryptoStatsUrl({ exportMode = false, limit = 200, engine = state.cryptoStatsEngine } = {}) {
+  const normalizedEngine = normalizeCryptoStatsEngine(engine);
+  const url = new URL(exportMode ? endpoints.cryptoPredictionStatsExport : "/crypto/predictions/stats", location.origin);
+  const scope = getCurrentCryptoScope();
+  url.searchParams.set("limit", String(limit));
+  if (scope.symbol) url.searchParams.set("symbol", scope.symbol);
+  if (Number.isFinite(scope.horizon) && scope.horizon > 0) {
+    url.searchParams.set("horizon_minutes", String(scope.horizon));
+  }
+  if (normalizedEngine !== "all") {
+    url.searchParams.set("engine", normalizedEngine);
+  }
+  return url;
+}
+
+function buildCryptoThresholdsUrl({ limit = 1000, minTrades = 8 } = {}) {
+  const scope = getCurrentCryptoScope();
+  const url = new URL(endpoints.cryptoPredictionThresholds, location.origin);
+  url.searchParams.set("limit", String(limit));
+  url.searchParams.set("engine", "trained");
+  url.searchParams.set("symbol", scope.symbol);
+  url.searchParams.set("horizon_minutes", String(scope.horizon));
+  url.searchParams.set("min_trades", String(minTrades));
+  if (scope.regime) url.searchParams.set("regime", scope.regime);
+  return url;
+}
+
+function buildCryptoCredibilityUrl() {
+  const scope = getCurrentCryptoScope();
+  const url = new URL(endpoints.cryptoPredictionCredibility, location.origin);
+  url.searchParams.set("engine", "trained");
+  url.searchParams.set("symbol", scope.symbol);
+  url.searchParams.set("horizon_minutes", String(scope.horizon));
+  if (scope.regime) url.searchParams.set("regime", scope.regime);
+  return url;
+}
+
+function buildCryptoLeaderboardUrl({ limit = 2000, minTrades = 8, topN = 6 } = {}) {
+  const url = new URL(endpoints.cryptoPredictionLeaderboard, location.origin);
+  url.searchParams.set("limit", String(limit));
+  url.searchParams.set("engine", "trained");
+  url.searchParams.set("min_trades", String(minTrades));
+  url.searchParams.set("top_n", String(topN));
+  return url;
+}
+
+function getRegistryEntriesForCurrentScope() {
+  const scope = getCurrentCryptoScope();
+  const rows = Array.isArray(state.cryptoModelRegistry) ? state.cryptoModelRegistry : [];
+  const exact = rows.filter((row) => String(row?.symbol || "").toUpperCase() === scope.symbol && Number(row?.horizon_minutes) === scope.horizon);
+  if (exact.length) return exact;
+  const sameSymbol = rows.filter((row) => String(row?.symbol || "").toUpperCase() === scope.symbol);
+  return sameSymbol.length ? sameSymbol : rows.slice(0, 6);
+}
+
+async function exportCryptoStats(format = "json") {
+  const es = state.lang === LANG.ES;
+  const formatRaw = String(format || "json").trim().toLowerCase();
+  const normalizedFormat = formatRaw === "csv" ? "csv" : formatRaw === "md" ? "md" : "json";
+  const engine = normalizeCryptoStatsEngine(state.cryptoStatsEngine);
+  const url = buildCryptoStatsUrl({ exportMode: true, limit: 200, engine });
+  url.searchParams.set("format", normalizedFormat);
   try {
-    const res = await fetchWithTimeout(url.toString(), {}, { timeout: 9000, retries: 0 });
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error();
-    renderStatsPanel(data || {});
+    const res = await fetchWithTimeout(
+      url.toString(),
+      {
+        headers: {
+          Accept: normalizedFormat === "csv" ? "text/csv" : normalizedFormat === "md" ? "text/markdown" : "application/json",
+        },
+      },
+      { timeout: 9000, retries: 0 }
+    );
+    if (!res.ok) throw new Error("stats export failed");
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const symbol = (state.chartSymbol || "all").toUpperCase();
+    link.href = objectUrl;
+    link.download = `crypto_stats_${symbol}_${engine}.${normalizedFormat}`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
+  } catch (err) {
+    console.error(err);
+    appendBubble(
+      es ? "No se pudo exportar el reporte cripto." : "Could not export the crypto report.",
+      "bot"
+    );
+  }
+}
+
+async function loadStats() {
+  const url = buildCryptoStatsUrl({ exportMode: false, limit: 200, engine: state.cryptoStatsEngine });
+  const thresholdsUrl = buildCryptoThresholdsUrl({ limit: 1000, minTrades: 8 });
+  const credibilityUrl = buildCryptoCredibilityUrl();
+  const leaderboardUrl = buildCryptoLeaderboardUrl({ limit: 2000, minTrades: 8, topN: 6 });
+  try {
+    const [statsRes, thresholdRes, credibilityRes, leaderboardRes, registryRes] = await Promise.all([
+      fetchWithTimeout(url.toString(), {}, { timeout: 9000, retries: 0 }),
+      fetchWithTimeout(thresholdsUrl.toString(), {}, { timeout: 9000, retries: 0 }).catch(() => null),
+      fetchWithTimeout(credibilityUrl.toString(), {}, { timeout: 9000, retries: 0 }).catch(() => null),
+      fetchWithTimeout(leaderboardUrl.toString(), {}, { timeout: 9000, retries: 0 }).catch(() => null),
+      fetchWithTimeout(endpoints.cryptoModelsRegistry, {}, { timeout: 9000, retries: 0 }).catch(() => null),
+    ]);
+    const data = await safeJson(statsRes);
+    if (!statsRes.ok) throw new Error();
+    const thresholdData = thresholdRes ? await safeJson(thresholdRes) : null;
+    const credibilityData = credibilityRes ? await safeJson(credibilityRes) : null;
+    const leaderboardData = leaderboardRes ? await safeJson(leaderboardRes) : null;
+    const registryData = registryRes ? await safeJson(registryRes) : null;
+    if (Array.isArray(registryData)) state.cryptoModelRegistry = registryData;
+    state.cryptoThresholdRec = thresholdData?.recommendation || null;
+    state.cryptoCredibility = credibilityData?.assessment || null;
+    state.cryptoLeaderboard = Array.isArray(leaderboardData) ? leaderboardData : [];
+    renderStatsPanel({
+      ...(data || {}),
+      threshold_scope: thresholdData?.scope || null,
+      threshold_recommendation: thresholdData?.recommendation || null,
+      credibility_scope: credibilityData?.scope || null,
+      credibility_assessment: credibilityData?.assessment || null,
+      scope_leaderboard: Array.isArray(leaderboardData) ? leaderboardData : [],
+      model_registry: Array.isArray(registryData) ? registryData : state.cryptoModelRegistry,
+    });
     scheduleSnapshot();
   } catch {
     renderErrorInSources(state.lang === LANG.ES ? "No disponible." : "Unavailable.");
@@ -2816,24 +7633,68 @@ async function loadPnl() {
   }
 }
 
-async function loadSnapshot() {
-  if (!dom.sourcesContent) return;
+async function loadSnapshot(options = {}) {
+  const renderInSources = options.renderInSources !== false;
+  const forceToast = options.forceToast === true;
+  const source = String(options.source || "manual");
+  const hasSourcesPane = !!dom.sourcesContent;
+  if (renderInSources && !hasSourcesPane) return;
+  if (state.snapshotInFlight) {
+    state.snapshotQueued = true;
+    return;
+  }
+  state.snapshotInFlight = true;
   const es = state.lang === LANG.ES;
-  dom.sourcesContent.innerHTML = "";
-  dom.sourcesContent.appendChild(el("div", { class: "sources-list-item", text: es ? "Cargando snapshot..." : "Loading snapshot..." }));
+  if (!hasAuthForScope("main")) {
+    if (renderInSources && hasSourcesPane) {
+      renderErrorInSources(es ? "Auth requerida para snapshot (🔑)." : "Auth required for snapshot (🔑).");
+    }
+    state.snapshotInFlight = false;
+    return;
+  }
+  if (renderInSources && hasSourcesPane) {
+    dom.sourcesContent.innerHTML = "";
+    dom.sourcesContent.appendChild(el("div", { class: "sources-list-item", text: es ? "Cargando snapshot..." : "Loading snapshot..." }));
+  }
 
   try {
-    const [snapRes, healthRes] = await Promise.all([
+    const [snapRes, healthRes, readyRes] = await Promise.all([
       fetchWithTimeout(endpoints.systemSnapshot, {}, { timeout: 9000, retries: 0 }),
       fetchWithTimeout(endpoints.healthz, {}, { timeout: 5000, retries: 0 }).catch(() => null),
+      fetchWithTimeout(endpoints.systemReadyz, {}, { timeout: 7000, retries: 0 }).catch(() => null),
     ]);
     const data = await safeJson(snapRes);
     const health = healthRes ? await safeJson(healthRes) : null;
+    const readyz = readyRes ? await safeJson(readyRes) : null;
     if (!snapRes.ok || !data) throw new Error("snapshot failed");
-    renderSnapshotPanel(data, health);
+    state.lastSnapshot = { snapshot: data, health, readyz };
+    renderProjectMeta();
+    if (renderInSources && hasSourcesPane) {
+      renderSnapshotPanel(data, health, readyz);
+    }
+    if (forceToast || source === "auto") {
+      notifyStatus(
+        es ? "Snapshot actualizado." : "Snapshot updated.",
+        { kind: "success", key: "snapshot-updated", dedupeMs: 9000, ttlMs: 1800 }
+      );
+    }
   } catch (err) {
     console.error(err);
-    renderErrorInSources(es ? "Snapshot no disponible." : "Snapshot unavailable.");
+    if (renderInSources && hasSourcesPane) {
+      renderErrorInSources(es ? "Snapshot no disponible." : "Snapshot unavailable.");
+    }
+    if (forceToast) {
+      notifyStatus(
+        es ? "Snapshot no disponible." : "Snapshot unavailable.",
+        { kind: "warn", key: "snapshot-unavailable", dedupeMs: 5000, ttlMs: 2000 }
+      );
+    }
+  } finally {
+    state.snapshotInFlight = false;
+    if (state.snapshotQueued) {
+      state.snapshotQueued = false;
+      setTimeout(() => loadSnapshot({ renderInSources, forceToast, source }), 0);
+    }
   }
 }
 
@@ -2880,22 +7741,99 @@ function renderSimpleList(obj, title) {
   dom.sourcesContent.appendChild(pre);
 }
 
-function renderSnapshotPanel(data, health) {
+function renderSnapshotPanel(data, health, readyz = null) {
   if (!dom.sourcesContent) return;
   const es = state.lang === LANG.ES;
+  const snap = data && typeof data === "object" ? data : {};
   const roots = Array.isArray(data?.ingest_roots) ? data.ingest_roots : [];
   const jobs = Array.isArray(data?.jobs) ? data.jobs : [];
-  const preds = Array.isArray(data?.predictions) ? data.predictions : [];
-  const stats = data?.stats || {};
-  const pnl = data?.pnl || {};
   const emb = data?.embeddings || { status: "unknown" };
+  const llm = data?.llm || { status: "unknown" };
+  const web = data?.web_search || { status: "unknown" };
+  const image = data?.image || { status: "unknown" };
+  const clamav = data?.clamav || { status: "unknown" };
+  const validation = data?.validation || readyz?.validation || {};
+  const surfaces = data?.api_surfaces || readyz?.api_surfaces || {};
   const healthStatus = health?.status || health?.detail || null;
+  const runtimeStatus = readyz?.status || data?.status || "unknown";
 
   dom.sourcesContent.innerHTML = "";
 
   const title = el("div", { class: "sources-title-row" });
   title.appendChild(el("div", { text: es ? "Snapshot" : "Snapshot" }));
+  title.appendChild(el("span", { class: `pill ${runtimeStatus === "ready" ? "success" : runtimeStatus === "fallback-only" ? "warn" : runtimeStatus === "degraded" ? "neutral" : "danger"}`, text: `${es ? "Runtime" : "Runtime"}: ${runtimeStatus}` }));
   dom.sourcesContent.appendChild(title);
+
+  const capabilityItems = getRuntimeCapabilityItems();
+  if (capabilityItems.length) {
+    const capabilityCard = el("div", { class: "project-meta-card" });
+    capabilityCard.appendChild(el("strong", { text: es ? "Estado de capacidades" : "Capabilities status" }));
+    const list = el("div", { class: "mini-list" });
+    capabilityItems.forEach((item) => {
+      list.appendChild(el("span", { class: `mini-chip ${capabilityChipClass(item) || (!item.ok ? "warn" : "")}`, text: `${item.label}: ${item.value}` }));
+    });
+    capabilityCard.appendChild(list);
+    dom.sourcesContent.appendChild(capabilityCard);
+  }
+
+  // API surfaces (helps explain legacy/experimental disconnections)
+  if (surfaces && typeof surfaces === "object") {
+    const rows = [];
+    const add = (label, on) => rows.push({ label, on: !!on });
+    add("chat", surfaces.chat_api);
+    add("files", true);
+    add("system", surfaces.system_api);
+    add("auth", surfaces.auth_api);
+    add("admin", surfaces.admin_api);
+    add("crypto", surfaces.crypto_api);
+    add("image", surfaces.image_api);
+    add("tools(legacy)", surfaces.tools_api_legacy);
+    add("meta", surfaces.meta_api);
+    add("shutdown", surfaces.shutdown_endpoint);
+    add("inprocess_e2e", surfaces.inprocess_e2e_gate);
+
+    const surfCard = el("div", { class: "project-meta-card" });
+    surfCard.appendChild(el("strong", { text: es ? "Superficies API" : "API surfaces" }));
+    const list = el("div", { class: "mini-list" });
+    rows.forEach((r) => {
+      list.appendChild(
+        el("span", {
+          class: `mini-chip ${r.on ? "" : "warn"}`.trim(),
+          text: `${r.label}: ${r.on ? "on" : "off"}`,
+        })
+      );
+    });
+    surfCard.appendChild(list);
+    dom.sourcesContent.appendChild(surfCard);
+  }
+
+  const degraded = Array.isArray(readyz?.degraded_reasons)
+    ? readyz.degraded_reasons
+    : Array.isArray(snap?.degraded_reasons)
+      ? snap.degraded_reasons
+      : [];
+  if (degraded.length) {
+    const mapReason = (r) => {
+      const v = String(r || "").trim();
+      if (!v) return "";
+      const labels = {
+        "image:fallback-only": es ? "Imagen: usando fallback (backend caído)" : "Image: fallback-only (backend down)",
+        "clamav:missing": es ? "ClamAV: no disponible" : "ClamAV: missing",
+        "web:cooldown": es ? "Web: cooldown" : "Web: cooldown",
+        "web:degraded": es ? "Web: degradado" : "Web: degraded",
+        "web:error": es ? "Web: error" : "Web: error",
+      };
+      return labels[v] || v;
+    };
+    const card = el("div", { class: "project-meta-card" });
+    card.appendChild(el("strong", { text: es ? "Degradado" : "Degraded" }));
+    const ul = el("ul", { class: "mini-ul" });
+    degraded.map(mapReason).filter(Boolean).slice(0, 8).forEach((txt) => {
+      ul.appendChild(el("li", { text: txt }));
+    });
+    card.appendChild(ul);
+    dom.sourcesContent.appendChild(card);
+  }
 
   const wrap = el("div", { class: "kpi-grid" });
 
@@ -2941,6 +7879,82 @@ function renderSnapshotPanel(data, health) {
   embCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Estado" : "Status"}: ${emb.status || "?"} ${emb.loaded ? "✓" : ""}` }));
   wrap.appendChild(embCard);
 
+  const llmCard = el("div", { class: "kpi-card" });
+  llmCard.appendChild(el("div", { class: "kpi-title", text: "LLM" }));
+  llmCard.appendChild(el("div", { class: "kpi-item", text: `${llm.model_path || "n/a"}` }));
+  llmCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Estado" : "Status"}: ${llm.status || "?"} ${llm.loaded ? "✓" : ""}` }));
+  wrap.appendChild(llmCard);
+
+  if (!SNAPSHOT_MINIMAL_VIEW) {
+    // Resources + agent internals stay available in debug snapshot mode.
+    const resources = snap?.resources || {};
+    const agentProfile = snap?.agent_profile || {};
+    const resCard = el("div", { class: "kpi-card" });
+    resCard.appendChild(el("div", { class: "kpi-title", text: es ? "Recursos" : "Resources" }));
+    const cpu = resources?.cpu || {};
+    const mem = resources?.mem || {};
+    const gpu = resources?.gpu || {};
+    const llmCfg = resources?.llm_config || {};
+    if (cpu?.count) resCard.appendChild(el("div", { class: "kpi-item", text: `CPU: ${cpu.count}` }));
+    if (Number.isFinite(mem?.rss_mb)) resCard.appendChild(el("div", { class: "kpi-item", text: `RSS: ${mem.rss_mb} MB` }));
+    if (Number.isFinite(mem?.available_mb) && Number.isFinite(mem?.total_mb)) {
+      resCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "RAM" : "RAM"}: ${mem.available_mb}/${mem.total_mb} MB` }));
+    }
+    if (gpu?.available) {
+      resCard.appendChild(el("div", { class: "kpi-item", text: `GPU: ${gpu.device || "cuda"}` }));
+      if (Number.isFinite(gpu?.allocated_mb) && Number.isFinite(gpu?.total_vram_mb)) {
+        resCard.appendChild(el("div", { class: "kpi-item", text: `VRAM: ${gpu.allocated_mb}/${gpu.total_vram_mb} MB` }));
+      }
+    } else {
+      resCard.appendChild(el("div", { class: "kpi-item", text: `GPU: ${es ? "no" : "no"}` }));
+    }
+    const llmLine = [
+      llmCfg?.ctx ? `ctx=${llmCfg.ctx}` : "",
+      llmCfg?.threads ? `thr=${llmCfg.threads}` : "",
+      (llmCfg?.gpu_layers ?? null) !== null && llmCfg?.gpu_layers !== undefined ? `gpu_layers=${llmCfg.gpu_layers}` : "",
+      llmCfg?.batch ? `batch=${llmCfg.batch}` : "",
+    ].filter(Boolean).join(" ");
+    if (llmLine) resCard.appendChild(el("div", { class: "kpi-item", text: `LLM: ${llmLine}` }));
+    wrap.appendChild(resCard);
+
+    const profCard = el("div", { class: "kpi-card" });
+    profCard.appendChild(el("div", { class: "kpi-title", text: es ? "Perfil agente" : "Agent profile" }));
+    if (agentProfile?.offline_mode !== undefined) {
+      profCard.appendChild(el("div", { class: "kpi-item", text: `offline_mode: ${agentProfile.offline_mode ? "1" : "0"}` }));
+    }
+    const order = Array.isArray(agentProfile?.tool_routing_order) ? agentProfile.tool_routing_order : [];
+    if (order.length) profCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Orden" : "Order"}: ${order.join(" → ")}` }));
+    const budget = agentProfile?.prompt_budget || {};
+    if (budget?.max_prompt_chars) profCard.appendChild(el("div", { class: "kpi-item", text: `max_prompt_chars: ${budget.max_prompt_chars}` }));
+    if (budget?.max_response_chars) profCard.appendChild(el("div", { class: "kpi-item", text: `max_response_chars: ${budget.max_response_chars}` }));
+    wrap.appendChild(profCard);
+  }
+
+  const webCard = el("div", { class: "kpi-card" });
+  webCard.appendChild(el("div", { class: "kpi-title", text: es ? "Web search" : "Web search" }));
+  webCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Estado" : "Status"}: ${web.status || "?"}` }));
+  webCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Providers" : "Providers"}: ${web.provider_count ?? 0}` }));
+  if (web.probe_enabled) webCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Probe" : "Probe"}: ${web.probe_ok ? "ok" : "fail"}` }));
+  wrap.appendChild(webCard);
+
+  const imageCard = el("div", { class: "kpi-card" });
+  imageCard.appendChild(el("div", { class: "kpi-title", text: es ? "Imagen" : "Image" }));
+  imageCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Estado" : "Status"}: ${image.status || "?"}` }));
+  imageCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Backend" : "Backend"}: ${image.backend_reachable ? "ok" : "down"}` }));
+  if (image.fallback_only || image.recent_fallbacks) {
+    imageCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Fallbacks" : "Fallbacks"}: ${image.recent_fallbacks ?? 0}` }));
+  }
+  wrap.appendChild(imageCard);
+
+  const avCard = el("div", { class: "kpi-card" });
+  avCard.appendChild(el("div", { class: "kpi-title", text: "ClamAV" }));
+  avCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Estado" : "Status"}: ${clamav.status || "?"}` }));
+  avCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Scanner" : "Scanner"}: ${clamav.scanner || "-"}` }));
+  if (clamav.latest_event) {
+    avCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Último scan" : "Last scan"}: ${clamav.latest_event.status || "-"}` }));
+  }
+  wrap.appendChild(avCard);
+
   // Health
   const healthCard = el("div", { class: "kpi-card" });
   healthCard.appendChild(el("div", { class: "kpi-title", text: es ? "Salud" : "Health" }));
@@ -2949,53 +7963,82 @@ function renderSnapshotPanel(data, health) {
   healthCard.appendChild(el("div", { class: `pill ${ok ? "success" : "neutral"}`, text: healthText }));
   wrap.appendChild(healthCard);
 
-  // Predictions
-  const predsCard = el("div", { class: "kpi-card" });
-  predsCard.appendChild(el("div", { class: "kpi-title", text: es ? "Predicciones" : "Predictions" }));
-  if (!preds.length) {
-    predsCard.appendChild(el("div", { class: "sources-empty", text: es ? "Sin predicciones." : "No predictions." }));
-  } else {
-    preds.slice(0, 5).forEach((p) => {
-      const sideRaw = (p.decision || p.signal || "HOLD").toUpperCase();
-      const row = el("div", { class: "kpi-row" });
-      row.appendChild(el("span", { class: `pill ${sideRaw === "BUY" ? "buy" : sideRaw === "SELL" ? "sell" : "neutral"}`, text: sideRaw }));
-      if (Number.isFinite(p.probability_up)) row.appendChild(el("span", { class: "pill muted", text: formatProb(p.probability_up) }));
-      if (p.symbol) row.appendChild(el("span", { class: "pill neutral", text: p.symbol }));
-      if (p.outcome && Number.isFinite(p.outcome.delta_pct)) {
-        const delta = Number(p.outcome.delta_pct);
-        row.appendChild(el("span", { class: `pill ${delta >= 0 ? "positive" : "negative"}`, text: `Δ ${formatPct(delta)}` }));
-      }
-      predsCard.appendChild(row);
-    });
+  const validationCard = el("div", { class: "kpi-card" });
+  validationCard.appendChild(el("div", { class: "kpi-title", text: es ? "Validación" : "Validation" }));
+  const startupGate = Array.isArray(validation.startup_gate) ? validation.startup_gate : [];
+  const verifyFull = Array.isArray(validation.verify_full) ? validation.verify_full : [];
+  validationCard.appendChild(
+    el("div", {
+      class: "kpi-item",
+      text: `${es ? "Browser gate" : "Browser gate"}: ${validation.browser_smoke_strict_default ? "strict" : validation.browser_smoke_default ? "soft" : "off"}`,
+    })
+  );
+  if (startupGate.length) {
+    validationCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Startup" : "Startup"}: ${startupGate.join(" → ")}` }));
   }
-  wrap.appendChild(predsCard);
-
-  // Stats
-  const statsCard = el("div", { class: "kpi-card" });
-  statsCard.appendChild(el("div", { class: "kpi-title", text: es ? "Stats" : "Stats" }));
-  statsCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Conteo" : "Count"}: ${stats.count ?? 0}` }));
-  if (Number.isFinite(stats.accuracy)) statsCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Accuracy" : "Accuracy"}: ${formatPct(stats.accuracy, 1)}` }));
-  if (Number.isFinite(stats.avg_delta_pct)) statsCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Δ prom" : "Avg Δ"}: ${formatPct(stats.avg_delta_pct, 2)}` }));
-  wrap.appendChild(statsCard);
-
-  // P&L
-  const pnlCard = el("div", { class: "kpi-card" });
-  pnlCard.appendChild(el("div", { class: "kpi-title", text: "P&L" }));
-  const perSym = pnl?.per_symbol || {};
-  const symbols = Object.keys(perSym);
-  if (!symbols.length) {
-    pnlCard.appendChild(el("div", { class: "sources-empty", text: es ? "Sin trades." : "No trades." }));
-  } else {
-    symbols.slice(0, 4).forEach((sym) => {
-      const info = perSym[sym] || {};
-      const line = el("div", { class: "kpi-row" });
-      line.appendChild(el("span", { class: "pill neutral", text: sym }));
-      if (Number.isFinite(info.unrealized)) line.appendChild(el("span", { class: info.unrealized >= 0 ? "pill positive" : "pill negative", text: `${info.unrealized.toFixed(4)}` }));
-      if (Number.isFinite(info.position)) line.appendChild(el("span", { class: "pill muted", text: `${es ? "Pos" : "Pos"} ${info.position}` }));
-      pnlCard.appendChild(line);
-    });
+  if (verifyFull.length) {
+    validationCard.appendChild(el("div", { class: "kpi-item", text: `verify_full: ${verifyFull.join(" → ")}` }));
   }
-  wrap.appendChild(pnlCard);
+  const startupRun = validation?.last_runs?.startup_gate || null;
+  const verifyRun = validation?.last_runs?.verify_full || null;
+  if (startupRun?.status) {
+    validationCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Último startup" : "Last startup"}: ${startupRun.status}` }));
+  }
+  if (verifyRun?.status) {
+    validationCard.appendChild(el("div", { class: "kpi-item", text: `verify_full: ${verifyRun.status}` }));
+  }
+  wrap.appendChild(validationCard);
+
+  if (!SNAPSHOT_MINIMAL_VIEW) {
+    const preds = Array.isArray(data?.predictions) ? data.predictions : [];
+    const stats = data?.stats || {};
+    const pnl = data?.pnl || {};
+
+    const predsCard = el("div", { class: "kpi-card" });
+    predsCard.appendChild(el("div", { class: "kpi-title", text: es ? "Predicciones" : "Predictions" }));
+    if (!preds.length) {
+      predsCard.appendChild(el("div", { class: "sources-empty", text: es ? "Sin predicciones." : "No predictions." }));
+    } else {
+      preds.slice(0, 5).forEach((p) => {
+        const sideRaw = (p.decision || p.signal || "HOLD").toUpperCase();
+        const row = el("div", { class: "kpi-row" });
+        row.appendChild(el("span", { class: `pill ${sideRaw === "BUY" ? "buy" : sideRaw === "SELL" ? "sell" : "neutral"}`, text: sideRaw }));
+        if (Number.isFinite(p.probability_up)) row.appendChild(el("span", { class: "pill muted", text: formatProb(p.probability_up) }));
+        if (p.symbol) row.appendChild(el("span", { class: "pill neutral", text: p.symbol }));
+        if (p.outcome && Number.isFinite(p.outcome.delta_pct)) {
+          const delta = Number(p.outcome.delta_pct);
+          row.appendChild(el("span", { class: `pill ${delta >= 0 ? "positive" : "negative"}`, text: `Δ ${formatPct(delta)}` }));
+        }
+        predsCard.appendChild(row);
+      });
+    }
+    wrap.appendChild(predsCard);
+
+    const statsCard = el("div", { class: "kpi-card" });
+    statsCard.appendChild(el("div", { class: "kpi-title", text: es ? "Stats" : "Stats" }));
+    statsCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Conteo" : "Count"}: ${stats.count ?? 0}` }));
+    if (Number.isFinite(stats.accuracy)) statsCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Accuracy" : "Accuracy"}: ${formatPct(stats.accuracy, 1)}` }));
+    if (Number.isFinite(stats.avg_delta_pct)) statsCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Δ prom" : "Avg Δ"}: ${formatPct(stats.avg_delta_pct, 2)}` }));
+    wrap.appendChild(statsCard);
+
+    const pnlCard = el("div", { class: "kpi-card" });
+    pnlCard.appendChild(el("div", { class: "kpi-title", text: "P&L" }));
+    const perSym = pnl?.per_symbol || {};
+    const symbols = Object.keys(perSym);
+    if (!symbols.length) {
+      pnlCard.appendChild(el("div", { class: "sources-empty", text: es ? "Sin trades." : "No trades." }));
+    } else {
+      symbols.slice(0, 4).forEach((sym) => {
+        const info = perSym[sym] || {};
+        const line = el("div", { class: "kpi-row" });
+        line.appendChild(el("span", { class: "pill neutral", text: sym }));
+        if (Number.isFinite(info.unrealized)) line.appendChild(el("span", { class: info.unrealized >= 0 ? "pill positive" : "pill negative", text: `${info.unrealized.toFixed(4)}` }));
+        if (Number.isFinite(info.position)) line.appendChild(el("span", { class: "pill muted", text: `${es ? "Pos" : "Pos"} ${info.position}` }));
+        pnlCard.appendChild(line);
+      });
+    }
+    wrap.appendChild(pnlCard);
+  }
 
   dom.sourcesContent.appendChild(wrap);
 }
@@ -3102,42 +8145,193 @@ function renderPredictionsList(items) {
   dom.sourcesContent.appendChild(foot);
 }
 
-function loadSymbolsList() {
+function getCryptoSearchSymbols() {
+  const fromMeta = Array.isArray(state.cryptoSymbolMeta?.popular_pairs)
+    ? state.cryptoSymbolMeta.popular_pairs
+    : [];
+  const merged = [...fromMeta, ...CRYPTO_SEARCH_SYMBOLS]
+    .map((s) => String(s || "").trim().toUpperCase())
+    .filter((s) => /^[A-Z0-9]{2,20}$/.test(s));
+  return [...new Set(merged)];
+}
+
+function loadSymbolsList(filter = "") {
+  const cleanFilter = String(filter || "").trim().toUpperCase();
+  const allSymbols = getCryptoSearchSymbols();
+  const symbols = cleanFilter
+    ? allSymbols.filter((sym) => sym.includes(cleanFilter))
+    : allSymbols.slice();
+
+  const symbolsDataList = document.getElementById("cryptoSymbolsList");
+  if (symbolsDataList) {
+    symbolsDataList.innerHTML = "";
+    symbols.forEach((sym) => {
+      const opt = document.createElement("option");
+      opt.value = sym;
+      symbolsDataList.appendChild(opt);
+    });
+  }
+
   if (!dom.symbolsList) return;
-  const symbols = [
-    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "TRXUSDT",
-    "LINKUSDT", "MATICUSDT", "LTCUSDT", "ATOMUSDT", "ETCUSDT", "XLMUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "SUIUSDT",
-    "NEARUSDT", "AAVEUSDT", "UNIUSDT", "XMRUSDT", "EOSUSDT", "FILUSDT", "ALGOUSDT", "XTZUSDT", "MKRUSDT", "INJUSDT",
-    "RUNEUSDT", "KASUSDT", "IMXUSDT", "JTOUSDT", "JUPUSDT", "TIAUSDT", "WIFUSDT", "PEPEUSDT", "SHIBUSDT", "BONKUSDT",
-  ];
   const grouped = symbols.reduce((rows, sym, idx) => {
-    const row = Math.floor(idx / 5);
+    const row = Math.floor(idx / 6);
     rows[row] = rows[row] || [];
     rows[row].push(sym);
     return rows;
   }, []);
-  dom.symbolsList.textContent = grouped.map((r) => r.join(", ")).join("\n");
+  dom.symbolsList.textContent = grouped.length
+    ? grouped.map((r) => r.join(", ")).join("\n")
+    : (state.lang === LANG.ES ? "Sin resultados." : "No matches.");
+
+  const quotes = Array.isArray(state.cryptoSymbolMeta?.allowed_quote_assets)
+    ? state.cryptoSymbolMeta.allowed_quote_assets
+    : ["USDT", "USDC", "BUSD", "FDUSD", "TUSD", "BTC", "ETH"];
+  const aliases = state.cryptoSymbolMeta?.alias_examples && typeof state.cryptoSymbolMeta.alias_examples === "object"
+    ? Object.entries(state.cryptoSymbolMeta.alias_examples)
+    : [];
+  const aliasPreview = aliases.slice(0, 8).map(([k, v]) => `${String(k).toUpperCase()}→${String(v).toUpperCase()}`).join(", ");
+  if (dom.symbolsQuotes) {
+    dom.symbolsQuotes.textContent = state.lang === LANG.ES
+      ? `Cotizaciones permitidas (quote assets Binance): ${quotes.join(", ")}. Alias soportados: ${aliasPreview || "BTC→BTCUSDT, ETH→ETHUSDT, SOL→SOLUSDT"}.`
+      : `Allowed Binance quote assets: ${quotes.join(", ")}. Supported aliases: ${aliasPreview || "BTC→BTCUSDT, ETH→ETHUSDT, SOL→SOLUSDT"}.`;
+  }
+}
+
+async function loadCryptoSymbolsMeta(force = false) {
+  if (!force && state.cryptoSymbolMeta) return state.cryptoSymbolMeta;
+  try {
+    const res = await fetchWithTimeout(endpoints.cryptoSymbolsMeta, { headers: { Accept: "application/json" } }, { timeout: 8000, retries: 0 });
+    const data = await safeJson(res);
+    if (res.ok && data && typeof data === "object") {
+      state.cryptoSymbolMeta = data;
+      return data;
+    }
+  } catch {}
+  return null;
 }
 
 function renderStatsPanel(data) {
   if (!dom.sourcesContent) return;
   const es = state.lang === LANG.ES;
+  const scope = getCurrentCryptoScope();
+  const engineFilter = normalizeCryptoStatsEngine(data.engine_filter || state.cryptoStatsEngine || "all");
+  state.cryptoStatsEngine = engineFilter;
+  localStorage.setItem("aegis_crypto_stats_engine", engineFilter);
   dom.sourcesContent.innerHTML = "";
   const title = el("div", { class: "sources-title-row" });
   title.appendChild(el("div", { text: es ? "Stats" : "Stats" }));
+  const titleActions = el("div", { class: "sources-title-actions" });
+  [
+    { key: "all", label: es ? "Todo" : "All" },
+    { key: "trained", label: es ? "Trained" : "Trained" },
+    { key: "demo", label: es ? "Demo" : "Demo" },
+  ].forEach((item) => {
+    const btn = el("button", {
+      class: `mini-chip ${engineFilter === item.key ? "active" : ""}`.trim(),
+      text: item.label,
+      attrs: { type: "button" },
+    });
+    btn.addEventListener("click", () => {
+      const next = normalizeCryptoStatsEngine(item.key);
+      if (state.cryptoStatsEngine === next) return;
+      state.cryptoStatsEngine = next;
+      localStorage.setItem("aegis_crypto_stats_engine", next);
+      loadStats();
+    });
+    titleActions.appendChild(btn);
+  });
+  const exportJsonBtn = el("button", {
+    class: "icon-btn small",
+    text: "JSON",
+    attrs: { type: "button", title: es ? "Exportar JSON" : "Export JSON" },
+  });
+  exportJsonBtn.addEventListener("click", () => exportCryptoStats("json"));
+  titleActions.appendChild(exportJsonBtn);
+  const exportCsvBtn = el("button", {
+    class: "icon-btn small",
+    text: "CSV",
+    attrs: { type: "button", title: es ? "Exportar CSV" : "Export CSV" },
+  });
+  exportCsvBtn.addEventListener("click", () => exportCryptoStats("csv"));
+  titleActions.appendChild(exportCsvBtn);
+  const exportMdBtn = el("button", {
+    class: "icon-btn small",
+    text: "MD",
+    attrs: { type: "button", title: es ? "Exportar reporte Markdown" : "Export Markdown report" },
+  });
+  exportMdBtn.addEventListener("click", () => exportCryptoStats("md"));
+  titleActions.appendChild(exportMdBtn);
+  title.appendChild(titleActions);
   dom.sourcesContent.appendChild(title);
 
+  const scopeRow = el("div", { class: "kpi-row wrap crypto-scope-row" });
+  scopeRow.appendChild(el("span", { class: "pill neutral", text: `${es ? "Símbolo" : "Symbol"}: ${scope.symbol}` }));
+  scopeRow.appendChild(el("span", { class: "pill neutral", text: `${es ? "Horizonte" : "Horizon"}: ${scope.horizon}m` }));
+  scopeRow.appendChild(el("span", { class: `pill ${engineFilter === "trained" ? "success" : engineFilter === "demo" ? "warn" : "neutral"}`, text: `${es ? "Engine" : "Engine"}: ${engineFilter}` }));
+  if (scope.regime) {
+    scopeRow.appendChild(el("span", { class: "pill muted", text: `${es ? "Régimen" : "Regime"}: ${scope.regime}` }));
+  }
+  dom.sourcesContent.appendChild(scopeRow);
+
   const acc = Number(data.accuracy ?? data.acc);
-  const avg = Number(data.avg_delta ?? data.avg ?? data.avg_move);
+  const avg = Number(data.avg_delta_pct ?? data.avg_delta ?? data.avg ?? data.avg_move);
   const wins = Number(data.win_rate ?? data.wins);
   const count = Number(data.count ?? data.samples);
   const accNews = Number(data.with_news_accuracy ?? NaN);
   const accNoNews = Number(data.without_news_accuracy ?? NaN);
+  const trained = data?.per_engine?.trained || {};
+  const demo = data?.per_engine?.demo || {};
+  const trainedAcc = Number(data.trained_accuracy ?? trained.accuracy);
+  const demoAcc = Number(data.demo_accuracy ?? demo.accuracy);
+  const trainedCount = Number(data.trained_count ?? trained.count);
+  const demoCount = Number(data.demo_count ?? demo.count);
+  const trainedDelta = Number(trained.avg_delta_pct);
+  const demoDelta = Number(demo.avg_delta_pct);
+  const netExp = Number(data.net_expectancy_pct);
+  const grossExp = Number(data.gross_expectancy_pct);
+  const positiveNet = Number(data.positive_net_rate);
+  const maxDrawdown = Number(data.max_drawdown_pct);
+  const tradeCount = Number(data.trade_count);
+  const holdCount = Number(data.hold_count);
+  const roundTripCostBps = Number(data.round_trip_cost_bps);
+  const oosStartTs = Number(data.oos_window_start_ts);
+  const oosEndTs = Number(data.oos_window_end_ts);
+  const oosHours = Number(data.oos_window_hours);
+  const thresholdRec = data?.threshold_recommendation && typeof data.threshold_recommendation === "object"
+    ? data.threshold_recommendation
+    : state.cryptoThresholdRec || null;
+  const credibilityAssessment = data?.credibility_assessment && typeof data.credibility_assessment === "object"
+    ? data.credibility_assessment
+    : state.cryptoCredibility || null;
+  const credibilityScope = data?.credibility_scope && typeof data.credibility_scope === "object"
+    ? data.credibility_scope
+    : null;
+  const thresholdScope = data?.threshold_scope && typeof data.threshold_scope === "object"
+    ? data.threshold_scope
+    : null;
+  const leaderboardRows = Array.isArray(data?.scope_leaderboard) ? data.scope_leaderboard : (Array.isArray(state.cryptoLeaderboard) ? state.cryptoLeaderboard : []);
+  const registryRows = Array.isArray(data?.model_registry) ? data.model_registry : (Array.isArray(state.cryptoModelRegistry) ? state.cryptoModelRegistry : []);
+  const currentRegistryRows = getRegistryEntriesForCurrentScope();
+  const perModel = data?.per_model && typeof data.per_model === "object" ? data.per_model : {};
+  const modelRows = Object.entries(perModel)
+    .map(([name, stats]) => ({
+      name,
+      count: Number(stats?.count),
+      accuracy: Number(stats?.accuracy),
+    }))
+    .sort((a, b) => (b.count || 0) - (a.count || 0) || (b.accuracy || 0) - (a.accuracy || 0))
+    .slice(0, 6);
 
   const grid = el("div", { class: "kpi-grid" });
-  const makeKpi = (label, value, hint, cls = "") => {
+  const formatWindowTs = (ts) => (Number.isFinite(ts) && ts > 0 ? new Date(ts * 1000).toLocaleString() : "—");
+  const makeKpi = (label, value, hint, cls = "", badgeText = "", badgeClass = "") => {
     const card = el("div", { class: `kpi-card ${cls}` });
-    card.appendChild(el("div", { class: "kpi-title", text: label }));
+    const head = el("div", { class: "kpi-card-head" });
+    head.appendChild(el("div", { class: "kpi-title", text: label }));
+    if (badgeText) {
+      head.appendChild(el("span", { class: badgeClass || "pill neutral", text: badgeText }));
+    }
+    card.appendChild(head);
     card.appendChild(el("div", { class: "kpi-value", text: value }));
     if (hint) card.appendChild(el("div", { class: "kpi-hint", text: hint }));
     return card;
@@ -3145,19 +8339,252 @@ function renderStatsPanel(data) {
 
   if (Number.isFinite(acc)) grid.appendChild(makeKpi(es ? "Precisión" : "Accuracy", `${(acc * 100).toFixed(1)}%`, es ? "Aciertos/total" : "Hits/total"));
   if (Number.isFinite(wins)) grid.appendChild(makeKpi(es ? "Win rate" : "Win rate", `${(wins * 100).toFixed(1)}%`, es ? "Trades con Δ>0 para BUY / Δ<0 para SELL" : "BUY Δ>0, SELL Δ<0"));
-  if (Number.isFinite(avg)) grid.appendChild(makeKpi("Δ avg", `${avg.toFixed(3)}%`, es ? "Movimiento promedio" : "Average move"));
+  if (Number.isFinite(avg)) grid.appendChild(makeKpi("Δ avg", formatPct(avg, 2), es ? "Movimiento promedio bruto" : "Average gross move"));
   if (Number.isFinite(count)) grid.appendChild(makeKpi(es ? "Muestras" : "Samples", String(count), es ? "Predicciones evaluadas" : "Evaluated predictions"));
   if (Number.isFinite(accNews)) grid.appendChild(makeKpi(es ? "Precisión con news" : "Accuracy w/news", `${(accNews * 100).toFixed(1)}%`, es ? "Predicciones con ajuste de noticias" : "Predictions with news adjustment"));
   if (Number.isFinite(accNoNews)) grid.appendChild(makeKpi(es ? "Precisión sin news" : "Accuracy no news", `${(accNoNews * 100).toFixed(1)}%`, es ? "Predicciones sin noticias" : "Predictions without news"));
+  if (Number.isFinite(netExp)) {
+    grid.appendChild(
+      makeKpi(
+        es ? "Expectativa neta" : "Net expectancy",
+        formatPct(netExp, 2),
+        es
+          ? `Después de ${Number.isFinite(roundTripCostBps) ? roundTripCostBps.toFixed(1) : "—"} bps round-trip`
+          : `After ${Number.isFinite(roundTripCostBps) ? roundTripCostBps.toFixed(1) : "—"} bps round-trip`
+      )
+    );
+  }
+  if (Number.isFinite(grossExp)) {
+    grid.appendChild(makeKpi(es ? "Expectativa bruta" : "Gross expectancy", formatPct(grossExp, 2), es ? "Sin costos" : "Before costs"));
+  }
+  if (Number.isFinite(positiveNet)) {
+    grid.appendChild(
+      makeKpi(
+        es ? "Net positive rate" : "Net positive rate",
+        formatPct(positiveNet, 1),
+        es ? "Trades netos > 0 después de costos" : "Trades with net return > 0 after costs"
+      )
+    );
+  }
+  if (Number.isFinite(maxDrawdown)) {
+    grid.appendChild(
+      makeKpi(
+        es ? "Max drawdown" : "Max drawdown",
+        formatPct(maxDrawdown, 2),
+        es ? "Sobre retornos netos acumulados" : "On cumulative net returns"
+      )
+    );
+  }
+  if (Number.isFinite(tradeCount) || Number.isFinite(holdCount)) {
+    grid.appendChild(
+      makeKpi(
+        es ? "Trade/Hold" : "Trade/Hold",
+        `${Number.isFinite(tradeCount) ? tradeCount : 0}/${Number.isFinite(holdCount) ? holdCount : 0}`,
+        es ? "Trades ejecutables vs HOLD" : "Actionable trades vs HOLD"
+      )
+    );
+  }
 
-  if (!grid.childNodes.length) {
+  if (trainedCount > 0) {
+    grid.appendChild(
+      makeKpi(
+        es ? "Engine trained" : "Trained engine",
+        Number.isFinite(trainedAcc) ? `${(trainedAcc * 100).toFixed(1)}%` : "—",
+        `${es ? "Muestras" : "Samples"}: ${trainedCount || 0}${Number.isFinite(trainedDelta) ? ` • Δ ${formatPct(trainedDelta, 2)}` : ""}`,
+        "engine-trained",
+        "trained",
+        "pill pill-live"
+      )
+    );
+  }
+  if (demoCount > 0) {
+    grid.appendChild(
+      makeKpi(
+        es ? "Engine demo" : "Demo engine",
+        Number.isFinite(demoAcc) ? `${(demoAcc * 100).toFixed(1)}%` : "—",
+        `${es ? "Muestras" : "Samples"}: ${demoCount || 0}${Number.isFinite(demoDelta) ? ` • Δ ${formatPct(demoDelta, 2)}` : ""}`,
+        "engine-demo",
+        "demo",
+        "pill pill-demo"
+      )
+    );
+  }
+
+  if (!grid.childNodes.length && !modelRows.length) {
     dom.sourcesContent.appendChild(el("div", { class: "sources-empty", text: es ? "Sin datos de stats." : "No stats data." }));
   } else {
     dom.sourcesContent.appendChild(grid);
+    if (Number.isFinite(oosStartTs) || Number.isFinite(oosEndTs)) {
+      const windowCard = el("div", { class: "kpi-card engine-mixed" });
+      windowCard.appendChild(el("div", { class: "kpi-title", text: es ? "Ventana OOS medida" : "Measured OOS window" }));
+      windowCard.appendChild(
+        el("div", {
+          class: "kpi-hint",
+          text: es
+            ? "Resultados observados después de que cada predicción venció en runtime."
+            : "Observed results after each prediction reached its runtime horizon.",
+        })
+      );
+      const line1 = el("div", { class: "kpi-row wrap" });
+      line1.appendChild(el("span", { class: "pill neutral", text: `${es ? "Inicio" : "Start"}: ${formatWindowTs(oosStartTs)}` }));
+      line1.appendChild(el("span", { class: "pill neutral", text: `${es ? "Fin" : "End"}: ${formatWindowTs(oosEndTs)}` }));
+      if (Number.isFinite(oosHours)) {
+        line1.appendChild(el("span", { class: "pill muted", text: `${es ? "Duración" : "Duration"}: ${oosHours.toFixed(1)}h` }));
+      }
+      windowCard.appendChild(line1);
+      dom.sourcesContent.appendChild(windowCard);
+    }
+    if (modelRows.length) {
+      const modelCard = el("div", { class: "kpi-card engine-mixed" });
+      modelCard.appendChild(el("div", { class: "kpi-title", text: es ? "Breakdown por modelo" : "Model breakdown" }));
+      modelRows.forEach((row) => {
+        const line = el("div", { class: "kpi-row" });
+        line.appendChild(el("span", { class: "pill neutral", text: row.name }));
+        line.appendChild(el("span", { class: "pill muted", text: `${es ? "muestras" : "samples"} ${Number.isFinite(row.count) ? row.count : 0}` }));
+        if (Number.isFinite(row.accuracy)) {
+          line.appendChild(el("span", { class: "pill success", text: `${(row.accuracy * 100).toFixed(1)}%` }));
+        }
+        modelCard.appendChild(line);
+      });
+      dom.sourcesContent.appendChild(modelCard);
+    }
+    const insightGrid = el("div", { class: "kpi-grid crypto-insight-grid" });
+    const thresholdCard = el("div", { class: "kpi-card crypto-threshold-card" });
+    thresholdCard.appendChild(el("div", { class: "kpi-title", text: es ? "Threshold recomendado" : "Recommended threshold" }));
+    if (thresholdRec) {
+      const buyThreshold = Number(thresholdRec.buy_threshold);
+      const sellThreshold = Number(thresholdRec.sell_threshold);
+      const precision = Number(thresholdRec.precision);
+      const positiveRate = Number(thresholdRec.positive_net_rate);
+      const holdRate = Number(thresholdRec.hold_rate);
+      thresholdCard.appendChild(
+        el("div", {
+          class: "kpi-value",
+          text: `${Number.isFinite(buyThreshold) ? formatProb(buyThreshold) : "—"} / ${Number.isFinite(sellThreshold) ? formatProb(sellThreshold) : "—"}`,
+        })
+      );
+      thresholdCard.appendChild(
+        el("div", {
+          class: "kpi-hint",
+          text: thresholdScope?.regime
+            ? `${es ? "Scope" : "Scope"}: ${thresholdScope.symbol || scope.symbol} • ${thresholdScope.horizon_minutes || scope.horizon}m • ${thresholdScope.regime}`
+            : `${es ? "Scope" : "Scope"}: ${thresholdScope?.symbol || scope.symbol} • ${thresholdScope?.horizon_minutes || scope.horizon}m`,
+        })
+      );
+      const chips = el("div", { class: "kpi-row wrap" });
+      chips.appendChild(el("span", { class: "pill success", text: `${es ? "Precisión" : "Precision"}: ${Number.isFinite(precision) ? formatPct(precision, 1) : "—"}` }));
+      chips.appendChild(el("span", { class: "pill neutral", text: `${es ? "Trades" : "Trades"}: ${Number.isFinite(Number(thresholdRec.trade_count)) ? Number(thresholdRec.trade_count) : 0}` }));
+      if (Number.isFinite(positiveRate)) chips.appendChild(el("span", { class: "pill positive", text: `${es ? "Net +" : "Net +"}: ${formatPct(positiveRate, 1)}` }));
+      if (Number.isFinite(holdRate)) chips.appendChild(el("span", { class: "pill muted", text: `${es ? "Hold rate" : "Hold rate"}: ${formatPct(holdRate, 1)}` }));
+      thresholdCard.appendChild(chips);
+      if (Number.isFinite(Number(thresholdRec.net_expectancy_pct))) {
+        thresholdCard.appendChild(el("div", { class: "kpi-hint", text: `${es ? "Expectativa neta" : "Net expectancy"}: ${formatPct(Number(thresholdRec.net_expectancy_pct), 2)}` }));
+      }
+    } else {
+      thresholdCard.appendChild(el("div", { class: "sources-empty", text: es ? "Aún no hay suficiente historial trained para recomendar thresholds." : "Not enough trained history yet to recommend thresholds." }));
+    }
+    insightGrid.appendChild(thresholdCard);
+
+    const credibilityCard = el("div", { class: "kpi-card crypto-threshold-card" });
+    credibilityCard.appendChild(el("div", { class: "kpi-title", text: es ? "Credibilidad del scope" : "Scope credibility" }));
+    if (credibilityAssessment) {
+      const status = String(credibilityAssessment.status || "unknown");
+      const score = Number(credibilityAssessment.score);
+      const reasons = Array.isArray(credibilityAssessment.reasons) ? credibilityAssessment.reasons : [];
+      const statusClass = status === "trusted" ? "success" : status === "blocked" ? "negative" : "muted";
+      const liveExecutionMargin = Number(state.lastPrediction?.execution_margin);
+      const liveThresholdEdge = Number(state.lastPrediction?.threshold_edge);
+      const liveGateReason = state.lastPrediction?.execution_gate_reason || null;
+      const liveConsensus = state.lastPrediction?.consensus || null;
+      credibilityCard.appendChild(
+        el("div", {
+          class: "kpi-value",
+          text: Number.isFinite(score)
+            ? `${status.toUpperCase()} • ${(score * 100).toFixed(0)}%`
+            : status.toUpperCase(),
+        })
+      );
+      credibilityCard.appendChild(
+        el("div", {
+          class: "kpi-hint",
+          text: credibilityScope?.regime
+            ? `${es ? "Scope" : "Scope"}: ${credibilityScope.symbol || scope.symbol} • ${credibilityScope.horizon_minutes || scope.horizon}m • ${credibilityScope.regime}`
+            : `${es ? "Scope" : "Scope"}: ${credibilityScope?.symbol || scope.symbol} • ${credibilityScope?.horizon_minutes || scope.horizon}m`,
+        })
+      );
+      const chips = el("div", { class: "kpi-row wrap" });
+      chips.appendChild(el("span", { class: `pill ${statusClass}`, text: `${es ? "Estado" : "Status"}: ${status}` }));
+      chips.appendChild(el("span", { class: "pill neutral", text: `${es ? "Trades" : "Trades"}: ${Number(credibilityAssessment.trade_count || 0)}` }));
+      chips.appendChild(el("span", { class: `pill ${credibilityAssessment.actionable ? "positive" : "negative"}`, text: credibilityAssessment.actionable ? (es ? "Accionable" : "Actionable") : "HOLD" }));
+      credibilityCard.appendChild(chips);
+      if (reasons.length) {
+        credibilityCard.appendChild(el("div", {
+          class: "kpi-hint",
+          text: `${es ? "Razones" : "Reasons"}: ${reasons.join(", ")}`,
+        }));
+      }
+      if (Number.isFinite(liveExecutionMargin) && Number.isFinite(liveThresholdEdge)) {
+        credibilityCard.appendChild(el("div", {
+          class: "kpi-hint",
+          text: `${es ? "Edge actual" : "Live edge"}: ${formatPct(liveThresholdEdge, 1)} • ${es ? "margen requerido" : "required margin"}: ${formatPct(liveExecutionMargin, 1)}${liveGateReason ? ` • ${liveGateReason}` : ""}`,
+        }));
+      }
+      if (liveConsensus && Number.isFinite(Number(liveConsensus.support_ratio)) && Number.isFinite(Number(liveConsensus.spread))) {
+        credibilityCard.appendChild(el("div", {
+          class: "kpi-hint",
+          text: `${es ? "Consensus" : "Consensus"}: ${formatPct(Number(liveConsensus.support_ratio), 0)} • ${es ? "spread" : "spread"}: ${formatPct(Number(liveConsensus.spread), 1)} • ${es ? "req" : "req"}: ${formatPct(Number(liveConsensus.required_support_ratio), 0)} / ${formatPct(Number(liveConsensus.max_spread), 1)}`,
+        }));
+      }
+    } else {
+      credibilityCard.appendChild(el("div", { class: "sources-empty", text: es ? "Sin evaluación de credibilidad aún." : "No credibility assessment yet." }));
+    }
+    insightGrid.appendChild(credibilityCard);
+
+    const leaderboardCard = el("div", { class: "kpi-card crypto-leaderboard-card" });
+    leaderboardCard.appendChild(el("div", { class: "kpi-title", text: es ? "Leaderboard de scopes" : "Scope leaderboard" }));
+    if (leaderboardRows.length) {
+      leaderboardRows.slice(0, 5).forEach((row, idx) => {
+        const line = el("div", { class: "kpi-row wrap crypto-leaderboard-row" });
+        line.appendChild(el("span", { class: "pill neutral", text: `#${idx + 1}` }));
+        line.appendChild(el("span", { class: "pill success", text: `${row.symbol} • ${row.horizon_minutes}m` }));
+        line.appendChild(el("span", { class: "pill muted", text: row.regime || "unknown" }));
+        if (Number.isFinite(Number(row.precision))) line.appendChild(el("span", { class: "pill success", text: `${es ? "Prec" : "Prec"} ${formatPct(Number(row.precision), 1)}` }));
+        if (Number.isFinite(Number(row.net_expectancy_pct))) line.appendChild(el("span", { class: `pill ${Number(row.net_expectancy_pct) >= 0 ? "positive" : "negative"}`, text: `${es ? "Net" : "Net"} ${formatPct(Number(row.net_expectancy_pct), 2)}` }));
+        leaderboardCard.appendChild(line);
+      });
+    } else {
+      leaderboardCard.appendChild(el("div", { class: "sources-empty", text: es ? "Sin leaderboard trained todavía." : "No trained leaderboard yet." }));
+    }
+    insightGrid.appendChild(leaderboardCard);
+
+    const registryCard = el("div", { class: "kpi-card crypto-registry-card" });
+    registryCard.appendChild(el("div", { class: "kpi-title", text: es ? "Bundles entrenados" : "Trained bundles" }));
+    if (currentRegistryRows.length) {
+      currentRegistryRows.slice(0, 5).forEach((row) => {
+        const modelTypes = Array.isArray(row.available_model_types) ? row.available_model_types.join(", ") : "ensemble";
+        registryCard.appendChild(el("div", { class: "kpi-item", text: `${row.symbol} • ${row.horizon_minutes}m • ${row.interval_minutes || "?"}m candle` }));
+        registryCard.appendChild(el("div", { class: "kpi-hint", text: `${es ? "Modelos" : "Models"}: ${modelTypes}` }));
+        if (row.validation_mode || row.trained_at) {
+          registryCard.appendChild(el("div", { class: "kpi-hint", text: `${row.validation_mode || "—"}${row.trained_at ? ` • ${row.trained_at}` : ""}` }));
+        }
+      });
+    } else if (registryRows.length) {
+      registryCard.appendChild(el("div", { class: "sources-empty", text: es ? "No hay bundle exacto para el símbolo/horizonte actual; mostrando catálogo global en backend." : "No exact bundle for current symbol/horizon; global catalog exists in backend." }));
+    } else {
+      registryCard.appendChild(el("div", { class: "sources-empty", text: es ? "Sin bundles entrenados detectados." : "No trained bundles detected." }));
+    }
+    insightGrid.appendChild(registryCard);
+
+    dom.sourcesContent.appendChild(insightGrid);
     const foot = el("div", { class: "kpi-foot" });
+    const scopeNote = engineFilter === "all"
+      ? (trainedCount > 0 && demoCount > 0
+        ? (es ? "La vista mezcla resultados trained y demo; usa los filtros o exporta para auditoría limpia." : "This view mixes trained and demo results; use filters or export for clean audit reporting.")
+        : (es ? "Vista agregada de todos los engines medidos." : "Aggregated view of all measured engines."))
+      : (es ? `Filtro activo: ${engineFilter}.` : `Active filter: ${engineFilter}.`);
     foot.textContent = es
-      ? "Stats agrega las predicciones evaluadas; P&L usa las señales guardadas para simular trades."
-      : "Stats aggregates evaluated predictions; P&L uses saved signals to simulate trades.";
+      ? `${scopeNote} La ventana OOS medida usa outcomes observados en runtime; no prueba alpha ni rentabilidad futura.`
+      : `${scopeNote} The measured OOS window uses observed runtime outcomes; it does not prove alpha or future profitability.`;
     dom.sourcesContent.appendChild(foot);
   }
 }
@@ -3274,6 +8701,14 @@ function openSessionsModal() {
 
 async function loadConversationList(includeArchived = false) {
   if (!dom.sessionsList) return;
+  if (!hasAuthForScope("main")) {
+    dom.sessionsList.innerHTML = `<li class="sessions-empty">${
+      state.lang === LANG.ES
+        ? "Auth requerida. Configura API key (🔑)."
+        : "Auth required. Set API key (🔑)."
+    }</li>`;
+    return;
+  }
   dom.sessionsList.innerHTML = `<li class="sessions-empty">${state.lang === LANG.ES ? "Cargando..." : "Loading..."}</li>`;
   try {
     const url = new URL(endpoints.conversations, window.location.origin);
@@ -3281,6 +8716,14 @@ async function loadConversationList(includeArchived = false) {
     if (includeArchived) url.searchParams.set("include_archived", "1");
 
     const res = await fetchWithTimeout(url.toString(), { headers: { Accept: "application/json" } }, { timeout: 9000, retries: 0 });
+    if (!res.ok && isAuthDeniedStatus(res.status)) {
+      dom.sessionsList.innerHTML = `<li class="sessions-empty">${
+        state.lang === LANG.ES
+          ? "Auth requerida (401/403). Configura API key (🔑)."
+          : "Auth required (401/403). Set API key (🔑)."
+      }</li>`;
+      return;
+    }
     const data = await safeJson(res);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -3352,13 +8795,14 @@ function renderConversationList(items) {
   });
 }
 
-function selectConversation(convId) {
+async function selectConversation(convId) {
   if (!convId) return;
   state.conversationId = convId;
   state.useExistingConversation = true;
   localStorage.setItem("aegis_conv", convId);
   localStorage.setItem("aegis_use_existing", "1");
   updateConversationIndicators(convId);
+  await syncConversationState(convId);
   appendBubble(state.lang === LANG.ES ? `Sesión ${convId} activada.` : `Conversation ${convId} selected.`, "bot");
   closeSessionsModal();
 }
@@ -3411,6 +8855,10 @@ function resetConversationEvents() {
   if (dom.convEventsList) {
     dom.convEventsList.innerHTML = `<li class="sessions-empty">${state.lang === LANG.ES ? "Sin eventos." : "No events yet."}</li>`;
   }
+  state.convTurnsItems = [];
+  if (dom.convTurnsList) {
+    dom.convTurnsList.innerHTML = `<li class="sessions-empty">${state.lang === LANG.ES ? "Sin turns." : "No turns yet."}</li>`;
+  }
 }
 
 function renderConversationEvents(items) {
@@ -3420,7 +8868,7 @@ function renderConversationEvents(items) {
     return;
   }
   dom.convEventsList.innerHTML = "";
-  items.slice(-200).forEach((evt) => {
+  items.slice(-120).forEach((evt) => {
     const li = document.createElement("li");
     li.className = "event-item";
 
@@ -3450,21 +8898,320 @@ function renderConversationEvents(items) {
   });
 }
 
+function filterConversationTurns(items, rawQuery) {
+  const q = String(rawQuery || "").trim();
+  if (!q) return items;
+  const qLower = q.toLowerCase();
+
+  const take = (val) => String(val || "").toLowerCase();
+
+  const parsePrefix = (prefix) => {
+    const re = new RegExp(`^${prefix}\\s*:\\s*`, "i");
+    if (!re.test(q)) return null;
+    return q.replace(re, "").trim().toLowerCase();
+  };
+
+  const idQ = parsePrefix("id");
+  const toolQ = parsePrefix("tool");
+  const statusQ = parsePrefix("status");
+
+  return (items || []).filter((turn) => {
+    const turnId = take(turn?.turn_id);
+    if (idQ) return turnId.includes(idQ);
+
+    const mode = take(turn?.mode);
+    const sourcePlan = take(turn?.source_plan);
+    const status = take(turn?.status);
+    if (statusQ) return status.includes(statusQ);
+
+    const userMsg = take(turn?.user_message);
+    const asst = take(turn?.assistant_message);
+    const effTool = take(turn?.response_context?.effective_tool);
+    const effStatus = take(turn?.response_context?.effective_tool_status);
+
+    const itemsList = Array.isArray(turn?.items) ? turn.items : [];
+    const toolNames = itemsList
+      .filter((it) => it?.kind === "tool_call" || it?.kind === "tool_result")
+      .map((it) => take(it?.payload?.tool))
+      .filter(Boolean)
+      .join(" ");
+
+    if (toolQ) {
+      return effTool.includes(toolQ) || toolNames.includes(toolQ);
+    }
+
+    const hay = [turnId, mode, sourcePlan, status, userMsg, asst, effTool, effStatus, toolNames].join(" ");
+    return hay.includes(qLower);
+  });
+}
+
+function renderConversationTurns(items) {
+  if (!dom.convTurnsList) return;
+  const filtered = filterConversationTurns(items || [], state.turnsFilter);
+  if (!filtered.length) {
+    const es = state.lang === LANG.ES;
+    const base = (items || []).length
+      ? (es ? "Sin coincidencias para el filtro actual." : "No matches for the current filter.")
+      : (es ? "Sin turns." : "No turns yet.");
+    dom.convTurnsList.innerHTML = `<li class="sessions-empty">${base}</li>`;
+    return;
+  }
+  const es = state.lang === LANG.ES;
+  dom.convTurnsList.innerHTML = "";
+  filtered.slice(-20).reverse().forEach((turn) => {
+    const li = document.createElement("li");
+    li.className = "event-item turn-item";
+    li.addEventListener("click", () => openTurnDetail(turn));
+
+    const meta = document.createElement("div");
+    meta.className = "event-meta";
+
+    const stage = document.createElement("span");
+    stage.className = "event-stage";
+    stage.textContent = `${String(turn.mode || "chat")} • ${prettySourcePlan(turn.source_plan || "local_only")}`;
+
+    const status = document.createElement("span");
+    status.className = `event-level ${String(turn.status || "info").toLowerCase()}`;
+    status.textContent = turn.status || "info";
+
+    meta.appendChild(stage);
+    meta.appendChild(status);
+
+    const detail = document.createElement("div");
+    detail.className = "event-detail";
+    const ts = turn.created_at ? formatAgo(Number(turn.created_at)) : "";
+    const msg = String(turn.user_message || "").trim();
+    detail.textContent = `${ts}${msg ? ` · ${msg}` : ""}`;
+
+    li.appendChild(meta);
+    li.appendChild(detail);
+
+    const itemsList = Array.isArray(turn.items) ? turn.items : [];
+    const chips = document.createElement("div");
+    chips.className = "turn-summary";
+
+    const sourceItem = itemsList.find((item) => item?.kind === "source_selection");
+    const replanItem = itemsList.find((item) => item?.kind === "replan");
+    const toolItem = itemsList.find((item) => item?.kind === "tool_call");
+    const toolResultItem = itemsList.find((item) => item?.kind === "tool_result");
+    const retryItems = itemsList.filter((item) => item?.kind === "llm_retry");
+
+    const addChip = (text) => {
+      if (!text) return;
+      const span = document.createElement("span");
+      span.className = "turn-summary-chip";
+      span.textContent = text;
+      chips.appendChild(span);
+    };
+
+    if (toolItem?.payload?.tool) addChip(`${es ? "Tool" : "Tool"}: ${toolItem.payload.tool}`);
+    if (toolResultItem?.payload?.tool) addChip(`${es ? "Resultado" : "Result"}: ${toolResultItem.payload.tool}`);
+    if (toolResultItem?.status) addChip(`${es ? "Estado" : "Status"}: ${toolResultItem.status}`);
+    if (sourceItem?.payload?.next_tool) addChip(`${es ? "Siguiente" : "Next"}: ${sourceItem.payload.next_tool}`);
+    if (replanItem?.payload?.next_tool) addChip(`${es ? "Replan" : "Replan"}: ${replanItem.payload.next_tool}`);
+    if (retryItems.length) {
+      const reasons = retryItems.map((it) => String(it?.payload?.reason || "").trim()).filter(Boolean);
+      const label = es ? "Retry" : "Retry";
+      addChip(`${label}: ${reasons.length ? reasons.join(", ") : retryItems.length}`);
+    }
+    if (turn.response_context?.current_artifact_focus) addChip(`${es ? "Artefacto" : "Artifact"}: ${turn.response_context.current_artifact_focus}`);
+    if (turn.response_context?.current_file_focus) addChip(`${es ? "Archivo" : "File"}: ${turn.response_context.current_file_focus}`);
+    if (turn.response_context?.current_symbol_focus) addChip(`${es ? "Símbolo" : "Symbol"}: ${turn.response_context.current_symbol_focus}`);
+    if (turn.response_context?.llm_required === false) addChip("LLM: bypassed");
+    if (Array.isArray(turn.response_context?.source_origin) && turn.response_context.source_origin.length) {
+      addChip(`${es ? "Origen" : "Origin"}: ${turn.response_context.source_origin.map(prettyOriginLabel).join(", ")}`);
+    }
+    if (Array.isArray(turn.response_context?.missing_evidence) && turn.response_context.missing_evidence.length) {
+      addChip(`${es ? "Falta" : "Missing"}: ${turn.response_context.missing_evidence.slice(0, 2).join(", ")}`);
+    }
+
+    if (chips.childNodes.length) li.appendChild(chips);
+    dom.convTurnsList.appendChild(li);
+  });
+}
+
+function openTurnDetail(turn) {
+  if (!dom.turnDetailModal || !dom.turnDetailBody) return;
+  const es = state.lang === LANG.ES;
+  const turnId = String(turn?.turn_id || "").trim();
+  const mode = String(turn?.mode || "chat").trim();
+  if (dom.turnDetailTitle) {
+    dom.turnDetailTitle.textContent = turnId
+      ? `${es ? "Turn" : "Turn"} ${turnId} · ${mode}`
+      : `${es ? "Turn" : "Turn"} · ${mode}`;
+  }
+  const status = String(turn?.status || "").trim() || "info";
+  const sourcePlan = prettySourcePlan(turn?.source_plan || "local_only");
+  const started = turn?.created_at ? new Date(Number(turn.created_at)).toLocaleString() : "";
+  const finished = turn?.finished_at ? new Date(Number(turn.finished_at)).toLocaleString() : "";
+  const effectiveTool = String(turn?.response_context?.effective_tool || "").trim();
+  const effectiveToolStatus = String(turn?.response_context?.effective_tool_status || "").trim();
+  const activeProjectId = String(turn?.active_project_id || turn?.response_context?.active_project_id || "").trim();
+  const origins = Array.isArray(turn?.response_context?.source_origin) ? turn.response_context.source_origin : [];
+  const missing = Array.isArray(turn?.response_context?.missing_evidence) ? turn.response_context.missing_evidence : [];
+  const retryItems = Array.isArray(turn?.items) ? turn.items.filter((it) => it?.kind === "llm_retry") : [];
+
+  if (dom.turnDetailSummary) {
+    const parts = [];
+    if (started) parts.push(`${es ? "Inicio" : "Start"}: ${started}`);
+    if (finished) parts.push(`${es ? "Fin" : "End"}: ${finished}`);
+    parts.push(`${es ? "Modo" : "Mode"}: ${mode}`);
+    parts.push(`${es ? "Plan" : "Plan"}: ${sourcePlan}`);
+    parts.push(`${es ? "Estado" : "Status"}: ${status}`);
+    if (activeProjectId) parts.push(`${es ? "Proyecto" : "Project"}: ${activeProjectId}`);
+    if (effectiveTool) parts.push(`${es ? "Tool efectiva" : "Effective tool"}: ${effectiveTool}${effectiveToolStatus ? ` (${effectiveToolStatus})` : ""}`);
+    if (origins.length) parts.push(`${es ? "Origen" : "Origin"}: ${origins.map(prettyOriginLabel).join(", ")}`);
+    if (missing.length) parts.push(`${es ? "Falta evidencia" : "Missing evidence"}: ${missing.slice(0, 6).join(", ")}`);
+    if (retryItems.length) {
+      const reasons = retryItems.map((it) => String(it?.payload?.reason || "").trim()).filter(Boolean);
+      parts.push(`${es ? "Reintentos" : "Retries"}: ${reasons.length ? reasons.join(", ") : retryItems.length}`);
+    }
+    dom.turnDetailSummary.textContent = parts.join(" · ");
+  }
+
+  if (dom.turnDetailToolWrap && dom.turnDetailToolOut) {
+    const items = Array.isArray(turn?.items) ? turn.items : [];
+    const toolResultItem = items.find((it) => it?.kind === "tool_result");
+    const toolOut = String(
+      toolResultItem?.payload?.response ||
+      turn?.response_context?.effective_tool_output ||
+      ""
+    );
+    const toolName = String(
+      toolResultItem?.payload?.tool ||
+      turn?.response_context?.effective_tool ||
+      ""
+    ).trim();
+
+    if (toolOut.trim()) {
+      dom.turnDetailToolWrap.style.display = "block";
+      if (dom.turnDetailToolLabel) {
+        dom.turnDetailToolLabel.textContent = toolName
+          ? `${es ? "Salida de tool" : "Tool output"}: ${toolName}`
+          : (es ? "Salida de tool" : "Tool output");
+      }
+      dom.turnDetailToolOut.textContent = toolOut;
+      if (dom.turnDetailJsonLabel) dom.turnDetailJsonLabel.textContent = es ? "JSON del turn" : "Turn JSON";
+    } else {
+      dom.turnDetailToolWrap.style.display = "none";
+      dom.turnDetailToolOut.textContent = "";
+      if (dom.turnDetailJsonLabel) dom.turnDetailJsonLabel.textContent = es ? "JSON del turn" : "Turn JSON";
+    }
+  }
+
+  dom.turnDetailBody.textContent = JSON.stringify(turn || {}, null, 2);
+  openModal(dom.turnDetailModal);
+}
+
+async function openLatestTurnDetail() {
+  const convId = state.conversationId;
+  if (!convId) return;
+  try {
+    await loadConversationTurns({ force: true });
+    const items = Array.isArray(state.convTurnsItems) ? state.convTurnsItems : [];
+    if (!items.length) return;
+    openTurnDetail(items[items.length - 1]);
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+function isAuthDeniedStatus(status) {
+  const n = Number(status || 0);
+  return n === 401 || n === 403;
+}
+
+function handleConversationPollAuthDenied(status = 401) {
+  const es = state.lang === LANG.ES;
+  const now = Date.now();
+  const msg = es
+    ? "Sesión/log pausados por autenticación (401/403). Actualiza API key (🔑) y reintenta."
+    : "Session/log paused due to authentication (401/403). Update API key (🔑) and retry.";
+
+  stopConversationEventsPolling();
+  if (dom.convEventsList) {
+    dom.convEventsList.innerHTML = `<li class="sessions-empty">${msg}</li>`;
+  }
+  if (dom.convTurnsList) {
+    dom.convTurnsList.innerHTML = `<li class="sessions-empty">${msg}</li>`;
+  }
+
+  if (!state.convAuthBlockedAt || (now - Number(state.convAuthBlockedAt)) > 30000) {
+    state.convAuthBlockedAt = now;
+    appendBubble(
+      es
+        ? `Auth ${status}: pausé el polling de sesión para evitar ruido 401.`
+        : `Auth ${status}: paused session polling to avoid 401 noise.`,
+      "error"
+    );
+  }
+}
+
+async function loadConversationTurns({ force = false } = {}) {
+  if (!dom.convTurnsList) return;
+  if (!state.debugTraceEnabled) return;
+  if (state.convTurnsInFlight) {
+    if (force) state.convTurnsForceQueued = true;
+    return;
+  }
+  const convId = state.conversationId;
+  if (!convId) {
+    state.convTurnsItems = [];
+    renderConversationTurns([]);
+    return;
+  }
+
+  state.convTurnsInFlight = true;
+  try {
+    const url = new URL(endpoints.conversationTurns(convId), location.origin);
+    url.searchParams.set("limit", "20");
+    const res = await fetchWithTimeout(url.toString(), { headers: { Accept: "application/json" } }, { timeout: 20000, retries: 0 });
+    if (!res.ok && isAuthDeniedStatus(res.status)) {
+      handleConversationPollAuthDenied(res.status);
+      return;
+    }
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const items = Array.isArray(data?.items) ? data.items : [];
+    state.convTurnsItems = force ? items : items;
+    renderConversationTurns(state.convTurnsItems);
+  } catch (err) {
+    if (err?.name === "AbortError") return;
+    console.error(err);
+  } finally {
+    state.convTurnsInFlight = false;
+    if (state.convTurnsForceQueued) {
+      state.convTurnsForceQueued = false;
+      setTimeout(() => loadConversationTurns({ force: true }), 0);
+    }
+  }
+}
+
 async function loadConversationEvents({ force = false } = {}) {
   if (!dom.convEventsList) return;
+  if (!state.debugTraceEnabled) return;
+  if (state.convEventsInFlight) {
+    if (force) state.convEventsForceQueued = true;
+    return;
+  }
   const convId = state.conversationId;
   if (!convId) {
     resetConversationEvents();
     return;
   }
 
+  state.convEventsInFlight = true;
   try {
     const url = new URL(endpoints.conversationEvents(convId), location.origin);
     if (!force && state.convEventsSince) {
       url.searchParams.set("since", String(state.convEventsSince));
     }
-    url.searchParams.set("limit", "200");
+    url.searchParams.set("limit", "120");
     const res = await fetchWithTimeout(url.toString(), { headers: { Accept: "application/json" } }, { timeout: 20000, retries: 0 });
+    if (!res.ok && isAuthDeniedStatus(res.status)) {
+      handleConversationPollAuthDenied(res.status);
+      return;
+    }
     const data = await safeJson(res);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const items = data?.items || [];
@@ -3477,8 +9224,8 @@ async function loadConversationEvents({ force = false } = {}) {
     } else {
       state.convEventsItems = state.convEventsItems.concat(items);
     }
-    if (state.convEventsItems.length > 200) {
-      state.convEventsItems = state.convEventsItems.slice(-200);
+    if (state.convEventsItems.length > 120) {
+      state.convEventsItems = state.convEventsItems.slice(-120);
     }
     if (items.length) {
       state.convEventsSince = items[items.length - 1]?.ts || state.convEventsSince;
@@ -3487,14 +9234,31 @@ async function loadConversationEvents({ force = false } = {}) {
   } catch (err) {
     if (err?.name === "AbortError") return;
     console.error(err);
+  } finally {
+    state.convEventsInFlight = false;
+    if (state.convEventsForceQueued) {
+      state.convEventsForceQueued = false;
+      setTimeout(() => loadConversationEvents({ force: true }), 0);
+    }
   }
 }
 
 function startConversationEventsPolling() {
-  if (state.convEventsTimer) return;
+  if (state.convEventsTimer || state.convTurnsTimer) return;
+  if (!state.debugTraceEnabled) return;
+  if (!state.chatSideVisible) return;
+  if (!hasAuthForScope("main")) return;
   resetConversationEvents();
   loadConversationEvents({ force: true });
-  state.convEventsTimer = setInterval(() => loadConversationEvents(), 2000);
+  loadConversationTurns({ force: true });
+  state.convEventsTimer = setInterval(() => {
+    if (document.hidden || !state.chatSideVisible) return;
+    loadConversationEvents();
+  }, 8000);
+  state.convTurnsTimer = setInterval(() => {
+    if (document.hidden || !state.chatSideVisible) return;
+    loadConversationTurns();
+  }, 15000);
   updateStatusCenter();
 }
 
@@ -3503,18 +9267,753 @@ function stopConversationEventsPolling() {
     clearInterval(state.convEventsTimer);
     state.convEventsTimer = null;
   }
+  if (state.convTurnsTimer) {
+    clearInterval(state.convTurnsTimer);
+    state.convTurnsTimer = null;
+  }
   updateStatusCenter();
 }
 
 /* ------------------------- FILE TREE / CONTENT / INGEST ------------------------- */
 
+function syncFileViewerMode() {
+  const editing = !!state.fileViewerEditing;
+  const hasProject = !!state.activeProjectId;
+  const hasPath = !!state.fileViewerPath;
+  const actionTarget = currentWorkspaceActionTarget();
+  const hasSelection = !!actionTarget.path;
+  const canDeleteSelection = hasSelection && !actionTarget.isDir;
+  const showDiff = editing && !!state.fileViewerDiffMode;
+  if (dom.fileViewerBody) dom.fileViewerBody.hidden = editing && !showDiff;
+  if (dom.fileEditorBody) dom.fileEditorBody.hidden = !editing || showDiff;
+  if (dom.fileViewerTitle) dom.fileViewerTitle.hidden = !!state.fileViewerIsNew;
+  if (dom.fileEditorPath) dom.fileEditorPath.hidden = !(editing && !!state.fileViewerIsNew);
+  if (dom.newFileBtn) dom.newFileBtn.hidden = !hasProject || editing;
+  if (dom.newFolderBtn) dom.newFolderBtn.hidden = !hasProject || editing;
+  if (dom.movePathBtn) dom.movePathBtn.hidden = editing || !hasSelection;
+  if (dom.renameFileBtn) dom.renameFileBtn.hidden = editing || !hasSelection || !!state.fileViewerIsNew;
+  if (dom.editFileBtn) dom.editFileBtn.hidden = editing || !hasPath || !!state.fileViewerIsNew;
+  if (dom.diffFileBtn) dom.diffFileBtn.hidden = !editing;
+  if (dom.deleteFileBtn) dom.deleteFileBtn.hidden = editing || !canDeleteSelection || !!state.fileViewerIsNew;
+  if (dom.saveFileBtn) dom.saveFileBtn.hidden = !editing;
+  if (dom.cancelFileEditBtn) dom.cancelFileEditBtn.hidden = !editing;
+  if (dom.movePathBtn) {
+    dom.movePathBtn.title = actionTarget.isDir
+      ? (state.lang === LANG.ES ? "Mover o renombrar carpeta" : "Move or rename folder")
+      : (state.lang === LANG.ES ? "Mover o renombrar archivo" : "Move or rename file");
+  }
+  if (dom.renameFileBtn) {
+    dom.renameFileBtn.title = actionTarget.isDir
+      ? (state.lang === LANG.ES ? "Renombrar carpeta seleccionada" : "Rename selected folder")
+      : (state.lang === LANG.ES ? "Renombrar archivo seleccionado" : "Rename selected file");
+  }
+  if (dom.deleteFileBtn) {
+    dom.deleteFileBtn.title = state.lang === LANG.ES
+      ? "Eliminar archivo seleccionado"
+      : "Delete selected file";
+  }
+}
+
+function fileViewerHasUnsavedChanges() {
+  if (!state.fileViewerEditing) return false;
+  const draftContent = String(dom.fileEditorBody?.value || "");
+  if (state.fileViewerIsNew) {
+    const draftPath = String(dom.fileEditorPath?.value || "").trim();
+    return !!draftPath || draftContent.length > 0;
+  }
+  return draftContent !== String(state.fileViewerContent || "");
+}
+
+function confirmDiscardFileEdits() {
+  if (!fileViewerHasUnsavedChanges()) return true;
+  const es = state.lang === LANG.ES;
+  return window.confirm(
+    es
+      ? "Hay cambios sin guardar en el editor. ¿Descartarlos?"
+      : "There are unsaved editor changes. Discard them?"
+  );
+}
+
+function handleBeforeUnload(event) {
+  if (!fileViewerHasUnsavedChanges()) return;
+  event.preventDefault();
+  event.returnValue = "";
+}
+
+function currentProjectImpactQuery() {
+  const target = currentWorkspaceActionTarget();
+  const path = String(target?.path || state.fileViewerPath || "").trim();
+  return path;
+}
+
+async function loadProjectImpact() {
+  if (!state.activeProjectId) {
+    state.activeProjectImpact = null;
+    return;
+  }
+  const query = currentProjectImpactQuery();
+  if (!query) {
+    state.activeProjectImpact = null;
+    renderProjectMeta();
+    return;
+  }
+  const projectId = String(state.activeProjectId || "");
+  try {
+    const url = new URL(endpoints.filesProjectImpact(projectId), location.origin);
+    url.searchParams.set("q", query);
+    url.searchParams.set("limit", "8");
+    const res = await fetchWithTimeout(url.toString(), {}, { timeout: 12000, retries: 0 });
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+    if (projectId !== String(state.activeProjectId || "")) return;
+    state.activeProjectImpact = data?.report && typeof data.report === "object" ? data.report : null;
+  } catch (err) {
+    console.error("project-impact-error", err);
+    state.activeProjectImpact = null;
+  }
+  renderProjectMeta();
+}
+
+function setTreeSelection(path, isDir) {
+  state.treeSelectionPath = String(path || "");
+  state.treeSelectionIsDir = !!isDir;
+  if (dom.projectTree) {
+    dom.projectTree.querySelectorAll(".tree-node.selected").forEach((node) => node.classList.remove("selected"));
+    dom.projectTree.querySelectorAll(".tree-node").forEach((node) => {
+      if (String(node.dataset.path || "") === state.treeSelectionPath) {
+        node.classList.add("selected");
+      }
+    });
+  }
+  syncFileViewerMode();
+  if (state.activeProjectId) {
+    void loadProjectImpact();
+  }
+}
+
+function setFileViewerContent(path, content, options = {}) {
+  const { isNew = false, keepPrevious = false } = options;
+  if (!keepPrevious) {
+    state.fileViewerPreviousPath = "";
+    state.fileViewerPreviousContent = "";
+  }
+  state.fileViewerPath = String(path || "");
+  state.fileViewerContent = String(content ?? "");
+  state.fileViewerEditing = false;
+  state.fileViewerIsNew = !!isNew;
+  state.fileViewerDiffMode = false;
+  state.fileViewerDiffText = "";
+  if (dom.fileViewerTitle) {
+    dom.fileViewerTitle.textContent = state.fileViewerPath || (
+      state.lang === LANG.ES ? "Selecciona un archivo en Archivos" : "Select a file in Files"
+    );
+  }
+  if (dom.fileEditorPath) dom.fileEditorPath.value = state.fileViewerPath || "";
+  if (dom.fileViewerBody) dom.fileViewerBody.textContent = state.fileViewerContent;
+  if (dom.fileEditorBody) dom.fileEditorBody.value = state.fileViewerContent;
+  syncFileViewerMode();
+  if (state.activeProjectId) {
+    void loadProjectImpact();
+  }
+}
+
+function enterFileEditMode() {
+  if (!state.fileViewerPath) return;
+  state.fileViewerEditing = true;
+  state.fileViewerIsNew = false;
+  state.fileViewerDiffMode = false;
+  state.fileViewerDiffText = "";
+  if (dom.fileEditorBody) {
+    dom.fileEditorBody.value = state.fileViewerContent || "";
+    try { dom.fileEditorBody.focus(); } catch {}
+  }
+  syncFileViewerMode();
+}
+
+function startNewFileMode() {
+  if (!state.activeProjectId) return;
+  const actionTarget = currentWorkspaceActionTarget();
+  const basePath = actionTarget.isDir
+    ? actionTarget.path
+    : dirnamePosix(actionTarget.path || state.fileViewerPath);
+  const suggestedPath = basePath ? `${basePath}/new_file.txt` : "new_file.txt";
+  state.fileViewerPreviousPath = state.fileViewerPath || "";
+  state.fileViewerPreviousContent = state.fileViewerContent || "";
+  state.fileViewerPath = "";
+  state.fileViewerContent = "";
+  state.fileViewerEditing = true;
+  state.fileViewerIsNew = true;
+  state.fileViewerDiffMode = false;
+  state.fileViewerDiffText = "";
+  if (dom.fileEditorPath) {
+    dom.fileEditorPath.value = suggestedPath;
+    try { dom.fileEditorPath.focus(); } catch {}
+  }
+  if (dom.fileEditorBody) dom.fileEditorBody.value = "";
+  if (dom.fileViewerBody) {
+    dom.fileViewerBody.textContent = state.lang === LANG.ES
+      ? "Nuevo archivo."
+      : "New file.";
+  }
+  syncFileViewerMode();
+}
+
+function cancelFileEditMode() {
+  if (state.fileViewerIsNew) {
+    const prevPath = state.fileViewerPreviousPath || "";
+    const prevContent = state.fileViewerPreviousContent || "";
+    setFileViewerContent(prevPath, prevContent);
+    return;
+  }
+  if (dom.fileEditorBody) dom.fileEditorBody.value = state.fileViewerContent || "";
+  state.fileViewerEditing = false;
+  state.fileViewerDiffMode = false;
+  state.fileViewerDiffText = "";
+  if (dom.fileViewerBody) dom.fileViewerBody.textContent = state.fileViewerContent || "";
+  syncFileViewerMode();
+}
+
+async function toggleFileDiffMode() {
+  if (!state.fileViewerEditing || !dom.fileEditorBody) return;
+  if (state.fileViewerDiffMode) {
+    state.fileViewerDiffMode = false;
+    if (dom.fileViewerBody) dom.fileViewerBody.textContent = state.fileViewerContent || "";
+    syncFileViewerMode();
+    return;
+  }
+  const path = state.fileViewerIsNew ? String(dom.fileEditorPath?.value || "").trim() : state.fileViewerPath;
+  if (!path) {
+    appendBubble(state.lang === LANG.ES ? "Define la ruta del archivo primero." : "Set the file path first.", "error");
+    return;
+  }
+  try {
+    const res = await fetchWithTimeout(
+      endpoints.filesDiffContent,
+      {
+        method: "POST",
+        headers: withJsonHeaders({}, "files"),
+        body: JSON.stringify({
+          project_id: state.activeProjectId,
+          path,
+          content: dom.fileEditorBody.value || "",
+          create: !!state.fileViewerIsNew,
+        }),
+      },
+      { timeout: 30000, retries: 0 }
+    );
+    const data = await safeJson(res);
+    if (!res.ok) {
+      throw new Error(data?.detail || `${res.status} ${res.statusText || ""}`.trim());
+    }
+    state.fileViewerDiffMode = true;
+    state.fileViewerDiffText = String(data?.diff || "");
+    if (dom.fileViewerBody) {
+      dom.fileViewerBody.textContent = state.fileViewerDiffText || (
+        state.lang === LANG.ES ? "Sin cambios." : "No changes."
+      );
+    }
+    syncFileViewerMode();
+  } catch (err) {
+    console.error(err);
+    appendBubble(
+      `${state.lang === LANG.ES ? "No se pudo generar el diff." : "Could not generate diff."} ${err?.message || ""}`.trim(),
+      "error"
+    );
+  }
+}
+
+async function renameFileViewer() {
+  if (!state.activeProjectId || state.fileViewerEditing) return;
+  const es = state.lang === LANG.ES;
+  const actionTarget = currentWorkspaceActionTarget();
+  const currentPath = String(actionTarget.path || "").trim();
+  if (!currentPath) {
+    appendBubble(es ? "Selecciona un archivo o carpeta primero." : "Select a file or folder first.", "error");
+    return;
+  }
+  const nextPath = window.prompt(
+    actionTarget.isDir
+      ? (es ? "Nueva ruta de la carpeta" : "New folder path")
+      : (es ? "Nueva ruta del archivo" : "New file path"),
+    currentPath
+  );
+  if (nextPath == null) return;
+  const trimmed = String(nextPath || "").trim();
+  if (!trimmed) {
+    appendBubble(es ? "Define una ruta válida." : "Set a valid file path.", "error");
+    return;
+  }
+  try {
+    const res = await fetchWithTimeout(
+      endpoints.filesMovePath,
+      {
+        method: "POST",
+        headers: withJsonHeaders({}, "files"),
+        body: JSON.stringify({
+          project_id: state.activeProjectId,
+          path: currentPath,
+          new_path: trimmed,
+        }),
+      },
+      { timeout: 30000, retries: 0 }
+    );
+    const data = await safeJson(res);
+    if (!res.ok) {
+      throw new Error(data?.detail || `${res.status} ${res.statusText || ""}`.trim());
+    }
+    const nextPathValue = String(data?.new_path || trimmed);
+    const movedIsDir = !!data?.is_dir || !!actionTarget.isDir;
+    if (!movedIsDir && (state.fileViewerPath === currentPath || actionTarget.source === "viewer")) {
+      setFileViewerContent(nextPathValue, state.fileViewerContent || "");
+    } else if (movedIsDir && state.fileViewerPath && (state.fileViewerPath === currentPath || state.fileViewerPath.startsWith(`${currentPath}/`))) {
+      setFileViewerContent(
+        "",
+        es ? "La vista del archivo se limpió porque la carpeta se renombró." : "File view was cleared because the folder was renamed."
+      );
+    }
+    setTreeSelection(nextPathValue, movedIsDir);
+    appendBubble(
+      movedIsDir
+        ? (es ? "Carpeta renombrada." : "Folder renamed.")
+        : (es ? "Archivo renombrado." : "File renamed."),
+      "bot"
+    );
+    await loadProjectTree();
+  } catch (err) {
+    console.error(err);
+    appendBubble(
+      `${actionTarget.isDir ? (es ? "No se pudo renombrar la carpeta." : "Could not rename folder.") : (es ? "No se pudo renombrar el archivo." : "Could not rename file.")} ${err?.message || ""}`.trim(),
+      "error"
+    );
+  }
+}
+
+async function deleteFileViewer() {
+  if (!state.activeProjectId || state.fileViewerEditing) return;
+  const es = state.lang === LANG.ES;
+  const actionTarget = currentWorkspaceActionTarget();
+  const currentPath = String(actionTarget.path || "").trim();
+  if (!currentPath) {
+    appendBubble(es ? "Selecciona un archivo primero." : "Select a file first.", "error");
+    return;
+  }
+  if (actionTarget.isDir) {
+    appendBubble(es ? "La eliminación de carpetas aún no está habilitada en este flujo." : "Folder deletion is not enabled in this flow yet.", "error");
+    return;
+  }
+  const ok = window.confirm(
+    es
+      ? `Esto eliminará ${currentPath}. ¿Continuar?`
+      : `This will delete ${currentPath}. Continue?`
+  );
+  if (!ok) return;
+  try {
+    const res = await fetchWithTimeout(
+      endpoints.filesDeleteContent,
+      {
+        method: "POST",
+        headers: withJsonHeaders({}, "files"),
+        body: JSON.stringify({
+          project_id: state.activeProjectId,
+          path: currentPath,
+        }),
+      },
+      { timeout: 30000, retries: 0 }
+    );
+    const data = await safeJson(res);
+    if (!res.ok) {
+      throw new Error(data?.detail || `${res.status} ${res.statusText || ""}`.trim());
+    }
+    setFileViewerContent("", es ? "Archivo eliminado." : "File deleted.");
+    setTreeSelection("", false);
+    appendBubble(es ? "Archivo eliminado." : "File deleted.", "bot");
+    await loadProjectTree();
+  } catch (err) {
+    console.error(err);
+    appendBubble(
+      `${es ? "No se pudo eliminar el archivo." : "Could not delete file."} ${err?.message || ""}`.trim(),
+      "error"
+    );
+  }
+}
+
+function dirnamePosix(path) {
+  const raw = String(path || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  if (!raw.includes("/")) return "";
+  return raw.split("/").slice(0, -1).join("/");
+}
+
+function currentWorkspaceActionTarget() {
+  const selectedPath = String(state.treeSelectionPath || "").trim();
+  if (selectedPath) {
+    return {
+      path: selectedPath,
+      isDir: !!state.treeSelectionIsDir,
+      source: "tree",
+    };
+  }
+  const viewerPath = String(state.fileViewerPath || "").trim();
+  if (viewerPath) {
+    return {
+      path: viewerPath,
+      isDir: false,
+      source: "viewer",
+    };
+  }
+  return {
+    path: "",
+    isDir: false,
+    source: "none",
+  };
+}
+
+async function applyBatchWorkspacePlan() {
+  if (!state.activeProjectId || !dom.batchApplyInput) return;
+  const es = state.lang === LANG.ES;
+  if (!batchApplyReviewIsCurrent()) {
+    appendBubble(
+      es
+        ? "Primero genera y revisa el preview actual del lote."
+        : "Generate and review the current batch preview first.",
+      "error"
+    );
+    return;
+  }
+  let payload = null;
+  try {
+    payload = JSON.parse(String(dom.batchApplyInput.value || "").trim() || "{}");
+  } catch (err) {
+    appendBubble(es ? "JSON inválido en batch apply." : "Invalid JSON in batch apply.", "error");
+    return;
+  }
+  const operations = Array.isArray(payload) ? payload : payload?.operations;
+  if (!Array.isArray(operations) || !operations.length) {
+    appendBubble(es ? "No hay operaciones para aplicar." : "No operations to apply.", "error");
+    return;
+  }
+  try {
+    const res = await fetchWithTimeout(
+      endpoints.filesBatchApply,
+      {
+        method: "POST",
+        headers: withJsonHeaders({}, "files"),
+        body: JSON.stringify({
+          project_id: state.activeProjectId,
+          operations,
+          review_token: state.batchApplyReviewToken,
+        }),
+      },
+      { timeout: 45000, retries: 0 }
+    );
+    const data = await safeJson(res);
+    if (!res.ok) {
+      throw new Error(batchApplyErrorMessage(data, `${res.status} ${res.statusText || ""}`.trim()));
+    }
+    clearBatchApplyReview();
+    closeModal(dom.batchApplyModal);
+    await loadProjectTree();
+    appendBubble(
+      es
+        ? `Cambios aplicados: ${Number(data?.applied_count || 0)}`
+        : `Applied changes: ${Number(data?.applied_count || 0)}`,
+      "bot"
+    );
+  } catch (err) {
+    console.error(err);
+    appendBubble(
+      `${es ? "No se pudo aplicar el lote." : "Could not apply batch."} ${err?.message || ""}`.trim(),
+      "error"
+    );
+  }
+}
+
+async function previewBatchWorkspacePlan() {
+  if (!state.activeProjectId || !dom.batchApplyInput) return;
+  const es = state.lang === LANG.ES;
+  let payload = null;
+  try {
+    payload = JSON.parse(batchApplyPayloadText() || "{}");
+  } catch (err) {
+    appendBubble(es ? "JSON inválido en batch apply." : "Invalid JSON in batch apply.", "error");
+    return;
+  }
+  const operations = Array.isArray(payload) ? payload : payload?.operations;
+  if (!Array.isArray(operations) || !operations.length) {
+    appendBubble(es ? "No hay operaciones para previsualizar." : "No operations to preview.", "error");
+    return;
+  }
+  try {
+    const res = await fetchWithTimeout(
+      endpoints.filesBatchPreview,
+      {
+        method: "POST",
+        headers: withJsonHeaders({}, "files"),
+        body: JSON.stringify({
+          project_id: state.activeProjectId,
+          operations,
+        }),
+      },
+      { timeout: 45000, retries: 0 }
+    );
+    const data = await safeJson(res);
+    if (!res.ok) {
+      throw new Error(batchApplyErrorMessage(data, `${res.status} ${res.statusText || ""}`.trim()));
+    }
+    setBatchApplyPreview(data, batchApplyPayloadText());
+    appendBubble(
+      es
+        ? `Preview listo: ${Number(data?.changed_count || 0)} cambios detectados`
+        : `Preview ready: ${Number(data?.changed_count || 0)} changes detected`,
+      "bot"
+    );
+  } catch (err) {
+    console.error(err);
+    clearBatchApplyReview();
+    appendBubble(
+      `${es ? "No se pudo generar el preview del lote." : "Could not generate batch preview."} ${err?.message || ""}`.trim(),
+      "error"
+    );
+  }
+}
+
+function isIdeaStarterSupported(item) {
+  const ideaId = String(item?.id || "").trim().toLowerCase();
+  return ["tests", "ci", "readme"].includes(ideaId);
+}
+
+async function applyProjectIdeaStarter(ideaId) {
+  if (!state.activeProjectId) {
+    appendBubble(state.lang === LANG.ES ? "No hay proyecto activo." : "No active project.", "error");
+    return;
+  }
+  const es = state.lang === LANG.ES;
+  try {
+    const url = endpoints.filesApplyIdea(state.activeProjectId, String(ideaId || "").trim());
+    const res = await fetchWithTimeout(
+      new URL(url, location.origin).toString(),
+      {
+        method: "POST",
+        headers: withJsonHeaders({}, "files"),
+      },
+      { timeout: 45000, retries: 0 }
+    );
+    const data = await safeJson(res);
+    if (!res.ok) {
+      throw new Error(data?.detail || `${res.status} ${res.statusText || ""}`.trim());
+    }
+    await loadProjectTree();
+    appendBubble(
+      es
+        ? `Idea aplicada: ${String(data?.idea_id || ideaId)} (${Number(data?.applied_count || 0)} cambios)`
+        : `Idea applied: ${String(data?.idea_id || ideaId)} (${Number(data?.applied_count || 0)} changes)`,
+      "bot"
+    );
+  } catch (err) {
+    console.error(err);
+    appendBubble(
+      `${es ? "No se pudo aplicar la idea." : "Could not apply idea."} ${err?.message || ""}`.trim(),
+      "error"
+    );
+  }
+}
+
+async function createFolderInWorkspace() {
+  if (!state.activeProjectId || state.fileViewerEditing) return;
+  const es = state.lang === LANG.ES;
+  const basePath = state.treeSelectionIsDir
+    ? state.treeSelectionPath
+    : dirnamePosix(state.treeSelectionPath || state.fileViewerPath);
+  const suggestion = basePath ? `${basePath}/new_folder` : "new_folder";
+  const folderPath = window.prompt(
+    es ? "Ruta de la nueva carpeta" : "New folder path",
+    suggestion
+  );
+  if (folderPath == null) return;
+  const trimmed = String(folderPath || "").trim();
+  if (!trimmed) {
+    appendBubble(es ? "Define una ruta válida." : "Set a valid path.", "error");
+    return;
+  }
+  try {
+    const res = await fetchWithTimeout(
+      endpoints.filesCreateDir,
+      {
+        method: "POST",
+        headers: withJsonHeaders({}, "files"),
+        body: JSON.stringify({
+          project_id: state.activeProjectId,
+          path: trimmed,
+        }),
+      },
+      { timeout: 30000, retries: 0 }
+    );
+    const data = await safeJson(res);
+    if (!res.ok) {
+      throw new Error(data?.detail || `${res.status} ${res.statusText || ""}`.trim());
+    }
+    await loadProjectTree();
+    setTreeSelection(trimmed, true);
+    setFileViewerContent(
+      "",
+      es ? `Carpeta lista: ${trimmed}` : `Folder ready: ${trimmed}`
+    );
+    appendBubble(
+      data?.created
+        ? (es ? "Carpeta creada." : "Folder created.")
+        : (es ? "La carpeta ya existía." : "Folder already existed."),
+      "bot"
+    );
+  } catch (err) {
+    console.error(err);
+    appendBubble(
+      `${es ? "No se pudo crear la carpeta." : "Could not create folder."} ${err?.message || ""}`.trim(),
+      "error"
+    );
+  }
+}
+
+async function moveSelectedWorkspacePath() {
+  if (!state.activeProjectId || state.fileViewerEditing) return;
+  const es = state.lang === LANG.ES;
+  const currentPath = String(state.treeSelectionPath || state.fileViewerPath || "").trim();
+  if (!currentPath) {
+    appendBubble(es ? "Selecciona un archivo o carpeta primero." : "Select a file or folder first.", "error");
+    return;
+  }
+  const nextPath = window.prompt(
+    es ? "Nueva ruta del archivo o carpeta" : "New file or folder path",
+    currentPath
+  );
+  if (nextPath == null) return;
+  const trimmed = String(nextPath || "").trim();
+  if (!trimmed) {
+    appendBubble(es ? "Define una ruta válida." : "Set a valid path.", "error");
+    return;
+  }
+  try {
+    const res = await fetchWithTimeout(
+      endpoints.filesMovePath,
+      {
+        method: "POST",
+        headers: withJsonHeaders({}, "files"),
+        body: JSON.stringify({
+          project_id: state.activeProjectId,
+          path: currentPath,
+          new_path: trimmed,
+        }),
+      },
+      { timeout: 30000, retries: 0 }
+    );
+    const data = await safeJson(res);
+    if (!res.ok) {
+      throw new Error(data?.detail || `${res.status} ${res.statusText || ""}`.trim());
+    }
+    const oldPath = String(data?.path || currentPath);
+    const movedPath = String(data?.new_path || trimmed);
+    const movedIsDir = !!data?.is_dir;
+    if (state.fileViewerPath === oldPath && !movedIsDir) {
+      setFileViewerContent(movedPath, state.fileViewerContent || "");
+    } else if (
+      movedIsDir &&
+      state.fileViewerPath &&
+      (state.fileViewerPath === oldPath || state.fileViewerPath.startsWith(`${oldPath}/`))
+    ) {
+      setFileViewerContent(
+        "",
+        es ? "La vista del archivo se limpió porque la carpeta se movió." : "File view was cleared because the folder moved."
+      );
+    }
+    await loadProjectTree();
+    setTreeSelection(movedPath, movedIsDir);
+    appendBubble(es ? "Ruta actualizada." : "Path updated.", "bot");
+  } catch (err) {
+    console.error(err);
+    appendBubble(
+      `${es ? "No se pudo mover la ruta." : "Could not move path."} ${err?.message || ""}`.trim(),
+      "error"
+    );
+  }
+}
+
+async function saveFileViewer() {
+  if (!state.activeProjectId || !dom.fileEditorBody) return;
+  const path = state.fileViewerIsNew ? String(dom.fileEditorPath?.value || "").trim() : state.fileViewerPath;
+  if (!path) {
+    appendBubble(state.lang === LANG.ES ? "Define la ruta del archivo." : "Set the file path.", "error");
+    return;
+  }
+  const content = dom.fileEditorBody.value || "";
+  try {
+    const res = await fetchWithTimeout(
+      endpoints.filesSaveContent,
+      {
+        method: "POST",
+        headers: withJsonHeaders({}, "files"),
+        body: JSON.stringify({
+          project_id: state.activeProjectId,
+          path,
+          content,
+          create: !!state.fileViewerIsNew,
+        }),
+      },
+      { timeout: 30000, retries: 0 }
+    );
+    const data = await safeJson(res);
+    if (!res.ok) {
+      throw new Error(data?.detail || `${res.status} ${res.statusText || ""}`.trim());
+    }
+    const nextPathValue = String(data?.path || path);
+    setFileViewerContent(nextPathValue, content);
+    await loadProjectTree();
+    setTreeSelection(nextPathValue, false);
+    appendBubble(
+      data?.created
+        ? (state.lang === LANG.ES ? "Archivo creado." : "File created.")
+        : (state.lang === LANG.ES ? "Archivo guardado." : "File saved."),
+      "bot"
+    );
+  } catch (err) {
+    console.error(err);
+    appendBubble(
+      `${state.lang === LANG.ES ? "No se pudo guardar el archivo." : "Could not save file."} ${err?.message || ""}`.trim(),
+      "error"
+    );
+  }
+}
+
 async function loadProjectTree() {
   if (!dom.projectTree) return;
+  if (!hasAuthForScope("files")) {
+    dom.projectTree.textContent = state.lang === LANG.ES
+      ? "Auth requerida para explorar archivos. Configura API key (🔑)."
+      : "Auth is required to browse files. Set API key (🔑).";
+    return;
+  }
+  const effectiveRoot = getEffectiveProjectRoot();
+  if (!state.activeProjectId && effectiveRoot) {
+    try {
+      await ensureCurrentRootRegistered();
+    } catch (err) {
+      console.warn("ensure-root-registered-failed", err);
+    }
+  }
+  if (!state.activeProjectId && !effectiveRoot) {
+    dom.projectTree.textContent = state.lang === LANG.ES
+      ? "Selecciona un proyecto activo o un root manual."
+      : "Select an active project or a manual root.";
+    return;
+  }
+  if (!state.activeProjectId) {
+    dom.projectTree.textContent = state.lang === LANG.ES
+      ? "Selecciona un proyecto activo (no se pudo registrar el root manual)."
+      : "Select an active project (could not register manual root).";
+    return;
+  }
   dom.projectTree.textContent = state.lang === LANG.ES ? "Cargando..." : "Loading...";
 
   try {
-    const url = new URL(endpoints.toolsTree, location.origin);
-    url.searchParams.set("root", state.currentProjectRoot);
+    const url = new URL(endpoints.filesTree, location.origin);
+    url.searchParams.set("project_id", state.activeProjectId);
 
     const res = await fetchWithTimeout(url.toString(), {}, { timeout: 20000, retries: 0 });
     const data = await safeJson(res);
@@ -3530,7 +10029,7 @@ async function loadProjectTree() {
     if (!tree.length) {
       const msg = state.lang === LANG.ES ? "Carpeta vacía o sin nodos." : "Folder is empty or no nodes.";
       dom.projectTree.textContent = msg;
-      console.warn("Tree is empty", { root: state.currentProjectRoot, data });
+      console.warn("Tree is empty", { root: getEffectiveProjectRoot(), projectId: state.activeProjectId, data });
       return;
     }
 
@@ -3552,6 +10051,9 @@ function renderTree(tree, container, basePath) {
     const path = n.path || (basePath ? `${basePath}/${name}` : name);
 
     const row = el("div", { class: `tree-node ${isDir ? "dir" : "file"}` });
+    row.dataset.path = path;
+    row.dataset.kind = isDir ? "dir" : "file";
+    if (state.treeSelectionPath === path) row.classList.add("selected");
     row.innerHTML = `<span class="icon">${isDir ? "📁" : "📄"}</span><span>${name}</span>`;
     container.appendChild(row);
 
@@ -3561,6 +10063,7 @@ function renderTree(tree, container, basePath) {
       container.appendChild(childrenWrap);
 
       row.addEventListener("click", () => {
+        setTreeSelection(path, true);
         const open = childrenWrap.style.display !== "none";
         childrenWrap.style.display = open ? "none" : "block";
       });
@@ -3569,33 +10072,65 @@ function renderTree(tree, container, basePath) {
         renderTree(n.children, childrenWrap, path);
       }
     } else {
-      row.addEventListener("click", () => loadFileContent(path));
+      row.addEventListener("click", () => {
+        setTreeSelection(path, false);
+        loadFileContent(path);
+      });
     }
   });
 }
 
 async function loadFileContent(path) {
   if (!path) return;
-  if (dom.fileViewerTitle) dom.fileViewerTitle.textContent = path;
-  if (dom.fileViewerBody) dom.fileViewerBody.textContent = state.lang === LANG.ES ? "Cargando archivo..." : "Loading file...";
+  if ((state.fileViewerIsNew || path !== state.fileViewerPath) && !confirmDiscardFileEdits()) {
+    return;
+  }
+  const effectiveRoot = getEffectiveProjectRoot();
+  if (!state.activeProjectId && effectiveRoot) {
+    try {
+      await ensureCurrentRootRegistered();
+    } catch (err) {
+      console.warn("ensure-root-registered-failed", err);
+    }
+  }
+  if (!state.activeProjectId && !effectiveRoot) {
+    setFileViewerContent(
+      "",
+      state.lang === LANG.ES
+        ? "Selecciona un proyecto activo o un root manual."
+        : "Select an active project or a manual root."
+    );
+    return;
+  }
+  if (!state.activeProjectId) {
+    setFileViewerContent(
+      "",
+      state.lang === LANG.ES
+        ? "Selecciona un proyecto activo (no se pudo registrar el root manual)."
+        : "Select an active project (could not register manual root)."
+    );
+    return;
+  }
+  setFileViewerContent(path, state.lang === LANG.ES ? "Cargando archivo..." : "Loading file...");
 
   try {
-    const url = new URL(endpoints.toolsContent, location.origin);
+    const url = new URL(endpoints.filesContent, location.origin);
     url.searchParams.set("path", path);
+    url.searchParams.set("project_id", state.activeProjectId);
     const res = await fetchWithTimeout(url.toString(), {}, { timeout: 20000, retries: 0 });
     const data = await safeJson(res);
     if (!res.ok) throw new Error();
 
     const content = data?.content ?? (typeof data === "string" ? data : JSON.stringify(data, null, 2));
-    dom.fileViewerBody.textContent = String(content ?? "");
+    setFileViewerContent(data?.path || path, String(content ?? ""));
   } catch (err) {
     console.error(err);
-    dom.fileViewerBody.textContent = state.lang === LANG.ES ? "Error al cargar archivo." : "Error loading file.";
+    setFileViewerContent(path, state.lang === LANG.ES ? "Error al cargar archivo." : "Error loading file.");
   }
 }
 
 async function copyFileViewer() {
-  const text = dom.fileViewerBody?.textContent || "";
+  const text = state.fileViewerEditing ? (dom.fileEditorBody?.value || "") : (dom.fileViewerBody?.textContent || "");
   if (!text) return;
   try {
     await navigator.clipboard.writeText(text);
@@ -3613,14 +10148,20 @@ async function uploadZipProject() {
   appendBubble(state.lang === LANG.ES ? "Subiendo ZIP..." : "Uploading ZIP...", "bot");
   const fd = new FormData();
   fd.append("file", f);
-  fd.append("root", state.currentProjectRoot);
 
   try {
     const res = await fetchWithTimeout(endpoints.filesUploadZip, { method: "POST", body: fd }, { timeout: 120000, retries: 0 });
     const data = await safeJson(res);
     if (!res.ok) throw new Error(data?.detail || "upload failed");
     appendBubble(state.lang === LANG.ES ? "ZIP subido." : "ZIP uploaded.", "bot");
-    if (data?.path) addUploadedProject(data.path);
+    if (data?.path) addUploadedProject(data.path, data?.project_id || null);
+    if (data?.project_id) {
+      await setActiveProject(String(data.project_id), {
+        rootPath: data?.path || null,
+        bindConversation: false,
+      });
+    }
+    await loadRegisteredProjects();
     loadProjectTree();
   } catch (err) {
     console.error(err);
@@ -3638,13 +10179,20 @@ async function cloneRepo() {
     const res = await fetchWithTimeout(endpoints.filesClone, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ repo_url: repo, branch: branch || undefined, root: state.currentProjectRoot }),
+      body: JSON.stringify({ repo_url: repo, branch: branch || undefined }),
     }, { timeout: 180000, retries: 0 });
 
     const data = await safeJson(res);
     if (!res.ok) throw new Error(data?.detail || "clone failed");
     appendBubble(state.lang === LANG.ES ? "Repo clonado." : "Repo cloned.", "bot");
-    if (data?.path) addUploadedProject(data.path);
+    if (data?.path) addUploadedProject(data.path, data?.project_id || null);
+    if (data?.project_id) {
+      await setActiveProject(String(data.project_id), {
+        rootPath: data?.path || null,
+        bindConversation: false,
+      });
+    }
+    await loadRegisteredProjects();
     loadProjectTree();
   } catch {
     appendBubble(state.lang === LANG.ES ? "No se pudo clonar." : "Clone failed.", "error");
@@ -3652,60 +10200,110 @@ async function cloneRepo() {
 }
 
 async function deleteProject() {
-  const ok = window.confirm(state.lang === LANG.ES ? "¿Eliminar proyecto cargado?" : "Delete uploaded project?");
+  const es = state.lang === LANG.ES;
+  const ok = window.confirm(es ? "¿Eliminar proyecto cargado?" : "Delete uploaded project?");
   if (!ok) return;
 
-  if (!state.currentProjectRoot) {
-    appendBubble(state.lang === LANG.ES ? "No hay proyecto seleccionado." : "No project selected.", "error");
-    return;
-  }
-  const isUploadPath = String(state.currentProjectRoot || "").includes("uploads");
-  if (!isUploadPath) {
-    appendBubble(state.lang === LANG.ES ? "Solo se pueden borrar proyectos subidos/clonados." : "Only uploaded/cloned projects can be deleted.", "error");
+  const effectiveRoot = getEffectiveProjectRoot();
+  if (!state.activeProjectId && !effectiveRoot) {
+    appendBubble(es ? "No hay proyecto seleccionado." : "No project selected.", "error");
     return;
   }
 
   try {
-    const res = await fetchWithTimeout(endpoints.filesDeleteProject, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ path: state.currentProjectRoot }),
-    }, { timeout: 30000, retries: 0 });
+    // Prefer agent-style execution (records turns + approval gate).
+    if (state.conversationId) {
+      const data = await executeConversationTool(
+        "delete_project",
+        { project_id: state.activeProjectId || undefined },
+        {
+          autoApprove: false,
+          continueAfter: true,
+          continueUseWeb: false,
+          continueSynthesize: true,
+          continueMaxIterations: 2,
+          continueMaxTotalToolCalls: 6,
+          continueMaxToolRetries: 1,
+          continueToolRetryBackoffMs: 150,
+        },
+      );
+      if (!data) return;
+      const result = data?.result || data;
+      appendBubble(
+        result?.unregistered_only
+          ? (es ? "Proyecto desvinculado del workspace." : "Project unregistered from workspace.")
+          : (es ? "Proyecto eliminado." : "Project deleted."),
+        "bot",
+      );
+      // Auto-follow through: after sensitive tool completion, ask the agent to continue using next_step.
+      if (!data?.continued) {
+        try {
+          await handleAgentContinue({ useWeb: false, synthesize: true });
+        } catch (err) {
+          console.warn("agent-continue-after-delete failed", err);
+        }
+      }
+    } else {
+      const res = await fetchWithTimeout(endpoints.filesDeleteProject, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ project_id: state.activeProjectId || undefined, path: state.activeProjectId ? undefined : effectiveRoot }),
+      }, { timeout: 30000, retries: 0 });
 
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || "delete failed");
-    appendBubble(state.lang === LANG.ES ? "Proyecto eliminado." : "Project deleted.", "bot");
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data?.detail || "delete failed");
+      appendBubble(
+        data?.unregistered_only
+          ? (es ? "Proyecto desvinculado del workspace." : "Project unregistered from workspace.")
+          : (es ? "Proyecto eliminado." : "Project deleted."),
+        "bot",
+      );
+    }
+
     if (state.ingestPollTimer) {
       clearInterval(state.ingestPollTimer);
       state.ingestPollTimer = null;
     }
     state.ingestJobId = null;
-    setProjectRoot("app");
+    await setActiveProject("", { bindConversation: false, loadDetail: true });
+    setManualProjectRoot("");
+    await loadRegisteredProjects();
     loadProjectTree();
   } catch {
-    appendBubble(state.lang === LANG.ES ? "No se pudo eliminar." : "Could not delete.", "error");
+    appendBubble(es ? "No se pudo eliminar." : "Could not delete.", "error");
   }
 }
 
 async function startIngest() {
   appendBubble(state.lang === LANG.ES ? "Ingestando..." : "Ingesting...", "bot");
-  if (!state.currentProjectRoot) {
+  const effectiveRoot = getEffectiveProjectRoot();
+  if (!state.activeProjectId && !effectiveRoot) {
     appendBubble(state.lang === LANG.ES ? "Selecciona un proyecto válido." : "Select a valid project first.", "error");
     return;
   }
-  if (!String(state.currentProjectRoot || "").includes("uploads")) {
-    appendBubble(state.lang === LANG.ES ? "La ingesta solo acepta rutas subidas/clonadas." : "Ingest only accepts uploaded/cloned paths.", "error");
-    return;
-  }
   try {
+    if (!state.activeProjectId) {
+      await ensureCurrentRootRegistered();
+    }
     const res = await fetchWithTimeout(endpoints.filesIngest, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ path: state.currentProjectRoot, background: true }),
-    }, { timeout: 60000, retries: 0 });
+      body: JSON.stringify({
+        path: state.activeProjectId ? undefined : (effectiveRoot || undefined),
+        background: true,
+        project_id: state.activeProjectId || undefined,
+      }),
+    }, { timeout: 0, retries: 0 });
 
     const data = await safeJson(res);
     if (!res.ok) throw new Error(data?.detail || "ingest failed");
+    if (data?.project_id) {
+      await setActiveProject(String(data.project_id), {
+        rootPath: effectiveRoot || null,
+        bindConversation: false,
+        loadDetail: false,
+      });
+    }
 
     state.ingestJobId = data?.job_id ? String(data.job_id) : null;
     if (state.ingestPollTimer) {
@@ -3725,6 +10323,7 @@ async function startIngest() {
       appendBubble(state.lang === LANG.ES ? "Ingesta completada." : "Ingest finished.", "bot");
     }
     loadIngestJobs();
+    await loadRegisteredProjects();
     updateStatusCenter();
   } catch {
     appendBubble(state.lang === LANG.ES ? "No se pudo iniciar ingesta." : "Could not start ingest.", "error");
@@ -3735,7 +10334,10 @@ function pollIngestStatus() {
   if (!state.ingestJobId) return;
   if (state.ingestPollTimer) clearInterval(state.ingestPollTimer);
   loadIngestStatus();
-  state.ingestPollTimer = setInterval(loadIngestStatus, 3000);
+  state.ingestPollTimer = setInterval(() => {
+    if (document.hidden) return;
+    loadIngestStatus();
+  }, 5000);
   updateStatusCenter();
 }
 
@@ -3765,6 +10367,10 @@ async function loadIngestStatus() {
         statusLower === "failed" ? "error" : "bot"
       );
       state.ingestJobId = null;
+      await loadRegisteredProjects();
+      if (state.activeProjectId) {
+        await loadActiveProjectDetail(state.activeProjectId);
+      }
       updateStatusCenter();
       scheduleSnapshot(900);
     }
@@ -3797,12 +10403,27 @@ async function loadIngestJobs() {
       const li = document.createElement("li");
       li.className = "jobs-item";
       const status = j.status || j.state || "—";
+      const stages = Array.isArray(j?.meta?.stages) ? j.meta.stages : [];
+      const lastStage = stages.length ? stages[stages.length - 1] : null;
+      const stageLabel = lastStage?.name
+        ? `${lastStage.name}${lastStage.status ? ` (${lastStage.status})` : ""}`
+        : "";
+      const safeStageLabel = String(stageLabel || "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll("\"", "&quot;")
+        .replaceAll("'", "&#039;");
+      const stageLine = stageLabel
+        ? `<div class="jobs-meta">${state.lang === LANG.ES ? "Etapa" : "Stage"}: ${safeStageLabel}</div>`
+        : "";
       li.innerHTML = `
         <div class="jobs-item-header">
           <span>${j.id || "(job)"}</span>
           <span class="jobs-status ${String(status).toLowerCase()}">${status}</span>
         </div>
         <div class="jobs-meta">${j.updated_at ? new Date(j.updated_at * 1000).toLocaleString() : ""}</div>
+        ${stageLine}
       `;
       li.addEventListener("click", () => {
         const id = j.id || j.job_id;
@@ -3866,7 +10487,10 @@ function startLogsPolling() {
   const hasSource = state.logIsAdmin ? state.logPath : (state.logJobId || state.ingestJobId);
   if (!hasSource) return;
   stopLogsPolling();
-  state.logsTimer = setInterval(loadLogs, 3000);
+  state.logsTimer = setInterval(() => {
+    if (document.hidden) return;
+    loadLogs();
+  }, 6000);
   loadLogs();
   updateStatusCenter();
 }
@@ -3938,7 +10562,11 @@ async function loadLogs() {
 
 function startAlertsPolling() {
   stopAlertsPolling();
-  state.alertsTimer = setInterval(checkAlerts, 12000);
+  state.alertsTimer = setInterval(() => {
+    if (document.hidden) return;
+    if (!state.chartVisible && state.mode !== MODES.CRYPTO) return;
+    checkAlerts();
+  }, 60000);
   checkAlerts();
   updateStatusCenter();
 }
@@ -3949,6 +10577,10 @@ function stopAlertsPolling() {
 }
 
 async function checkAlerts() {
+  if (document.hidden) return;
+  if (!state.chartVisible && state.mode !== MODES.CRYPTO) return;
+  if (state.alertsInFlight) return;
+  state.alertsInFlight = true;
   // simple local alert: watch outcomes and bubble when a miss happens
   try {
     const url = new URL("/crypto/predictions/outcomes", location.origin);
@@ -3975,4 +10607,7 @@ async function checkAlerts() {
       }
     });
   } catch {}
+  finally {
+    state.alertsInFlight = false;
+  }
 }

@@ -6,6 +6,9 @@ OCR service for AEGIS.
 Responsibilities:
   - Extract text from image bytes (screenshots, photos, scans).
   - Optionally extract text from PDF files by rendering pages to images.
+
+Why this module exists:
+  - Provide deterministic OCR utilities for image/reference workflows.
 """
 
 import io
@@ -63,11 +66,11 @@ def ocr_image_bytes(image_bytes: bytes, lang: str = "spa+eng") -> str:
         return ""
 
     lang_hint = _normalize_lang_hint(lang)
+    img = None
     try:
         with io.BytesIO(image_bytes) as buf:
-            img = Image.open(buf)  # type: ignore[arg-type]
-            img = img.convert("RGB")
-
+            with Image.open(buf) as opened:  # type: ignore[arg-type]
+                img = opened.convert("RGB")
         text = pytesseract.image_to_string(img, lang=lang_hint)  # type: ignore[call-arg]
         return (text or "").strip()
     except OcrError:
@@ -75,6 +78,9 @@ def ocr_image_bytes(image_bytes: bytes, lang: str = "spa+eng") -> str:
     except Exception as exc:  # noqa: BLE001
         logger.exception("ocr_image_bytes failed: %s", exc)
         raise OcrError(f"OCR failed on image bytes: {exc}") from exc
+    finally:
+        if img is not None:
+            img.close()
 
 
 def ocr_file(path: str | Path, lang: str = "spa+eng") -> str:
@@ -90,9 +96,10 @@ def ocr_file(path: str | Path, lang: str = "spa+eng") -> str:
         return ocr_pdf_bytes(pdf_bytes, lang=lang_hint)
 
     _ensure_image_backend()
+    img = None
     try:
-        img = Image.open(p)  # type: ignore[arg-type]
-        img = img.convert("RGB")
+        with Image.open(p) as opened:  # type: ignore[arg-type]
+            img = opened.convert("RGB")
         text = pytesseract.image_to_string(img, lang=lang_hint)  # type: ignore[call-arg]
         return (text or "").strip()
     except OcrError:
@@ -100,6 +107,9 @@ def ocr_file(path: str | Path, lang: str = "spa+eng") -> str:
     except Exception as exc:  # noqa: BLE001
         logger.exception("ocr_file failed for %s: %s", p, exc)
         raise OcrError(f"OCR failed for file {p}: {exc}") from exc
+    finally:
+        if img is not None:
+            img.close()
 
 
 def ocr_pdf_bytes(
@@ -123,6 +133,7 @@ def ocr_pdf_bytes(
 
     texts: List[str] = []
     for idx, img in enumerate(pages):
+        img_rgb = None
         try:
             img_rgb = img.convert("RGB")
             page_text = pytesseract.image_to_string(img_rgb, lang=lang_hint)  # type: ignore[call-arg]
@@ -131,5 +142,12 @@ def ocr_pdf_bytes(
                 texts.append(page_text)
         except Exception as exc:  # noqa: BLE001
             logger.exception("OCR for PDF page %d failed: %s", idx, exc)
+        finally:
+            if img_rgb is not None:
+                img_rgb.close()
+            try:
+                img.close()
+            except Exception:
+                logger.debug("Failed to close OCR PDF page image", exc_info=True)
 
     return "\n\n".join(t for t in texts if t)

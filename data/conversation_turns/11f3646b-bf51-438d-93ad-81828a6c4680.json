@@ -1,0 +1,207 @@
+[
+  {
+    "turn_id": "c7b6db888e1c",
+    "created_at": 1773818762469,
+    "finished_at": 1773818762475,
+    "status": "success",
+    "mode": "agent",
+    "source_plan": "local_only",
+    "active_project_id": "proj_50615c",
+    "user_message": "where is auth_token defined?",
+    "items": [
+      {
+        "item_id": "3812e5842539",
+        "ts": 1773818762470,
+        "kind": "plan",
+        "status": "ok",
+        "payload": {
+          "mode": "agent",
+          "source_plan": "local_only",
+          "force_web": false,
+          "current_task": "",
+          "current_subtask": "",
+          "next_step": "",
+          "next_tool": "project_manifest",
+          "missing_evidence": [],
+          "tool_candidates": [
+            "project_manifest",
+            "project_symbols",
+            "project_excerpt"
+          ],
+          "tool_risks": {
+            "project_manifest": "safe",
+            "project_symbols": "safe",
+            "project_excerpt": "safe"
+          },
+          "approval_required": [],
+          "actions": [
+            {
+              "tool": "project_manifest",
+              "risk": "safe",
+              "label_en": "Show project summary",
+              "label_es": "Resumen del proyecto",
+              "args": {}
+            },
+            {
+              "tool": "project_symbols",
+              "risk": "safe",
+              "label_en": "Search symbols",
+              "label_es": "Buscar símbolos",
+              "args": {}
+            }
+          ],
+          "next_action": {
+            "tool": "project_manifest",
+            "risk": "safe",
+            "label_en": "Show project summary",
+            "label_es": "Resumen del proyecto",
+            "args": {}
+          },
+          "llm_required": false,
+          "steps": [
+            "project_manifest",
+            "project_files_symbols"
+          ],
+          "routing_confidence": 0.35,
+          "ambiguous_route": true
+        }
+      },
+      {
+        "item_id": "127536386f70",
+        "ts": 1773818762470,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "08805993f34a",
+        "ts": 1773818762471,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "cd2986b38107",
+        "ts": 1773818762471,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "tool": "project_symbols"
+        }
+      },
+      {
+        "item_id": "cfc446c8b9d1",
+        "ts": 1773818762472,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "tool": "project_symbols",
+          "q": "auth",
+          "count": 1
+        }
+      },
+      {
+        "item_id": "af3fe4160bd7",
+        "ts": 1773818762472,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "tool": "project_excerpt"
+        }
+      },
+      {
+        "item_id": "f2bb0c99a0a9",
+        "ts": 1773818762473,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "tool": "project_excerpt",
+          "path": ""
+        }
+      },
+      {
+        "item_id": "8b39077a8c69",
+        "ts": 1773818762473,
+        "kind": "evidence",
+        "status": "ok",
+        "payload": {
+          "origin": "local",
+          "kind": "symbols",
+          "project_id": "proj_50615c",
+          "title": "symbol matches (auth)",
+          "text": "- auth_token @ auth.py",
+          "meta": {
+            "q": "auth",
+            "count": 1
+          }
+        }
+      }
+    ],
+    "assistant_message": "- auth_token @ auth.py",
+    "response_context": {
+      "plan": {
+        "mode": "agent",
+        "source_plan": "local_only",
+        "force_web": false,
+        "current_task": "",
+        "current_subtask": "",
+        "next_step": "",
+        "next_tool": "project_manifest",
+        "missing_evidence": [],
+        "tool_candidates": [
+          "project_manifest",
+          "project_symbols",
+          "project_excerpt"
+        ],
+        "tool_risks": {
+          "project_manifest": "safe",
+          "project_symbols": "safe",
+          "project_excerpt": "safe"
+        },
+        "approval_required": [],
+        "actions": [
+          {
+            "tool": "project_manifest",
+            "risk": "safe",
+            "label_en": "Show project summary",
+            "label_es": "Resumen del proyecto",
+            "args": {}
+          },
+          {
+            "tool": "project_symbols",
+            "risk": "safe",
+            "label_en": "Search symbols",
+            "label_es": "Buscar símbolos",
+            "args": {}
+          }
+        ],
+        "next_action": {
+          "tool": "project_manifest",
+          "risk": "safe",
+          "label_en": "Show project summary",
+          "label_es": "Resumen del proyecto",
+          "args": {}
+        },
+        "llm_required": false,
+        "steps": [
+          "project_manifest",
+          "project_files_symbols"
+        ],
+        "routing_confidence": 0.35,
+        "ambiguous_route": true
+      },
+      "evidence_count": 1,
+      "web_meta": {},
+      "active_project_id": "proj_50615c",
+      "planner_loop": {
+        "phase": "verify",
+        "max_iterations": 1,
+        "max_total_tool_calls": 3
+      }
+    }
+  }
+]

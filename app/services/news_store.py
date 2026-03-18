@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""
+Persistent crypto news store helpers.
+
+Why this module exists:
+- Save/retrieve normalized news items for crypto context and dedupe windows.
+"""
+
 import hashlib
 from datetime import datetime, timedelta
 from typing import List, Optional, Sequence
@@ -9,46 +16,8 @@ from sqlalchemy.orm import Session
 
 from app.db.kb_news import KBNews
 from app.db.base import SessionLocal
-POS_WORDS = {
-    "rise",
-    "surge",
-    "bull",
-    "gain",
-    "positive",
-    "beat",
-    "record",
-    "upgrade",
-    "approve",
-    "strong",
-    "growth",
-}
-
-NEG_WORDS = {
-    "fall",
-    "drop",
-    "bear",
-    "loss",
-    "negative",
-    "miss",
-    "hack",
-    "ban",
-    "lawsuit",
-    "fine",
-    "weak",
-    "decline",
-}
-
-
-def _sentiment_score(text: str | None) -> float:
-    if not text:
-        return 0.0
-    t = text.lower()
-    pos = sum(w in t for w in POS_WORDS)
-    neg = sum(w in t for w in NEG_WORDS)
-    if pos == 0 and neg == 0:
-        return 0.0
-    score = (pos - neg) / max(1, pos + neg)
-    return max(-0.25, min(0.25, score))
+from app.utils.ml_helpers import sentiment_score as _sentiment_score
+from app.utils.runtime_helpers import utcnow_naive as _utcnow_naive
 
 
 def _make_hash(title: str, source: str | None) -> str:
@@ -64,7 +33,7 @@ def upsert_news_items(symbol: str, items: Sequence[dict], window_minutes: int = 
         return 0
     db: Session = SessionLocal()
     inserted = 0
-    cutoff = datetime.utcnow() - timedelta(minutes=window_minutes)
+    cutoff = _utcnow_naive() - timedelta(minutes=window_minutes)
     try:
         for it in items:
             title = (it.get("title") or "").strip()
@@ -90,7 +59,7 @@ def upsert_news_items(symbol: str, items: Sequence[dict], window_minutes: int = 
             row = KBNews(
                 symbol=symbol.upper(),
                 ts_pub=ts_pub,
-                ts_ingest=datetime.utcnow(),
+                ts_ingest=_utcnow_naive(),
                 title=title,
                 summary=summary,
                 url=it.get("url") or it.get("link"),
@@ -113,7 +82,7 @@ def upsert_news_items(symbol: str, items: Sequence[dict], window_minutes: int = 
 def fetch_recent_news(symbol: str, minutes: int = 90, limit: int = 12) -> List[dict]:
     db: Session = SessionLocal()
     try:
-        since = datetime.utcnow() - timedelta(minutes=minutes)
+        since = _utcnow_naive() - timedelta(minutes=minutes)
         rows = (
             db.query(KBNews)
             .filter(KBNews.symbol == symbol.upper(), KBNews.ts_ingest >= since)

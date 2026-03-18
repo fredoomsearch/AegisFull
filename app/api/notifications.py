@@ -1,16 +1,11 @@
 from __future__ import annotations
 
 """
-Endpoints relacionados con notificaciones (emails, alerts, etc).
+Notification/email API surface.
 
-Por ahora:
-- Define un APIRouter con prefix `/notifications`
-- Expone un endpoint GET `/notifications/health` para que
-  `app.api.__init__` pueda incluir este router sin romper nada.
-
-Más adelante aquí podemos:
-- Conectar con app.services.email_service.EmailService
-- Exponer endpoints para enviar correos de prueba, alertas de trading, etc.
+Why this module exists:
+- Keep notification integrations isolated from core chat/project flows.
+- Provide a health-ready router that can be extended safely.
 """
 
 from typing import Dict, Any
@@ -18,7 +13,7 @@ from typing import Dict, Any
 from fastapi import APIRouter, Depends
 
 from app.api.deps import require_api_key
-from app.services.email_service import email_service
+from app.services.email_service import get_email_service
 
 router = APIRouter(
     prefix="/notifications",
@@ -36,6 +31,8 @@ async def notifications_health() -> dict:
 
 
 def send_crypto_signal_email(to: str, signal: Dict[str, Any]) -> bool:
+    """Send templated crypto signal email through configured email provider."""
+    email_service = get_email_service()
     html = email_service.render_template("prediction_email.html", context={"signal": signal})
     if not html:
         return False
@@ -44,4 +41,3 @@ def send_crypto_signal_email(to: str, signal: Dict[str, Any]) -> bool:
         subject=f"Señal AEGIS para {signal.get('symbol', '').upper()}",
         html_body=html,
     )
-

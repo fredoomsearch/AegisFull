@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+"""
+Central auth dependencies/guards.
+
+Why this module exists:
+- Enforce API key/JWT auth consistently across routers.
+- Support scope-aware guards (`files`, `admin`, etc.).
+"""
+
 import os
 from typing import Optional, Sequence
 
 from fastapi import Header, HTTPException, Request
+from app.utils.runtime_helpers import first_csv_token as _first_csv_token
 
 try:
     import jwt  # PyJWT
@@ -27,6 +36,7 @@ JWT_LEEWAY = int(os.getenv("AEGIS_JWT_LEEWAY", "30"))
 
 
 def _load_keys_from_env(*env_vars: str) -> set[str]:
+    """Load comma-separated key lists from one or more env vars."""
     keys: set[str] = set()
     for env_var in env_vars:
         raw = (os.getenv(env_var) or "").strip()
@@ -35,22 +45,13 @@ def _load_keys_from_env(*env_vars: str) -> set[str]:
     return keys
 
 
-def _first_csv_token(raw: Optional[str]) -> str:
-    """
-    Browsers/proxies may merge duplicate headers into comma-separated values.
-    Keep only the first credential token.
-    """
-    value = (raw or "").strip()
-    if not value:
-        return ""
-    return value.split(",", 1)[0].strip().strip("\"'")
-
-
 def _extract_api_key(x_api_key: Optional[str]) -> str:
+    """Normalize X-API-Key header to a single credential token."""
     return _first_csv_token(x_api_key)
 
 
 def _extract_bearer_token(authorization: Optional[str]) -> str:
+    """Extract bearer token from Authorization header when present."""
     auth = _first_csv_token(authorization)
     if not auth:
         return ""
@@ -197,9 +198,36 @@ async def require_files_api_key(
         request,
         x_api_key,
         authorization,
-        allowed_envs=("FILES_API_KEY", "AEGIS_API_KEY"),
+        allowed_envs=("FILES_API_KEY", "AEGIS_API_KEY", ),
         required_scope="files",
         misconfig_detail="Server auth misconfigured: set FILES_API_KEY/AEGIS_API_KEY or set AEGIS_AUTH_MODE=off",
+    )
+
+
+async def require_admin_api_key(
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None, alias=_HEADER_ALIAS),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+) -> None:
+    """
+    Admin-only API key guard.
+
+    Env:
+      - ADMIN_API_KEY = comma-separated keys
+
+    Headers supported:
+      - X-API-Key: <key>
+      - Authorization: Bearer <key> (raw key or JWT)
+
+    For JWT, require scope "admin".
+    """
+    _require_key(
+        request,
+        x_api_key,
+        authorization,
+        allowed_envs=("ADMIN_API_KEY",),
+        required_scope="admin",
+        misconfig_detail="Server admin auth misconfigured: set ADMIN_API_KEY or set AEGIS_AUTH_MODE=off",
     )
 
 
@@ -227,12 +255,13 @@ async def require_admin_scope(
 ) -> None:
     """
     Admin guard: accepts ADMIN_API_KEY or JWT with scope=admin.
+    Never falls back to AEGIS_API_KEY for admin routes.
     """
     _require_key(
         request,
         x_api_key,
         authorization,
-        allowed_envs=("ADMIN_API_KEY", "AEGIS_API_KEY"),
+        allowed_envs=("ADMIN_API_KEY",),
         required_scope="admin",
-        misconfig_detail="Server auth misconfigured: set ADMIN_API_KEY/AEGIS_API_KEY or set AEGIS_AUTH_MODE=off",
+        misconfig_detail="Server auth misconfigured: set ADMIN_API_KEY or set AEGIS_AUTH_MODE=off",
     )

@@ -1,0 +1,278 @@
+[
+  {
+    "turn_id": "1b8cdc374c29",
+    "created_at": 1773826528915,
+    "finished_at": 1773826528921,
+    "status": "success",
+    "mode": "agent",
+    "source_plan": "local_only",
+    "active_project_id": "proj_2b5db8",
+    "user_message": "where is auth_token defined?",
+    "items": [
+      {
+        "item_id": "9c9369e6e065",
+        "ts": 1773826528915,
+        "kind": "run_start",
+        "status": "ok",
+        "payload": {
+          "max_iterations": 3,
+          "max_total_tool_calls": 8,
+          "max_tool_retries": 2,
+          "tool_retry_backoff_ms": 10
+        }
+      },
+      {
+        "item_id": "78164fc4c460",
+        "ts": 1773826528916,
+        "kind": "plan",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "plan": {
+            "mode": "agent",
+            "source_plan": "local_only",
+            "force_web": false,
+            "current_task": "",
+            "current_subtask": "",
+            "next_step": "",
+            "next_tool": "project_manifest",
+            "missing_evidence": [],
+            "tool_candidates": [
+              "project_manifest",
+              "project_symbols",
+              "project_excerpt"
+            ],
+            "tool_risks": {
+              "project_manifest": "safe",
+              "project_symbols": "safe",
+              "project_excerpt": "safe"
+            },
+            "approval_required": [],
+            "actions": [
+              {
+                "tool": "project_manifest",
+                "risk": "safe",
+                "label_en": "Show project summary",
+                "label_es": "Resumen del proyecto",
+                "args": {}
+              },
+              {
+                "tool": "project_symbols",
+                "risk": "safe",
+                "label_en": "Search symbols",
+                "label_es": "Buscar símbolos",
+                "args": {}
+              }
+            ],
+            "next_action": {
+              "tool": "project_manifest",
+              "risk": "safe",
+              "label_en": "Show project summary",
+              "label_es": "Resumen del proyecto",
+              "args": {}
+            },
+            "llm_required": false,
+            "steps": [
+              "project_manifest",
+              "project_files_symbols"
+            ],
+            "routing_confidence": 0.35,
+            "ambiguous_route": true
+          }
+        }
+      },
+      {
+        "item_id": "08eb859030cc",
+        "ts": 1773826528916,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "ec71abc1a6f0",
+        "ts": 1773826528917,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "2ab8b570a8a6",
+        "ts": 1773826528917,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_manifest"
+        }
+      },
+      {
+        "item_id": "64fb69771eef",
+        "ts": 1773826528917,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_symbols"
+        }
+      },
+      {
+        "item_id": "861464743458",
+        "ts": 1773826528918,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_symbols",
+          "q": "auth",
+          "count": 1
+        }
+      },
+      {
+        "item_id": "4cc56880f0ba",
+        "ts": 1773826528918,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_symbols"
+        }
+      },
+      {
+        "item_id": "3d4dc1e88241",
+        "ts": 1773826528919,
+        "kind": "tool_started",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_excerpt"
+        }
+      },
+      {
+        "item_id": "58b534aaefd1",
+        "ts": 1773826528919,
+        "kind": "tool_result",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_excerpt",
+          "path": ""
+        }
+      },
+      {
+        "item_id": "e463566e1af4",
+        "ts": 1773826528920,
+        "kind": "tool_finished",
+        "status": "ok",
+        "payload": {
+          "iteration": 1,
+          "tool": "project_excerpt"
+        }
+      },
+      {
+        "item_id": "010906c67a0f",
+        "ts": 1773826528920,
+        "kind": "evidence",
+        "status": "ok",
+        "payload": {
+          "origin": "local",
+          "kind": "symbols",
+          "project_id": "proj_2b5db8",
+          "title": "symbol matches (auth)",
+          "text": "- auth_token @ auth.py",
+          "meta": {
+            "q": "auth",
+            "count": 1
+          },
+          "iteration": 1
+        }
+      },
+      {
+        "item_id": "5983773b8aad",
+        "ts": 1773826528921,
+        "kind": "run_stop",
+        "status": "ok",
+        "payload": {
+          "reason": "plan_satisfied",
+          "iteration": 1,
+          "total_tool_calls": 3
+        }
+      }
+    ],
+    "assistant_message": "- auth_token @ auth.py",
+    "response_context": {
+      "plan": {
+        "mode": "agent",
+        "source_plan": "local_only",
+        "force_web": false,
+        "current_task": "",
+        "current_subtask": "",
+        "next_step": "",
+        "next_tool": "project_manifest",
+        "missing_evidence": [],
+        "tool_candidates": [
+          "project_manifest",
+          "project_symbols",
+          "project_excerpt"
+        ],
+        "tool_risks": {
+          "project_manifest": "safe",
+          "project_symbols": "safe",
+          "project_excerpt": "safe"
+        },
+        "approval_required": [],
+        "actions": [
+          {
+            "tool": "project_manifest",
+            "risk": "safe",
+            "label_en": "Show project summary",
+            "label_es": "Resumen del proyecto",
+            "args": {}
+          },
+          {
+            "tool": "project_symbols",
+            "risk": "safe",
+            "label_en": "Search symbols",
+            "label_es": "Buscar símbolos",
+            "args": {}
+          }
+        ],
+        "next_action": {
+          "tool": "project_manifest",
+          "risk": "safe",
+          "label_en": "Show project summary",
+          "label_es": "Resumen del proyecto",
+          "args": {}
+        },
+        "llm_required": false,
+        "steps": [
+          "project_manifest",
+          "project_files_symbols"
+        ],
+        "routing_confidence": 0.35,
+        "ambiguous_route": true
+      },
+      "iterations": 1,
+      "evidence_count": 1,
+      "web_meta": {},
+      "active_project_id": "proj_2b5db8",
+      "planner_loop": {
+        "phase": "verify",
+        "state": "completed",
+        "max_iterations": 3,
+        "max_total_tool_calls": 8,
+        "max_tool_retries": 2,
+        "tool_retry_backoff_ms": 10,
+        "budget_exhausted": false,
+        "total_tool_calls": 3,
+        "iterations_completed": 1,
+        "stop_reason": "plan_satisfied"
+      }
+    }
+  }
+]

@@ -573,7 +573,7 @@ def fetch_coingecko(symbol_id: str = "bitcoin") -> Dict[str, Any]:
         "low_24h": data.get("low_24h", {}).get("usd"),
         "volume": data.get("total_volume", {}).get("usd"),
         "change_24h": data.get("price_change_percentage_24h"),
-        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
     }
 
 
@@ -590,7 +590,7 @@ def fetch_binance(symbol_pair: str = "BTCUSDT") -> Dict[str, Any]:
         "low_24h": float(data.get("lowPrice", 0.0)),
         "volume": float(data.get("volume", 0.0)),
         "change_24h": float(data.get("priceChangePercent", 0.0)),
-        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
     }
 
 
@@ -607,6 +607,8 @@ def _compute_ensemble_probs(
     Devuelve las probabilidades de cada modelo + la combinada.
     """
     meta_path = CALIBRATED_MODEL_PATH + ".meta.json"
+
+    meta_json = _load_meta_json(meta_path) or {}
 
     # 1) Elegir columnas de features
     if feature_columns is None:
@@ -671,7 +673,28 @@ def _compute_ensemble_probs(
     dl_probs = safe_probs(dl)
     xgb_probs = safe_probs(xgb)
     cat_probs = safe_probs(cat)
-    seta_probs = safe_probs(seta)
+
+    stacking_feature_names = meta_json.get("stacking_feature_names") or ["rf", "dl", "xgb", "cat"]
+    stacking_feature_map = {
+        "rf": rf_probs,
+        "dl": dl_probs,
+        "xgb": xgb_probs,
+        "cat": cat_probs,
+    }
+    if seta is not None:
+        try:
+            meta_X = pd.DataFrame(
+                {
+                    name: stacking_feature_map.get(name, np.zeros(n))
+                    for name in stacking_feature_names
+                }
+            )
+            seta_probs = seta.predict_proba(meta_X)[:, 1]
+        except Exception as e:  # noqa: BLE001
+            logger.warning("stacking predict_proba failed for %s: %s", type(seta), e)
+            seta_probs = np.zeros(n)
+    else:
+        seta_probs = np.zeros(n)
 
     # 5) Calcular pesos
     if weights is None:
@@ -715,6 +738,7 @@ def _compute_ensemble_probs(
     return {
         "weights": weights,
         "feature_columns": feature_columns,
+        "stacking_feature_names": stacking_feature_names,
         "rf_probs": rf_probs,
         "dl_probs": dl_probs,
         "xgb_probs": xgb_probs,

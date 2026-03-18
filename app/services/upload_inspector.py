@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+"""
+Upload folder inspection utilities.
+
+Why this module exists:
+- Produce quick deterministic summaries of uploaded project trees.
+- Support “what did I upload?” flows before/after ingest.
+"""
+
 import json
 import os
 import re
