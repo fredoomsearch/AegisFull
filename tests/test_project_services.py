@@ -4,12 +4,17 @@ import json
 from pathlib import Path
 
 from app.services.project_introspection import (
+    build_relation_subset_manifest,
     build_project_impact_report,
     build_project_improvement_ideas,
     build_project_intelligence_summary,
     build_symbol_rename_plan,
+    infer_directory_focus,
+    summarize_project_architecture_deep,
+    summarize_project_folders,
+    summarize_project_impact_report,
 )
-from app.services.project_manifest import build_project_manifest, load_project_manifest, save_project_manifest
+from app.services.project_manifest import build_project_manifest, infer_file_focus, load_project_manifest, save_project_manifest
 from app.services import project_store
 
 
@@ -139,6 +144,10 @@ def test_project_intelligence_summary_and_impact_report(tmp_path: Path):
     route_impact = build_project_impact_report(root, manifest=manifest, q="routes.py")
     assert any(item.get("method") == "POST" and item.get("resolved_route") == "/auth/token" for item in route_impact["routes_in_scope"])
     assert any(item.get("path") == "app/main.py" and int(item.get("served_route_count") or 0) >= 2 for item in route_impact["runtime_surfaces_in_scope"])
+    impact_summary = summarize_project_impact_report(route_impact, lang="en")
+    assert "Project impact:" in impact_summary
+    assert "/auth/login" in impact_summary
+    assert "app/main.py" in impact_summary
 
     isolated_impact = build_project_impact_report(root, manifest=manifest, q="orphan.py")
     assert any(item.get("symbol") == "dead_helper" for item in isolated_impact["isolated_symbols_in_scope"])
@@ -152,6 +161,81 @@ def test_project_intelligence_summary_and_impact_report(tmp_path: Path):
     assert "app/controller.py" in rename_plan["changed_paths"]
     assert any("authenticate" in item.get("content", "") for item in rename_plan["operations"])
     assert rename_plan["rename_safety"]["level"] in {"low", "medium", "high"}
+
+
+def test_project_folder_and_architecture_summaries_are_specific(tmp_path: Path):
+    root = tmp_path / "arch_project"
+    (root / "api").mkdir(parents=True)
+    (root / "services").mkdir(parents=True)
+    (root / "models").mkdir(parents=True)
+    (root / "api" / "routes.py").write_text(
+        "from fastapi import APIRouter\nrouter = APIRouter()\n@router.get('/health')\ndef health():\n    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    (root / "services" / "auth_service.py").write_text("def login():\n    return True\n", encoding="utf-8")
+    (root / "models" / "user.py").write_text("class User:\n    pass\n", encoding="utf-8")
+    (root / "main.py").write_text(
+        "from fastapi import FastAPI\nfrom api.routes import router\napp = FastAPI()\napp.include_router(router, prefix='/api')\n",
+        encoding="utf-8",
+    )
+
+    manifest = build_project_manifest(root, "arch_project", chunk_count=4, chunked_files=4)
+
+    assert infer_directory_focus("what is inside api folder?", manifest) == "api"
+
+    folder_summary = summarize_project_folders(manifest, lang="en")
+    assert "Folder breakdown:" in folder_summary
+    assert "api" in folder_summary
+    assert "services" in folder_summary
+
+    deep_summary = summarize_project_architecture_deep(root, manifest, lang="en")
+    assert "Folder breakdown:" in deep_summary
+    assert "Runtime surfaces:" in deep_summary
+    assert "Key routes:" in deep_summary
+    assert "GET /api/health" in deep_summary
+
+
+def test_infer_file_focus_supports_unique_stem_mentions(tmp_path: Path):
+    root = tmp_path / "stem_project"
+    (root / "api").mkdir(parents=True)
+    (root / "services").mkdir(parents=True)
+    (root / "api" / "routes.py").write_text("def health():\n    return True\n", encoding="utf-8")
+    (root / "services" / "auth_service.py").write_text("def login():\n    return True\n", encoding="utf-8")
+
+    manifest = build_project_manifest(root, "stem_project", chunk_count=2, chunked_files=2)
+
+    assert infer_file_focus("what about routes?", manifest) == "api/routes.py"
+    assert infer_file_focus("and auth service?", manifest) == "services/auth_service.py"
+
+
+def test_large_project_architecture_uses_sampled_relation_subset(tmp_path: Path):
+    root = tmp_path / "large_arch_project"
+    (root / "api").mkdir(parents=True)
+    (root / "services").mkdir(parents=True)
+    (root / "api" / "routes.py").write_text(
+        "from fastapi import APIRouter\nrouter = APIRouter()\n@router.get('/health')\ndef health():\n    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    (root / "services" / "auth_service.py").write_text("def login():\n    return True\n", encoding="utf-8")
+    (root / "main.py").write_text(
+        "from fastapi import FastAPI\nfrom api.routes import router\napp = FastAPI()\napp.include_router(router, prefix='/api')\n",
+        encoding="utf-8",
+    )
+
+    manifest = build_project_manifest(root, "large_arch_project", chunk_count=4, chunked_files=3)
+    extra_paths = [f"generated/mod_{idx}.py" for idx in range(650)]
+    manifest["file_tree"] = list(manifest["file_tree"]) + extra_paths
+    manifest["stats"]["files"] = 653
+
+    subset = build_relation_subset_manifest(manifest, max_files=40, include_paths=["main.py"])
+    assert subset["relation_subset"] is True
+    assert subset["relation_subset_selected_files"] == 40
+    assert "main.py" in subset["file_tree"]
+
+    deep_summary = summarize_project_architecture_deep(root, manifest, lang="en")
+    assert "Partial relation analysis:" in deep_summary
+    assert "Runtime surfaces:" in deep_summary
+    assert "GET /api/health" in deep_summary
 
 
 def test_save_and_load_project_manifest(tmp_path: Path):

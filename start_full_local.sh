@@ -5,6 +5,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 # Optional local strict/full env file.
+if [[ ! -f ".env.strict.full.local" && -f ".env.strict.full.local.example" ]]; then
+  cp ".env.strict.full.local.example" ".env.strict.full.local"
+fi
+
 if [[ -f ".env.strict.full.local" ]]; then
   set -a
   # shellcheck disable=SC1091
@@ -22,6 +26,7 @@ fi
 export AEGIS_RUNTIME_PROFILE="${AEGIS_RUNTIME_PROFILE:-strict}"
 export AEGIS_PRODUCT_TRACK="${AEGIS_PRODUCT_TRACK:-full}"
 export AEGIS_AUTH_MODE="${AEGIS_AUTH_MODE:-on}"
+export AEGIS_START_CONTRACT_MODE="${AEGIS_START_CONTRACT_MODE:-full}"
 
 # required keys
 export AEGIS_API_KEY="${AEGIS_API_KEY:-aegis-demo-key-2026-strong}"
@@ -43,7 +48,7 @@ export AEGIS_HSTS_SECONDS="${AEGIS_HSTS_SECONDS:-31536000}"
 # runtime stability
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 
-echo "[profile] runtime=${AEGIS_RUNTIME_PROFILE} track=${AEGIS_PRODUCT_TRACK} auth=${AEGIS_AUTH_MODE}"
+echo "[profile] runtime=${AEGIS_RUNTIME_PROFILE} track=${AEGIS_PRODUCT_TRACK} contract=${AEGIS_START_CONTRACT_MODE} auth=${AEGIS_AUTH_MODE}"
 echo "[env] image_endpoint=${AEGIS_IMAGE_ENDPOINT} browser=${AEGIS_BROWSER_BINARY}"
 echo "[env] cors=${AEGIS_CORS_ORIGINS} av_fail_open=${FILES_AV_FAIL_OPEN} hsts=${AEGIS_HSTS_SECONDS}"
 

@@ -352,7 +352,24 @@ def infer_file_focus(text: str, manifest: Dict[str, Any]) -> Optional[str]:
         name = Path(path).name.lower()
         if name and name in query:
             basename_matches.append(path)
-    return basename_matches[0] if basename_matches else None
+    if basename_matches:
+        return basename_matches[0]
+
+    query_tokens = {tok for tok in re.split(r"[^a-zA-Z0-9_./-]+", query) if tok}
+    stem_matches: List[str] = []
+    normalized_query = re.sub(r"[^a-zA-Z0-9]+", " ", query).strip()
+    for path in manifest.get("file_tree") or []:
+        if not isinstance(path, str):
+            continue
+        file_name = Path(path).name
+        stem = Path(file_name).stem.lower()
+        if not stem:
+            continue
+        stem_phrase = re.sub(r"[_\-.]+", " ", stem).strip()
+        if stem in query_tokens or (stem_phrase and stem_phrase in normalized_query):
+            stem_matches.append(path)
+    unique_matches = sorted(set(stem_matches))
+    return unique_matches[0] if len(unique_matches) == 1 else None
 
 
 def manifest_contains_auth_hints(manifest: Dict[str, Any]) -> List[str]:

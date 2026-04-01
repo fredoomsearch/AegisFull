@@ -8,7 +8,6 @@ Why this module exists:
 - Provide explicit fallback behavior when backend is degraded.
 - Support OCR-assisted reference-to-image workflows.
 """
-0
 import json
 import logging
 import os
@@ -317,10 +316,13 @@ def runtime_image_status() -> Dict[str, Any]:
     reachable, probe_status, probe_error = _probe_backend(base or endpoint)
     selected_ckpt, configured_ckpt, available_ckpts, ckpt_error = _resolve_checkpoint(base)
     fallback_only = bool(recent_rows) and backend_successes == 0 and fallback_count > 0
+    transient_fallbacks = bool(recent_rows) and reachable and backend_successes > 0 and fallback_count > 0
     status = "ready"
     if not reachable and fallback_only:
         status = "fallback-only"
-    elif not reachable or fallback_count > 0:
+    elif not reachable:
+        status = "degraded"
+    elif fallback_only:
         status = "degraded"
 
     return {
@@ -338,6 +340,7 @@ def runtime_image_status() -> Dict[str, Any]:
         "recent_backend_successes": backend_successes,
         "recent_fallbacks": fallback_count,
         "fallback_only": fallback_only,
+        "transient_fallbacks": transient_fallbacks,
         "last_backend_error": last_error[:400] or None,
         "configured_checkpoint": configured_ckpt,
         "selected_checkpoint": selected_ckpt,

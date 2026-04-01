@@ -22,6 +22,7 @@ _SMART_APOSTROPHES = str.maketrans(
 )
 
 _WHITESPACE_RE = re.compile(r"\s+")
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 _ROUTING_REWRITES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bwhere(?:'s|s)\b", flags=re.IGNORECASE), "where is"),
@@ -36,23 +37,34 @@ _ROUTING_REWRITES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bdonde\s+s\b", flags=re.IGNORECASE), "donde es"),
 )
 
-_MODE_PREFIX_RE = re.compile(r"^\s*(web|url|crypto|project|image)\s*:\s*(.*)$", re.IGNORECASE | re.DOTALL)
+_MODE_PREFIX_RE = re.compile(r"^\s*(web|url|crypto|project|image|local)\s*:\s*(.*)$", re.IGNORECASE | re.DOTALL)
 _DOMAIN_LIKE_RE = re.compile(
     r"^(?:https?://)?(?:localhost|[\w.-]+\.[a-z]{2,}|\d{1,3}(?:\.\d{1,3}){3})(?::\d{2,5})?(?:/[^\s]*)?$",
     re.IGNORECASE,
 )
 
 
+def strip_attachment_context(text: str) -> str:
+    raw = str(text or "")
+    for marker in ("[Attachment context ", "[Contexto de adjunto "):
+        idx = raw.find(marker)
+        if idx >= 0:
+            trimmed = raw[:idx].strip()
+            return trimmed or raw.strip()
+    return raw.strip()
+
+
 def normalize_user_input(text: str) -> str:
     value = str(text or "")
     value = value.translate(_SMART_APOSTROPHES)
     value = value.replace("\u00a0", " ")
+    value = _CONTROL_CHAR_RE.sub(" ", value)
     value = _WHITESPACE_RE.sub(" ", value).strip()
     return value
 
 
 def normalize_for_routing(text: str) -> str:
-    value = normalize_user_input(text).lower()
+    value = normalize_user_input(strip_attachment_context(text)).lower()
     for pattern, replacement in _ROUTING_REWRITES:
         value = pattern.sub(replacement, value)
     value = _WHITESPACE_RE.sub(" ", value).strip()

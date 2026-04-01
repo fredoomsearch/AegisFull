@@ -10,12 +10,14 @@ Why this module exists:
 """
 
 import asyncio
+import hashlib
 import io
 import json
 import logging
 import os
 import re
 import threading
+from contextvars import ContextVar
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -27,7 +29,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
 
-from app.api.deps import require_api_key
+from app.api.deps import _decode_jwt_token, require_api_key
 from app.api.deps import require_files_api_key
 from app.memory import (
     delete_conversation as delete_memory_conversation,
@@ -98,6 +100,7 @@ from app.services.web_snippets import fetch_snippets_from_sources
 from app.services.crypto_prediction_log import pair_predictions_with_outcomes
 from app.services.crypto_trade_log import compute_pnl, list_trades
 from app.services import health_state, runtime_metrics
+from app.services.durable_memory import get_durable_memory_summary, update_durable_memory
 from app.services.project_manifest import (
     infer_file_focus,
     load_project_manifest,
@@ -105,6 +108,11 @@ from app.services.project_manifest import (
     summarize_manifest,
 )
 from app.services.project_introspection import (
+    build_project_impact_report,
+    build_relation_subset_manifest,
+    infer_directory_focus,
+    summarize_project_impact_report,
+    summarize_project_architecture_deep,
     fuzzy_search_project_files,
     is_architecture_question,
     scan_project_symbols,
@@ -113,7 +121,10 @@ from app.services.project_introspection import (
 )
 from app.services.project_store import get_project
 from app.services.session_state import (
+    classify_conversational_act,
     default_session_state,
+    build_comp_snapshot,
+    infer_symbol_focus,
     normalize_session_state,
     replan_session_state,
     update_session_state,
@@ -123,6 +134,7 @@ from app.services.input_normalizer import (
     looks_like_url_candidate,
     normalize_for_routing,
     normalize_user_input,
+    strip_attachment_context,
     split_mode_prefix,
 )
 from app.services.job_manager import list_jobs, serialize_job
@@ -224,6 +236,8 @@ _MODE_LLM_DEFAULT = {
 
 APPROVAL_TTL_MS = int(os.getenv("AEGIS_APPROVAL_TTL_MS", "300000"))  # 5 minutes
 
+_CURRENT_MEMORY_SUBJECT: ContextVar[str] = ContextVar("aegis_current_memory_subject", default="")
+
 _LEAK_HEADER_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\s*you are aegis\b", re.IGNORECASE),
     re.compile(r"^\s*always reply in the user[’']s language\b", re.IGNORECASE),
@@ -258,6 +272,11 @@ _INLINE_LEAK_SPLIT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\binternal chain-of-thought\b", re.IGNORECASE),
     re.compile(r"\bbe accurate,\s*direct,\s*and\s*practical\b", re.IGNORECASE),
     re.compile(r"\bif mixed,\s*follow the dominant language\b", re.IGNORECASE),
+)
+_PARTIAL_PROMPT_FRAGMENT_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("spanish/english", "wrappers like"),
+    ("spanish/english", "special chat tokens"),
+    ("spanish/english", "dominant language"),
 )
 
 _QUERY_NORMALIZATIONS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -322,6 +341,38 @@ _REFERENTIAL_FOLLOWUP_PATTERN = re.compile(
     r"\b(this|that|it|those|these|same|again|continue|next|previous|above|here|esto|eso|esta|ese|mismo|continuar)\b",
     re.IGNORECASE,
 )
+_ATTACHMENT_CONTEXT_RE = re.compile(
+    r"\[(?:Attachment context|Contexto de adjunto)\s+([a-zA-Z0-9_-]+)\s*:",
+    re.IGNORECASE,
+)
+_ATTACHMENT_CONTEXT_BLOCK_RE = re.compile(
+    r"\[(?:Attachment context|Contexto de adjunto)\s+(?P<kind>[a-zA-Z0-9_-]+)\s*:\s*(?P<name>[^\]]+)\]\s*(?P<body>.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_ATTACHMENT_DIRECT_HINT_RE = re.compile(
+    r"\b("
+    r"what is(?: this| that)?|what's this|what's that|whats this|whats that|"
+    r"describe|explain|summari[sz]e|analy[sz]e|read|tell me about|what does|what can you tell|"
+    r"que es|qué es|describe|explica|resume|analiza|lee|dime|que dice|qué dice|"
+    r"attached|attachment|adjunto|image|imagen|photo|foto|screenshot|captura|"
+    r"file|archivo|document|documento|pdf|html|text|texto|ocr|code|codigo|código"
+    r")\b",
+    re.IGNORECASE,
+)
+_ATTACHMENT_PROJECT_HINT_RE = re.compile(
+    r"\b(project|proyecto|repo|repository|tree|estructura|architecture|arquitectura|entrypoint|dependencies|dependencias)\b",
+    re.IGNORECASE,
+)
+_ATTACHMENT_LONG_DIGITS_RE = re.compile(r"\b(\d{2,4})\d{2,}(\d{2})\b")
+_ATTACHMENT_FENCE_RE = re.compile(r"```(?:[a-zA-Z0-9_+-]+)?\n(.*?)\n```", re.DOTALL)
+_ATTACHMENT_HTML_TITLE_RE = re.compile(r"<title>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_ATTACHMENT_META_DESC_RE = re.compile(
+    r"<meta[^>]+name=[\"']description[\"'][^>]+content=[\"'](.*?)[\"']",
+    re.IGNORECASE | re.DOTALL,
+)
+_ATTACHMENT_ROUTE_RE = re.compile(r"@\s*(?:app|router)\.(?:get|post|put|patch|delete)\(\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
+_ATTACHMENT_MD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", re.MULTILINE)
+_ATTACHMENT_BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+.+$", re.MULTILINE)
 
 
 def _is_referential_followup(message: str, *, has_focus: bool) -> bool:
@@ -402,14 +453,158 @@ def _looks_like_project_followup_prompt(message: str) -> bool:
         "can u explain better",
         "elaborate",
         "expand that",
+        "expand on that",
+        "tell me more",
+        "more detail",
+        "more details",
+        "go deeper",
         "puedes ser mas especific",
         "puedes ser más especific",
         "mas especifico",
         "más especifico",
         "explica mejor",
         "puedes explicar mejor",
+        "dime mas",
+        "dime más",
+        "que mas",
+        "qué más",
+        "mas detalle",
+        "más detalle",
+        "mas profundo",
+        "más profundo",
+        "what folders are there",
+        "which folders are there",
+        "what directories are there",
+        "que carpetas hay",
+        "qué carpetas hay",
+        "nombre de cada carpeta",
+        "dame el nombre de cada carpeta",
+        "cada archivo",
+        "cada .py",
+        "cada py",
+        "each .py",
     )
     return any(token in text for token in patterns)
+
+
+def _looks_like_project_tree_expansion_followup(message: str) -> bool:
+    text = str(message or "").strip().lower()
+    if not text or len(text) > 120:
+        return False
+    patterns = (
+        "what else is there",
+        "what else is inside",
+        "what else is in there",
+        "what else do we have",
+        "show me the rest",
+        "show the rest",
+        "rest of it",
+        "que mas hay",
+        "qué más hay",
+        "que mas tiene",
+        "qué más tiene",
+        "muestrame lo demas",
+        "muéstrame lo demás",
+        "muestra lo demas",
+        "muestra lo demás",
+        "lo demas",
+        "lo demás",
+    )
+    return any(token in text for token in patterns)
+
+
+def _looks_like_directory_focus(value: str) -> bool:
+    raw = str(value or "").strip().strip("/")
+    if not raw or raw in {".", ".."}:
+        return False
+    return Path(raw).suffix == ""
+
+
+def _parent_directory_focus(path_value: str) -> str:
+    raw = str(path_value or "").strip().strip("/")
+    if not raw:
+        return ""
+    parent = Path(raw).parent.as_posix()
+    return "" if parent in {"", "."} else parent
+
+
+def _infer_active_project_directory_focus(message: str, session_state: Dict[str, Any] | None) -> str:
+    manifest = _load_active_project_manifest(session_state)
+    if not isinstance(manifest, dict):
+        return ""
+    return infer_directory_focus(strip_attachment_context(message), manifest)
+
+
+def _looks_like_specific_file_target_message(message: str) -> bool:
+    clean = normalize_for_routing(strip_attachment_context(message))
+    if not clean or len(clean) > 120:
+        return False
+    if re.search(r"\b[\w./-]+\.(py|js|ts|tsx|jsx|json|md|yml|yaml|toml|ini|html|css|sql|txt)\b", clean):
+        return True
+    generic_tokens = {
+        "and",
+        "what",
+        "about",
+        "this",
+        "that",
+        "it",
+        "show",
+        "me",
+        "the",
+        "code",
+        "can",
+        "u",
+        "you",
+        "be",
+        "more",
+        "specific",
+        "maybe",
+        "tell",
+        "go",
+        "deeper",
+        "explica",
+        "mejor",
+        "que",
+        "qué",
+        "mas",
+        "más",
+        "detalle",
+        "dime",
+        "y",
+    }
+    tokens = [tok for tok in re.split(r"[^a-zA-Z0-9_./-]+", clean) if tok]
+    meaningful = [tok for tok in tokens if tok not in generic_tokens]
+    if not meaningful:
+        return False
+    return any(tok in {"routes", "route", "service", "auth_service", "controller", "main", "readme", "config", "model", "schema"} or "_" in tok or "/" in tok for tok in meaningful)
+
+
+def _infer_contextual_project_file_focus(
+    message: str,
+    manifest: Dict[str, Any] | None,
+    state: Dict[str, Any] | None,
+) -> str:
+    if not isinstance(manifest, dict):
+        return ""
+    routing_message = strip_attachment_context(message)
+    direct_focus = infer_file_focus(routing_message, manifest) or ""
+    if direct_focus:
+        return direct_focus
+
+    if infer_directory_focus(routing_message, manifest):
+        return ""
+    if not _looks_like_specific_file_target_message(routing_message):
+        return ""
+
+    state_file_focus = str((state or {}).get("current_file_focus") or "").strip()
+    folder_focus = state_file_focus if _looks_like_directory_focus(state_file_focus) else ""
+    if folder_focus:
+        ranked = fuzzy_search_project_files(manifest, q=f"{folder_focus} {routing_message}", limit=8)
+        for row in ranked:
+            path = str((row or {}).get("path") or "").strip()
+            if path.startswith(folder_focus.rstrip("/") + "/"):
+                return path
+    return ""
 
 
 def _looks_like_pasted_code_or_trace(message: str) -> bool:
@@ -448,9 +643,477 @@ def _looks_like_pasted_code_or_trace(message: str) -> bool:
     return False
 
 
+def _extract_attachment_context_kind(message: str) -> str:
+    match = _ATTACHMENT_CONTEXT_RE.search(str(message or ""))
+    if not match:
+        return ""
+    return str(match.group(1) or "").strip().lower()
+
+
+def _attachment_prefers_local_routing(message: str) -> bool:
+    attachment_kind = _extract_attachment_context_kind(message)
+    if not attachment_kind:
+        return False
+    routing_message = strip_attachment_context(message)
+    if wants_links_or_sources(routing_message) or _needs_fresh_web_context(routing_message):
+        return False
+    return True
+
+
+def _extract_attachment_context_payload(message: str) -> Dict[str, str]:
+    raw = str(message or "")
+    match = _ATTACHMENT_CONTEXT_BLOCK_RE.search(raw)
+    if not match:
+        return {}
+    kind = str(match.group("kind") or "").strip().lower()
+    name = str(match.group("name") or "").strip()
+    body = str(match.group("body") or "").strip()
+    if not kind or not body:
+        return {}
+    return {
+        "kind": kind,
+        "name": name,
+        "analysis": body,
+        "clean_message": strip_attachment_context(message),
+    }
+
+
+def _attachment_analysis_excerpt(analysis: str, *, kind: str, max_chars: int = 1200) -> str:
+    text = str(analysis or "").strip()
+    if not text:
+        return ""
+    if kind == "image":
+        text = _ATTACHMENT_LONG_DIGITS_RE.sub(r"\1...\2", text)
+    if len(text) > max_chars:
+        return text[: max_chars - 15].rstrip() + "\n... [truncated]"
+    return text
+
+
+def _extract_attachment_content_text(analysis: str) -> str:
+    raw = str(analysis or "").strip()
+    if not raw:
+        return ""
+    match = _ATTACHMENT_FENCE_RE.search(raw)
+    if match:
+        return str(match.group(1) or "").strip()
+    return raw
+
+
+def _compact_attachment_line(text: str, *, max_chars: int = 160) -> str:
+    value = " ".join(str(text or "").split()).strip()
+    if not value:
+        return ""
+    return value if len(value) <= max_chars else value[: max_chars - 1].rstrip() + "…"
+
+
+def _extract_identity_highlights(content_text: str) -> list[str]:
+    rows = []
+    seen: set[str] = set()
+    for raw_line in str(content_text or "").splitlines():
+        line = _compact_attachment_line(_ATTACHMENT_LONG_DIGITS_RE.sub(r"\1...\2", raw_line), max_chars=120)
+        lower = line.lower()
+        if not line:
+            continue
+        if any(token in lower for token in ("republica", "república", "cedula", "cédula", "identificacion", "identificación", "ciudadania", "ciudadanía")):
+            if line not in seen:
+                seen.add(line)
+                rows.append(line)
+            continue
+        if re.fullmatch(r"[A-ZÁÉÍÓÚÑ ]{6,}", line):
+            if line not in seen:
+                seen.add(line)
+                rows.append(line.title())
+            continue
+        if _ATTACHMENT_LONG_DIGITS_RE.search(line) or ("..." in line and any(ch.isdigit() for ch in line)):
+            if line not in seen:
+                seen.add(line)
+                rows.append(line)
+        if len(rows) >= 3:
+            break
+    return rows[:3]
+
+
+def _summarize_image_attachment(name: str, analysis: str, *, lang: str) -> str:
+    content_text = _extract_attachment_content_text(analysis)
+    lower = content_text.lower()
+    visual_excerpt = _attachment_analysis_excerpt(analysis, kind="image", max_chars=420)
+
+    if any(token in lower for token in ("cedula", "cédula", "identificacion", "identificación", "cedula de ciudadania", "cédula de ciudadanía")):
+        highlights = _extract_identity_highlights(content_text)
+        detail = "; ".join(highlights) if highlights else _compact_attachment_line(visual_excerpt, max_chars=220)
+        if lang.startswith("es"):
+            return (
+                "Parece una cédula o documento de identidad colombiano. "
+                f"Se alcanzan a ver estos datos de forma parcial: {detail}."
+            )
+        return (
+            "This looks like a Colombian identity card or similar identity document. "
+            f"The locally extracted highlights are: {detail}."
+        )
+
+    if any(token in lower for token in ("error", "traceback", "exception", "warning", "failed")):
+        detail = _compact_attachment_line(content_text or visual_excerpt, max_chars=220)
+        if lang.startswith("es"):
+            return f"Parece una captura con un error o mensaje del sistema. Texto clave: {detail}."
+        return f"This looks like a screenshot with an error or system message. Key text: {detail}."
+
+    detail = _compact_attachment_line(content_text or visual_excerpt, max_chars=220)
+    if lang.startswith("es"):
+        return f"Es una imagen analizada localmente. Lo mas visible en el OCR/contexto es: {detail}."
+    return f"This is an image analyzed locally. The most visible OCR/context detail is: {detail}."
+
+
+def _summarize_html_attachment(content_text: str, *, lang: str) -> str:
+    title_match = _ATTACHMENT_HTML_TITLE_RE.search(content_text)
+    meta_match = _ATTACHMENT_META_DESC_RE.search(content_text)
+    title = _compact_attachment_line(title_match.group(1) if title_match else "", max_chars=120)
+    description = _compact_attachment_line(meta_match.group(1) if meta_match else "", max_chars=180)
+    lower = content_text.lower()
+    portfolio_like = any(token in lower for token in ("portfolio", "full-stack", "developer", "desarrollador"))
+
+    parts: list[str] = []
+    if lang.startswith("es"):
+        lead = "Parece una pagina HTML"
+        if portfolio_like:
+            lead += " de portafolio personal"
+        if title:
+            lead += f' con titulo "{title}"'
+        parts.append(lead + ".")
+        if description:
+            parts.append(f"Descripcion meta: {description}.")
+    else:
+        lead = "This looks like an HTML page"
+        if portfolio_like:
+            lead += " for a personal portfolio"
+        if title:
+            lead += f' with title "{title}"'
+        parts.append(lead + ".")
+        if description:
+            parts.append(f"Meta description: {description}.")
+    return " ".join(part for part in parts if part).strip()
+
+
+def _summarize_markdown_attachment(content_text: str, *, lang: str) -> str:
+    headings = [_compact_attachment_line(item, max_chars=120) for item in _ATTACHMENT_MD_HEADING_RE.findall(content_text)[:3]]
+    headings = [item for item in headings if item]
+    bullets = len(_ATTACHMENT_BULLET_RE.findall(content_text))
+    if lang.startswith("es"):
+        parts = ["Parece una guia o documento Markdown."]
+        if headings:
+            parts.append(f"Titulos detectados: {', '.join(headings)}.")
+        if bullets:
+            parts.append(f"Incluye al menos {bullets} elementos de lista.")
+        return " ".join(parts)
+    parts = ["This looks like a Markdown guide or text document."]
+    if headings:
+        parts.append(f"Detected headings: {', '.join(headings)}.")
+    if bullets:
+        parts.append(f"It includes at least {bullets} list items.")
+    return " ".join(parts)
+
+
+def _summarize_json_attachment(content_text: str, *, lang: str) -> str:
+    try:
+        payload = json.loads(content_text)
+    except Exception:
+        if lang.startswith("es"):
+            return "Parece un archivo JSON o de configuracion, pero no pude parsearlo completamente."
+        return "This looks like a JSON or configuration file, but I could not parse it fully."
+
+    if isinstance(payload, dict):
+        keys = [str(k) for k in list(payload.keys())[:8]]
+        if lang.startswith("es"):
+            return f"Parece un JSON/archivo de configuracion con claves principales: {', '.join(keys) or '(sin claves)'}."
+        return f"This looks like a JSON/config file with top-level keys: {', '.join(keys) or '(no keys)'}."
+    if isinstance(payload, list):
+        first_type = type(payload[0]).__name__ if payload else "unknown"
+        if lang.startswith("es"):
+            return f"Parece un arreglo JSON con {len(payload)} elementos. Tipo del primer elemento: {first_type}."
+        return f"This looks like a JSON array with {len(payload)} items. First item type: {first_type}."
+    if lang.startswith("es"):
+        return f"Parece un valor JSON simple de tipo {type(payload).__name__}."
+    return f"This looks like a simple JSON value of type {type(payload).__name__}."
+
+
+def _summarize_csv_attachment(content_text: str, *, lang: str) -> str:
+    rows = [line for line in str(content_text or "").splitlines() if line.strip()]
+    if not rows:
+        return "Parece un archivo tabular vacio." if lang.startswith("es") else "This looks like an empty tabular file."
+    header = [item.strip() for item in rows[0].split(",")[:8]]
+    data_rows = max(len(rows) - 1, 0)
+    if lang.startswith("es"):
+        return (
+            f"Parece un CSV o archivo tabular con columnas como: {', '.join(header) or '(sin columnas)'} "
+            f"y aproximadamente {data_rows} filas de datos."
+        )
+    return (
+        f"This looks like a CSV or tabular file with columns such as: {', '.join(header) or '(no columns)'} "
+        f"and about {data_rows} data rows."
+    )
+
+
+def _summarize_log_attachment(content_text: str, *, lang: str) -> str:
+    lower = content_text.lower()
+    traceback_like = any(token in lower for token in ("traceback", "exception", "error", "warning", "failed"))
+    first_line = ""
+    for raw_line in content_text.splitlines():
+        candidate = _compact_attachment_line(raw_line, max_chars=180)
+        if candidate:
+            first_line = candidate
+            break
+    if lang.startswith("es"):
+        if traceback_like:
+            return f"Parece un log o salida de error. La primera linea relevante es: {first_line or 'sin detalle legible'}."
+        return f"Parece un log o salida de consola. La primera linea visible es: {first_line or 'sin detalle legible'}."
+    if traceback_like:
+        return f"This looks like a log or error output. The first relevant line is: {first_line or 'no readable detail'}."
+    return f"This looks like a log or console output. The first visible line is: {first_line or 'no readable detail'}."
+
+
+def _summarize_code_attachment(content_text: str, *, lang: str) -> str:
+    lower = content_text.lower()
+    routes = _ATTACHMENT_ROUTE_RE.findall(content_text)
+    route_preview = ", ".join(routes[:4])
+    routers = re.findall(r"include_router\(([\w\.]+)", content_text)
+
+    if "from fastapi import" in lower or "fastapi(" in lower:
+        parts: list[str] = []
+        if lang.startswith("es"):
+            parts.append("Parece el entrypoint de un backend FastAPI.")
+            if "corsmiddleware" in lower:
+                parts.append("Configura CORS.")
+            if "create_all(bind=engine)" in lower or "sessionlocal" in lower:
+                parts.append("Inicializa tablas o acceso a base de datos en startup.")
+            if routers:
+                parts.append(f"Incluye routers como: {', '.join(routers[:4])}.")
+            if route_preview:
+                parts.append(f"Expone rutas como: {route_preview}.")
+            if "payu" in lower:
+                parts.append("Tambien maneja una notificacion de pagos de PayU con validacion de firma.")
+        else:
+            parts.append("This looks like a FastAPI backend entrypoint.")
+            if "corsmiddleware" in lower:
+                parts.append("It configures CORS.")
+            if "create_all(bind=engine)" in lower or "sessionlocal" in lower:
+                parts.append("It initializes database tables or DB access during startup.")
+            if routers:
+                parts.append(f"It includes routers such as: {', '.join(routers[:4])}.")
+            if route_preview:
+                parts.append(f"It exposes routes such as: {route_preview}.")
+            if "payu" in lower:
+                parts.append("It also handles a PayU payment notification with signature validation.")
+        return " ".join(parts).strip()
+
+    if "<!doctype html" in lower or "<html" in lower:
+        return _summarize_html_attachment(content_text, lang=lang)
+
+    if lang.startswith("es"):
+        return "Parece codigo fuente o configuracion. Puedo desglosar funciones, endpoints o estructura si me indicas la parte exacta."
+    return "This looks like source code or configuration. I can break down functions, endpoints, or structure if you point me to a specific part."
+
+
+def _summarize_document_attachment(name: str, analysis: str, *, lang: str) -> str:
+    content_text = _extract_attachment_content_text(analysis)
+    lower = content_text.lower()
+    suffix = Path(name).suffix.lower()
+
+    if "<!doctype html" in lower or "<html" in lower or suffix in {".html", ".htm"}:
+        return _summarize_html_attachment(content_text, lang=lang)
+    if suffix in {".md", ".markdown"} or _ATTACHMENT_MD_HEADING_RE.search(content_text):
+        return _summarize_markdown_attachment(content_text, lang=lang)
+    if suffix in {".json", ".yaml", ".yml", ".toml", ".ini"}:
+        return _summarize_json_attachment(content_text, lang=lang)
+    if suffix in {".csv"}:
+        return _summarize_csv_attachment(content_text, lang=lang)
+    if suffix in {".log"} or any(token in lower for token in ("traceback", "exception", "error:", "warning:", "failed")):
+        return _summarize_log_attachment(content_text, lang=lang)
+    if any(token in lower for token in ("from fastapi import", "fastapi(", "def ", "class ", "@app.", "@router.", "include_router(")) or suffix in {".py", ".js", ".ts"}:
+        return _summarize_code_attachment(content_text, lang=lang)
+
+    first_nonempty = ""
+    for raw_line in content_text.splitlines():
+        candidate = _compact_attachment_line(raw_line, max_chars=180)
+        if candidate:
+            first_nonempty = candidate
+            break
+    if lang.startswith("es"):
+        return f"Parece un documento de texto. El contenido empieza con: {first_nonempty or 'sin texto legible'}."
+    return f"This looks like a text document. The content starts with: {first_nonempty or 'no readable text'}."
+
+
+def _infer_attachment_subject(kind: str, analysis: str, lang: str) -> str:
+    lower = str(analysis or "").lower()
+    if kind == "image":
+        if any(token in lower for token in ("cedula", "cédula", "identificacion", "identificación", "id card", "passport", "driver")):
+            return (
+                "Parece una imagen de un documento de identidad."
+                if lang.startswith("es")
+                else "This looks like an identity-document image."
+            )
+        if any(token in lower for token in ("error", "traceback", "exception", "warning", "failed")):
+            return (
+                "Parece una captura con texto de sistema o de error."
+                if lang.startswith("es")
+                else "This looks like a screenshot with system or error text."
+            )
+        return (
+            "Esto es lo que pude extraer localmente de la imagen adjunta."
+            if lang.startswith("es")
+            else "This is what I could extract locally from the attached image."
+        )
+
+    if any(token in lower for token in ("<!doctype html", "<html", "<head", "<body")):
+        return "Parece un documento HTML." if lang.startswith("es") else "This looks like an HTML document."
+    if any(token in lower for token in ("from fastapi import", "def ", "class ", "import ")):
+        return "Parece código fuente." if lang.startswith("es") else "This looks like source code."
+    if any(token in lower for token in ("# ", "## ", "readme", "guide", "architecture", "arquitectura")):
+        return (
+            "Parece un documento de texto o guía."
+            if lang.startswith("es")
+            else "This looks like a text or guide document."
+        )
+    return (
+        "Esto es lo que pude extraer localmente del archivo adjunto."
+        if lang.startswith("es")
+        else "This is what I could extract locally from the attached file."
+    )
+
+
+def _build_attachment_llm_guidance(message: str, lang: str) -> str:
+    payload = _extract_attachment_context_payload(message)
+    if not payload:
+        return ""
+    kind = str(payload.get("kind") or "attachment").strip().lower()
+    name = str(payload.get("name") or "attachment").strip() or "attachment"
+    if lang.startswith("es"):
+        if kind == "image":
+            return (
+                "El usuario ya adjunto contexto local de una imagen. "
+                "Trata el bloque de 'Contexto de adjunto' como evidencia local confiable ya extraida por la app. "
+                "No digas que no puedes acceder, abrir o inspeccionar la imagen. "
+                f"Adjunto: imagen `{name}`. "
+                "Responde directamente usando el analisis visual/OCR incluido. "
+                "Si el usuario pregunta que muestra la imagen, describela desde ese contexto y menciona incertidumbre solo si hace falta."
+            )
+        return (
+            "El usuario ya adjunto contexto local de un archivo/documento. "
+            "Trata el bloque de 'Contexto de adjunto' como evidencia local confiable ya extraida por la app. "
+            "No digas que no puedes acceder, abrir o leer el archivo. "
+            f"Adjunto: archivo `{name}`. "
+            "Explica o resume el contenido usando el texto extraido incluido en el mensaje."
+        )
+
+    if kind == "image":
+        return (
+            "The user already attached local image context. "
+            "Treat the 'Attachment context' block as trusted local evidence already extracted by the app. "
+            "Do not say you cannot access, open, or inspect the image. "
+            f"Attachment: image `{name}`. "
+            "Answer directly from the provided visual/OCR context. "
+            "If the user asks what the image shows, describe it from that context and only mention uncertainty when needed."
+        )
+    return (
+        "The user already attached local file/document context. "
+        "Treat the 'Attachment context' block as trusted local evidence already extracted by the app. "
+        "Do not say you cannot access, open, or read the file. "
+        f"Attachment: file `{name}`. "
+        "Explain or summarize the content directly from the extracted local text included in the message."
+    )
+
+
+def _maybe_attachment_context_response(message: str, lang: str) -> Dict[str, Any] | None:
+    payload = _extract_attachment_context_payload(message)
+    if not payload:
+        return None
+
+    clean_message = str(payload.get("clean_message") or "").strip()
+    if not clean_message:
+        return None
+    if wants_links_or_sources(clean_message) or _needs_fresh_web_context(clean_message):
+        return None
+    if _ATTACHMENT_PROJECT_HINT_RE.search(clean_message):
+        return None
+    attachment_named_request = bool(
+        re.search(
+            r"\b(attached|attachment|adjunto|adjunta|image|imagen|file|archivo|document|documento|photo|foto)\b",
+            clean_message,
+            re.IGNORECASE,
+        )
+    )
+    if (_has_explicit_project_scope(clean_message) and not attachment_named_request) or is_architecture_question(clean_message):
+        return None
+    if not _ATTACHMENT_DIRECT_HINT_RE.search(clean_message):
+        return None
+
+    kind = str(payload.get("kind") or "attachment").strip().lower()
+    name = str(payload.get("name") or "attachment").strip() or "attachment"
+    analysis = _attachment_analysis_excerpt(str(payload.get("analysis") or ""), kind=kind)
+    if not analysis:
+        return None
+
+    subject = _infer_attachment_subject(kind, analysis, lang)
+    if kind == "image":
+        summary = _summarize_image_attachment(name, analysis, lang=lang)
+    else:
+        summary = _summarize_document_attachment(name, analysis, lang=lang)
+    clean_lower = clean_message.lower()
+    wants_text_excerpt = any(
+        token in clean_lower
+        for token in ("read", "text", "ocr", "que dice", "qué dice", "texto", "extract", "extrae", "extracto")
+    )
+    excerpt = ""
+    if wants_text_excerpt:
+        excerpt = _compact_attachment_line(_extract_attachment_content_text(analysis), max_chars=220)
+        if excerpt:
+            excerpt = (
+                f"Texto visible: {excerpt}."
+                if lang.startswith("es")
+                else f"Visible text: {excerpt}."
+            )
+    if lang.startswith("es"):
+        header = (
+            f"Imagen adjunta `{name}`."
+            if kind == "image"
+            else f"Archivo adjunto `{name}`."
+        )
+        follow = (
+            "Puedo describir mejor lo visual, resumir el texto o extraer campos concretos."
+            if kind == "image"
+            else "Puedo resumirlo mejor, explicar una seccion o convertirlo en tareas puntuales."
+        )
+    else:
+        header = (
+            f"Attached image `{name}`."
+            if kind == "image"
+            else f"Attached file `{name}`."
+        )
+        follow = (
+            "I can describe the visual content in more detail, summarize the text, or extract specific fields."
+            if kind == "image"
+            else "I can summarize it further, explain a section, or turn it into concrete tasks."
+        )
+
+    response = "\n\n".join(
+        part
+        for part in (
+            header,
+            subject,
+            summary,
+            excerpt,
+            follow,
+        )
+        if str(part or "").strip()
+    )
+    return {
+        "response": response,
+        "tool_kind": "attachment_context",
+        "used_local": True,
+    }
+
+
 def _prepare_web_query(msg: str, session_state: Dict[str, Any] | None = None) -> str:
     """Normalize user text into a compact query for web providers."""
-    m = msg or ""
+    m = strip_attachment_context(msg)
     m = re.sub(r"```.*?```", " ", m, flags=re.DOTALL)  # drop fenced blocks
     m = re.sub(r"`([^`]*)`", r"\1", m)                # drop inline backticks
     parts = [p.strip() for p in m.split("\n\n") if p.strip()]
@@ -459,7 +1122,10 @@ def _prepare_web_query(msg: str, session_state: Dict[str, Any] | None = None) ->
     m = " ".join(m.split())
     for pattern, replacement in _QUERY_NORMALIZATIONS:
         m = pattern.sub(replacement, m)
-    trimmed = (m[:160].rsplit(" ", 1)[0] or m[:160]).strip()
+    if len(m) <= 160:
+        trimmed = m.strip()
+    else:
+        trimmed = (m[:160].rsplit(" ", 1)[0] or m[:160]).strip()
     return rewrite_contextual_query(trimmed, session_state=session_state)
 
 
@@ -469,6 +1135,17 @@ def wants_links_or_sources(message: str) -> bool:
     return any(w in msg for w in _LINKY_WORDS)
 
 
+def _strip_attachment_context(message: str) -> str:
+    """
+    Remove synthetic attachment-analysis blocks appended by the UI.
+
+    Why:
+    - Routing/planner/session-state should follow the user's actual sentence.
+    - Attachment OCR/analysis should still remain available to the LLM prompt.
+    """
+    return strip_attachment_context(message)
+
+
 def _maybe_local_upload_summary_response(message: str, lang: str) -> str | None:
     """
     Deterministic fallback for questions like:
@@ -476,13 +1153,13 @@ def _maybe_local_upload_summary_response(message: str, lang: str) -> str | None:
       - "qué contiene /home/.../data/uploads/..."
     This avoids LLM hallucinations when user asks for concrete file inventory.
     """
-    if not is_repo_content_question(message):
+    user_only = _strip_attachment_context(message)
+    if not is_repo_content_question(user_only):
         return None
-    raw = message or ""
-    raw_path = extract_upload_path_from_text(raw)
+    raw_path = extract_upload_path_from_text(user_only)
     resolved = resolve_upload_path(raw_path) if raw_path else None
     if resolved is None:
-        lower = raw.lower()
+        lower = user_only.lower()
         asks_last = any(
             hint in lower
             for hint in (
@@ -540,7 +1217,8 @@ def _project_context_payload(session_state: Dict[str, Any] | None, lang: str) ->
 
 
 def _needs_fresh_web_context(message: str) -> bool:
-    lower = normalize_for_routing(message)
+    routing_message = strip_attachment_context(message)
+    lower = normalize_for_routing(routing_message)
     return any(
         hint in lower
         for hint in (
@@ -576,21 +1254,78 @@ def _needs_fresh_web_context(message: str) -> bool:
     )
 
 
+def _explicit_local_only_request(message: str) -> bool:
+    routing_message = strip_attachment_context(message)
+    lower = normalize_for_routing(routing_message)
+    if not lower:
+        return False
+    if lower.startswith("local:"):
+        return True
+    return any(
+        phrase in lower
+        for phrase in (
+            "local only",
+            "solo local",
+            "sin web",
+            "without web",
+            "use local",
+            "usa local",
+            "responde con local",
+            "respuesta local",
+            "reply with local",
+            "reply locally",
+            "no uses web",
+            "no usar web",
+            "do not use web",
+            "dont use web",
+            "don't use web",
+            "no necesitas web",
+            "you do not need web",
+            "you don't need web",
+        )
+    )
+
+
 def _decide_source_plan(
     message: str,
     *,
     mode_value: str,
     force_web: bool,
+    force_local: bool = False,
     is_crypto_mode: bool,
     has_active_project: bool,
     session_state: Dict[str, Any] | None = None,
 ) -> str:
     mode_norm = _normalize_mode_value(mode_value)
+    state = normalize_session_state(session_state)
+    routing_message = strip_attachment_context(message)
+    routing_text = normalize_for_routing(routing_message)
+    semantic = classify_conversational_act(routing_message, session_state=state, mode="")
+    semantic_act = str(semantic.get("act") or "").strip()
+    semantic_source_policy = str(semantic.get("source_policy") or "local").strip()
+    semantic_web_required = bool(semantic.get("web_required"))
+    asks_links = wants_links_or_sources(routing_text)
+    freshness = _needs_fresh_web_context(routing_message)
+    attachment_local_only = _attachment_prefers_local_routing(message)
+    project_scope = _has_explicit_project_scope(routing_message)
     forced_plan = _MODE_SOURCE_PLAN_FORCE.get(mode_norm)
+
+    if force_local or _explicit_local_only_request(routing_message):
+        return "local_only"
+
+    if semantic_act in {"greeting", "help", "acknowledgement"} and semantic_source_policy == "local" and not semantic_web_required:
+        return "local_only"
+
     if forced_plan:
+        if forced_plan == "web_only":
+            if semantic_source_policy == "local" and semantic_act in {"greeting", "help", "acknowledgement"} and not semantic_web_required:
+                return "local_only"
+            if attachment_local_only:
+                return "local_only"
+            if has_active_project and project_scope and not (asks_links or freshness):
+                return "local+web"
         return forced_plan
 
-    state = normalize_session_state(session_state)
     explicit_web_mode = mode_norm == "web"
     if is_crypto_mode:
         return "local_only"
@@ -598,27 +1333,38 @@ def _decide_source_plan(
     if force_web or explicit_web_mode:
         return "web_only"
 
-    routing_text = normalize_for_routing(message)
-    asks_links = wants_links_or_sources(routing_text)
-    freshness = _needs_fresh_web_context(message)
-    build_intent = bool((detect_build_intent(message) or {}).get("is_build"))
+    build_intent = bool((detect_build_intent(routing_message) or {}).get("is_build"))
     asks_example = bool(re.search(r"\b(example|sample|ejemplo)\b", routing_text))
-    pasted_code_or_trace = _looks_like_pasted_code_or_trace(message)
+    pasted_code_or_trace = _looks_like_pasted_code_or_trace(routing_message)
+    if attachment_local_only:
+        return "local_only"
     if pasted_code_or_trace and not (asks_links or freshness or explicit_web_mode):
         return "local_only"
     current_focus = any(
         str(state.get(key) or "").strip()
         for key in ("current_file_focus", "current_symbol_focus", "current_artifact_focus")
     )
-    referential_followup = _is_referential_followup(message, has_focus=current_focus)
-    project_scope = _has_explicit_project_scope(message)
-    repo_or_code = project_scope or (referential_followup and is_code_question(message))
+    explicit_directory_focus = _infer_active_project_directory_focus(routing_message, state) if has_active_project else ""
+    project_context_live = bool(
+        current_focus
+        or str(state.get("next_tool") or "").strip()
+        or str(state.get("current_task") or "").strip()
+        or str(state.get("current_subtask") or "").strip()
+        or str(state.get("current_topic") or "").strip()
+    )
+    directory_followup = bool(
+        explicit_directory_focus
+        and project_context_live
+        and len(str(routing_message or "").strip()) <= 120
+    )
+    referential_followup = _is_referential_followup(routing_message, has_focus=current_focus)
+    repo_or_code = project_scope or directory_followup or (referential_followup and is_code_question(routing_message))
     planner_next_tool = str(state.get("next_tool") or "").strip()
     recent_failures = [str(item).strip() for item in (state.get("recent_tool_failures") or []) if str(item).strip()]
     web_failed_recently = any(item.startswith("web_search:") or item.startswith("web_evidence_exhausted:") for item in recent_failures)
     followup_project_clarifier = (
         has_active_project
-        and _looks_like_project_followup_prompt(message)
+        and (_looks_like_project_followup_prompt(routing_message) or directory_followup)
         and (
             planner_next_tool.startswith("project_")
             or planner_next_tool in {"file_search", "project_manifest"}
@@ -635,9 +1381,10 @@ def _decide_source_plan(
         DETERMINISTIC_ROUTER_STRICT
         and has_active_project
         and not project_scope
+        and not directory_followup
         and not referential_followup
         and not pasted_code_or_trace
-        and (asks_links or freshness or is_code_question(message) or build_intent or asks_example or _looks_like_general_question(message))
+        and (asks_links or freshness or is_code_question(routing_message) or build_intent or asks_example or _looks_like_general_question(routing_message))
     ):
         return "local+web" if web_failed_recently else "web_only"
 
@@ -662,8 +1409,8 @@ def _decide_source_plan(
         and (
             asks_links
             or freshness
-            or _looks_like_general_question(message)
-            or is_code_question(message)
+            or _looks_like_general_question(routing_message)
+            or is_code_question(routing_message)
             or build_intent
             or asks_example
         )
@@ -685,6 +1432,7 @@ def _should_prefer_web_route(
     source_plan: str,
     mode_value: str,
     force_web: bool,
+    force_local: bool = False,
     session_state: Dict[str, Any] | None = None,
 ) -> bool:
     """
@@ -695,29 +1443,38 @@ def _should_prefer_web_route(
       be hijacked by active-project manifest/file shortcuts before web is attempted.
     """
     mode_norm = _normalize_mode_value(mode_value)
-    if force_web or mode_norm in {"web", "url"} or source_plan == "web_only":
+    routing_message = strip_attachment_context(message)
+    asks_links_or_fresh = wants_links_or_sources(routing_message) or _needs_fresh_web_context(routing_message)
+    if force_local or _explicit_local_only_request(routing_message):
+        return False
+    if source_plan == "web_only":
+        return True
+    if force_web or mode_norm in {"web", "url"}:
+        if mode_norm == "web" and not asks_links_or_fresh:
+            if _attachment_prefers_local_routing(message) or _has_explicit_project_scope(routing_message):
+                return False
         return True
     if source_plan != "local+web":
         return False
 
     state = normalize_session_state(session_state)
-    if _has_explicit_project_scope(message):
+    if _has_explicit_project_scope(routing_message):
         return False
 
     has_focus = any(
         str(state.get(key) or "").strip()
         for key in ("current_file_focus", "current_symbol_focus", "current_artifact_focus")
     )
-    if _is_referential_followup(message, has_focus=has_focus):
+    if _is_referential_followup(routing_message, has_focus=has_focus):
         return False
-    if _looks_like_pasted_code_or_trace(message):
+    if _looks_like_pasted_code_or_trace(routing_message):
         return False
 
     return bool(
-        wants_links_or_sources(message)
-        or _needs_fresh_web_context(message)
-        or is_code_question(message)
-        or _looks_like_general_question(message)
+        wants_links_or_sources(routing_message)
+        or _needs_fresh_web_context(routing_message)
+        or is_code_question(routing_message)
+        or _looks_like_general_question(routing_message)
     )
 
 
@@ -894,20 +1651,45 @@ def _build_response_context(
         }
     else:
         payload["pending_approval"] = None
+    payload["comp"] = build_comp_snapshot(session_state, plan=plan)
     if active_project_id:
         payload.update(project_payload)
     return payload
 
 
 def _maybe_active_project_response(message: str, lang: str, session_state: Dict[str, Any] | None) -> str | None:
+    routing_message = strip_attachment_context(message)
     manifest = _load_active_project_manifest(session_state)
     if not manifest:
         return None
-    lower = (message or "").lower()
-    explicit_project_scope = _has_explicit_project_scope(message)
+    state = normalize_session_state(session_state)
+    _active_project_id, _project, root, _resolved_manifest = _resolve_active_project_root(session_state)
+    lower = routing_message.lower()
+    explicit_project_scope = _has_explicit_project_scope(routing_message)
     asks_location = any(hint in lower for hint in ("where", "donde", "dónde", "which file", "archivo"))
+    folder_focus = infer_directory_focus(routing_message, manifest) if isinstance(manifest, dict) else ""
+    planner_next_tool = str(state.get("next_tool") or "").strip()
+    project_followup_clarifier = _looks_like_project_followup_prompt(routing_message) and bool(
+        planner_next_tool in {"project_manifest", "project_files", "project_symbols", "project_excerpt", "file_search"}
+        or str(state.get("current_file_focus") or "").strip()
+        or str(state.get("current_symbol_focus") or "").strip()
+        or str(state.get("current_artifact_focus") or "").strip()
+        or str(state.get("current_task") or "").strip()
+        or str(state.get("current_subtask") or "").strip()
+    )
+    directory_followup = bool(
+        folder_focus
+        and len(str(routing_message or "").strip()) <= 120
+        and (
+            planner_next_tool in {"project_manifest", "project_files", "project_symbols", "project_excerpt", "file_search"}
+            or str(state.get("current_task") or "").strip()
+            or str(state.get("current_subtask") or "").strip()
+            or str(state.get("current_topic") or "").strip()
+            or str(state.get("current_file_focus") or "").strip()
+        )
+    )
 
-    asks_project = explicit_project_scope or is_repo_content_question(message) or any(
+    asks_project = explicit_project_scope or is_repo_content_question(routing_message) or any(
         hint in lower
         for hint in (
             "project",
@@ -929,22 +1711,46 @@ def _maybe_active_project_response(message: str, lang: str, session_state: Dict[
             "cada modulo",
             "para que sirve cada parte",
             "para qué sirve cada parte",
+            "folders",
+            "directories",
+            "carpetas",
+            "directorios",
+            "que hay dentro",
+            "qué hay dentro",
+            "what is inside",
+            "what's inside",
         )
     )
+    if project_followup_clarifier or directory_followup:
+        asks_project = True
     if not asks_project:
         if explicit_project_scope and asks_location and any(hint in lower for hint in ("auth", "jwt", "oauth", "login")):
             asks_project = True
-    if is_architecture_question(message):
+    if is_architecture_question(routing_message):
         asks_project = True
     if not asks_project:
         return None
 
     architecture = manifest.get("architecture") if isinstance(manifest.get("architecture"), dict) else {}
 
-    if is_architecture_question(message):
+    if is_architecture_question(routing_message):
+        if root:
+            return summarize_project_architecture_deep(root, manifest, lang=lang)
         if architecture:
-            return summarize_architecture(architecture, lang=lang)
+            return "\n\n".join(
+                part for part in (
+                    summarize_architecture(architecture, lang=lang),
+                    summarize_project_subtree(manifest, lang=lang, limit=30),
+                )
+                if part
+            )
         return summarize_manifest(manifest, lang=lang)
+
+    if folder_focus and (
+        directory_followup
+        or any(hint in lower for hint in ("folder", "folders", "directory", "directories", "carpeta", "carpetas", "directorio", "directorios", "inside", "dentro"))
+    ):
+        return summarize_project_subtree(manifest, prefix=folder_focus, lang=lang, limit=40)
 
     if any(hint in lower for hint in ("entrypoint", "entry point", "main file", "main", "start")):
         entrypoints = ", ".join((manifest.get("entrypoints") or [])[:10]) or "-"
@@ -977,6 +1783,37 @@ def _maybe_active_project_response(message: str, lang: str, session_state: Dict[
             if lang.startswith("es")
             else f"Files likely related to auth: {auth_files}"
         )
+
+    if root and any(
+        hint in lower
+        for hint in (
+            "each part",
+            "every part",
+            "cada parte",
+            "cada módulo",
+            "cada modulo",
+            "architecture",
+            "arquitectura",
+            "totally",
+            "totalmente",
+            "completo",
+            "completely",
+            "full architecture",
+        )
+    ):
+        return summarize_project_architecture_deep(root, manifest, lang=lang)
+
+    if project_followup_clarifier:
+        if root:
+            return summarize_project_architecture_deep(root, manifest, lang=lang)
+        if architecture:
+            return "\n\n".join(
+                part for part in (
+                    summarize_architecture(architecture, lang=lang),
+                    summarize_project_subtree(manifest, lang=lang, limit=30),
+                )
+                if part
+            )
 
     return summarize_manifest(manifest, lang=lang)
 
@@ -1091,6 +1928,126 @@ def _maybe_operations_response(message: str, lang: str) -> Dict[str, Any] | None
     return None
 
 
+def _quick_project_tree_summary(root: Path, *, lang: str, limit: int = 28, max_depth: int = 2) -> str:
+    try:
+        root_resolved = root.resolve()
+    except Exception:
+        return ""
+
+    rows: list[str] = []
+    for current_root, dirnames, filenames in os.walk(root_resolved):
+        try:
+            rel_root = Path(current_root).resolve().relative_to(root_resolved)
+        except Exception:
+            continue
+        depth = 0 if str(rel_root) == "." else len(rel_root.parts)
+        dirnames[:] = [
+            name
+            for name in sorted(dirnames)
+            if name not in {".git", "__pycache__", ".venv", "venv", "node_modules"}
+            and depth < max_depth
+        ]
+        if depth:
+            rel_root_text = str(rel_root).replace("\\", "/")
+            rows.append(f"{rel_root_text}/")
+            if len(rows) >= limit:
+                break
+        if depth >= max_depth:
+            continue
+        for filename in sorted(filenames):
+            rel_path = (rel_root / filename) if depth else Path(filename)
+            rows.append(str(rel_path).replace("\\", "/"))
+            if len(rows) >= limit:
+                break
+        if len(rows) >= limit:
+            break
+
+    if not rows:
+        return ""
+
+    title = "Vista rápida del árbol del proyecto:" if lang.startswith("es") else "Quick project tree:"
+    return "\n".join([title, *[f"- {row}" for row in rows]])
+
+
+def _summarize_project_file_content(file_path: str, content_text: str, *, lang: str) -> str:
+    text = str(content_text or "")
+    compact = text.strip()
+    suffix = Path(file_path).suffix.lower()
+    lower = compact.lower()
+
+    if not compact:
+        return (
+            "No pude leer contenido legible de este archivo local."
+            if lang.startswith("es")
+            else "I could not read any legible content from this local file."
+        )
+
+    if suffix in {".html", ".htm"} or "<!doctype html" in lower or "<html" in lower:
+        return _summarize_html_attachment(compact, lang=lang)
+    if suffix in {".md", ".markdown"} or _ATTACHMENT_MD_HEADING_RE.search(compact):
+        return _summarize_markdown_attachment(compact, lang=lang)
+    if suffix in {".json", ".yaml", ".yml", ".toml", ".ini"}:
+        return _summarize_json_attachment(compact, lang=lang)
+    if suffix == ".csv":
+        return _summarize_csv_attachment(compact, lang=lang)
+    if suffix in {".log", ".out"} or any(token in lower for token in ("traceback", "exception", "error:", "warning:", "failed")):
+        return _summarize_log_attachment(compact, lang=lang)
+    if suffix in {".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rs", ".sh", ".sql"}:
+        return _summarize_code_attachment(compact, lang=lang)
+
+    first_line = ""
+    for raw_line in compact.splitlines():
+        candidate = _compact_attachment_line(raw_line, max_chars=180)
+        if candidate:
+            first_line = candidate
+            break
+    if lang.startswith("es"):
+        return f"Parece un archivo de texto local. La primera linea relevante es: {first_line or 'sin detalle legible'}."
+    return f"This looks like a local text file. The first relevant line is: {first_line or 'no readable detail'}."
+
+
+def _build_project_file_response(
+    file_path: str,
+    content_text: str,
+    *,
+    lang: str,
+    root: Path | None = None,
+    manifest: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    excerpt = "\n".join(str(content_text or "").splitlines()[:60]).strip()
+    if not excerpt:
+        excerpt = "(sin contenido legible)" if lang.startswith("es") else "(no readable content)"
+    header = f"Archivo {file_path}:" if lang.startswith("es") else f"File {file_path}:"
+    summary = _summarize_project_file_content(file_path, content_text, lang=lang)
+    impact_summary = ""
+    stats = manifest.get("stats") if isinstance(manifest, dict) else {}
+    file_count = int(stats.get("files") or 0)
+    if root and isinstance(manifest, dict) and file_count <= 600:
+        try:
+            impact = build_project_impact_report(root, manifest=manifest, q=file_path, limit=4)
+            impact_summary = summarize_project_impact_report(impact, lang=lang, limit=4)
+        except Exception:
+            impact_summary = ""
+    elif root and isinstance(manifest, dict):
+        try:
+            impact_manifest = build_relation_subset_manifest(manifest, max_files=240, include_paths=[file_path])
+            impact = build_project_impact_report(root, manifest=impact_manifest, q=file_path, limit=4)
+            impact_summary = summarize_project_impact_report(impact, lang=lang, limit=4)
+        except Exception:
+            impact_summary = ""
+    excerpt_label = "Extracto:" if lang.startswith("es") else "Excerpt:"
+    parts = [header, summary]
+    if impact_summary:
+        parts.append(impact_summary)
+    parts.extend([excerpt_label, excerpt])
+    return {
+        "response": "\n".join(parts),
+        "tool_kind": "file_excerpt",
+        "used_local": True,
+        "file_focus": file_path,
+    }
+
+
 def _maybe_project_file_response(
     message: str,
     lang: str,
@@ -1099,31 +2056,159 @@ def _maybe_project_file_response(
     preferred_tool: str | None = None,
 ) -> Dict[str, Any] | None:
     active_project_id, _project, root, manifest = _resolve_active_project_root(session_state)
-    if not active_project_id or not root or not manifest:
+    if not active_project_id or not root:
         return None
-    # Local import to avoid pulling FAISS/embeddings at server import time.
-    from app.services.retrieval_service import list_project_symbols
 
     state = normalize_session_state(session_state)
-    lower = (message or "").lower()
+    routing_message = strip_attachment_context(message)
+    lower = (routing_message or "").lower()
     preferred = str(preferred_tool or "").strip()
-    explicit_project_scope = _has_explicit_project_scope(message)
+    explicit_project_scope = _has_explicit_project_scope(routing_message)
     state_file_focus = str(state.get("current_file_focus") or "").strip()
     state_symbol_focus = str(state.get("current_symbol_focus") or "").strip()
-    explicit_file_focus = infer_file_focus(message, manifest) or ""
-    queries = [token for token in ("auth", "jwt", "oauth", "login", "token") if token in lower]
-    explicit_symbol_focus = queries[0] if queries else ""
-    asks_excerpt = any(hint in lower for hint in ("analyze", "inside", "contenido", "content", "show", "read", "open", "explain", "code", "inspect"))
+    state_folder_focus = state_file_focus if _looks_like_directory_focus(state_file_focus) else ""
+    planner_next_tool = str(state.get("next_tool") or preferred or "").strip()
+    explicit_directory_focus = infer_directory_focus(routing_message, manifest) if isinstance(manifest, dict) else ""
+    explicit_file_focus = _infer_contextual_project_file_focus(routing_message, manifest, state)
+    explicit_file_focus = explicit_file_focus or ""
+    explicit_symbol_focus = infer_symbol_focus(routing_message) or ""
+    parent_tree_followup = bool(
+        state_file_focus
+        and not state_folder_focus
+        and _looks_like_project_tree_expansion_followup(routing_message)
+        and (
+            planner_next_tool in {"project_manifest", "project_files", "project_symbols", "project_excerpt", "file_search"}
+            or state_file_focus
+            or state_symbol_focus
+            or str(state.get("current_artifact_focus") or "").strip()
+            or str(state.get("current_task") or "").strip()
+            or str(state.get("current_subtask") or "").strip()
+        )
+    )
+    asks_excerpt = any(
+        hint in lower
+        for hint in (
+            "analyze",
+            "inside",
+            "contenido",
+            "content",
+            "show",
+            "read",
+            "open",
+            "explain",
+            "code",
+            "inspect",
+            "describe",
+            "descripcion",
+            "descripción",
+            "what is this file",
+            "what does",
+            "que hace",
+            "qué hace",
+        )
+    )
     asks_location = any(hint in lower for hint in ("where", "donde", "dónde", "which file"))
-    asks_tree = any(hint in lower for hint in ("what files", "files inside", "inside app", "folder app", "carpeta app", "tree", "estructura", "each file"))
-    asks_manifest = any(hint in lower for hint in ("architecture", "arquitectura", "stack", "entrypoint", "entry point", "dependencies", "dependencias", "configs", "config", "framework"))
-    asks_search = any(hint in lower for hint in ("file", "archivo", "path", "ruta", "search"))
+    asks_tree = any(
+        hint in lower
+        for hint in (
+            "what files",
+            "files inside",
+            "inside app",
+            "folder app",
+            "folder",
+            "folders",
+            "directories",
+            "directory",
+            "carpeta app",
+            "carpeta",
+            "carpetas",
+            "directorios",
+            "tree",
+            "estructura",
+            "each file",
+            "cada archivo",
+            "cada .py",
+            "cada py",
+            "name of each folder",
+            "nombre de cada carpeta",
+        )
+    )
+    asks_manifest = any(
+        hint in lower
+        for hint in (
+            "architecture",
+            "arquitectura",
+            "stack",
+            "entrypoint",
+            "entry point",
+            "dependencies",
+            "dependencias",
+            "configs",
+            "config",
+            "framework",
+            "what does this project do",
+            "what does the project do",
+            "que hace el proyecto",
+            "qué hace el proyecto",
+            "que contiene",
+            "qué contiene",
+            "project overview",
+        )
+    )
+    asks_search = any(hint in lower for hint in ("file", "archivo", "path", "ruta", "search", "folder", "carpeta", "directory", "directorio"))
+    asks_symbol_lookup = bool(
+        explicit_symbol_focus
+        and (
+            asks_location
+            or asks_excerpt
+            or any(hint in lower for hint in ("defined", "implemented", "declared", "used", "handled", "located"))
+        )
+    )
+    project_followup_clarifier = _looks_like_project_followup_prompt(routing_message) and bool(
+        planner_next_tool in {"project_manifest", "project_files", "project_symbols", "project_excerpt", "file_search"}
+        or state_file_focus
+        or state_symbol_focus
+        or str(state.get("current_artifact_focus") or "").strip()
+        or str(state.get("current_task") or "").strip()
+        or str(state.get("current_subtask") or "").strip()
+    )
+    directory_followup = bool(
+        explicit_directory_focus
+        and len(str(routing_message or "").strip()) <= 120
+        and (
+            planner_next_tool in {"project_manifest", "project_files", "project_symbols", "project_excerpt", "file_search"}
+            or state_file_focus
+            or state_symbol_focus
+            or str(state.get("current_task") or "").strip()
+            or str(state.get("current_subtask") or "").strip()
+        )
+    )
+    if project_followup_clarifier and not (asks_tree or asks_manifest or asks_location or asks_symbol_lookup):
+        if parent_tree_followup or state_folder_focus or planner_next_tool == "project_files":
+            asks_tree = True
+        elif state_file_focus or planner_next_tool == "project_excerpt":
+            asks_excerpt = True
+        elif state_symbol_focus or planner_next_tool == "project_symbols":
+            asks_location = True
+            asks_symbol_lookup = True
+        else:
+            asks_manifest = True
+    if parent_tree_followup:
+        asks_tree = True
+    if directory_followup:
+        asks_tree = True
+    if explicit_file_focus and not (asks_tree or asks_manifest or asks_location or asks_symbol_lookup):
+        asks_excerpt = True
     project_intent = bool(
         explicit_project_scope
         or is_repo_content_question(message)
         or is_architecture_question(message)
         or asks_tree
         or asks_manifest
+        or asks_symbol_lookup
+        or project_followup_clarifier
+        or directory_followup
+        or bool(explicit_file_focus)
     )
     referential_followup = bool(
         (state_file_focus or state_symbol_focus)
@@ -1131,17 +2216,65 @@ def _maybe_project_file_response(
             r"\b(this|that|it|those|these|same|again|continue|next|previous|above|here|esto|eso|esta|ese|mismo|continuar)\b",
             lower,
         )
-    )
+    ) or (project_followup_clarifier and bool(state_file_focus or state_symbol_focus)) or parent_tree_followup
     if not (project_intent or referential_followup):
         return None
     allow_stale_focus = bool(project_intent or referential_followup)
-    file_focus = explicit_file_focus or (state_file_focus if allow_stale_focus else "")
+    file_focus = explicit_file_focus or explicit_directory_focus or (
+        _parent_directory_focus(state_file_focus) if parent_tree_followup else (state_file_focus if allow_stale_focus else "")
+    )
+    file_focus_is_dir = _looks_like_directory_focus(file_focus)
     symbol_focus = explicit_symbol_focus or (state_symbol_focus if allow_stale_focus else "")
+    project_status = str((_project or {}).get("status") or "").strip().lower() or "uploaded"
     if preferred in {"project_excerpt", "project_symbols", "file_search"} and not (project_intent or referential_followup):
         preferred = ""
 
+    if not manifest:
+        if file_focus and (preferred == "project_excerpt" or asks_excerpt):
+            try:
+                root_resolved = root.resolve()
+                target = (root / file_focus).resolve()
+                if target != root_resolved and root_resolved not in target.parents:
+                    raise ValueError("path outside project root")
+            except Exception:
+                target = None
+            try:
+                text = target.read_text(encoding="utf-8", errors="ignore") if target else ""
+            except Exception:
+                text = ""
+            if text.strip():
+                return _build_project_file_response(file_focus, text, lang=lang, root=root, manifest=manifest)
+
+        quick_tree = _quick_project_tree_summary(root, lang=lang)
+        status_line = (
+            f"El proyecto activo `{active_project_id}` todavía se está preparando (estado: {project_status})."
+            if lang.startswith("es")
+            else f"Active project `{active_project_id}` is still getting ready (status: {project_status})."
+        )
+        follow_line = (
+            "Puedo responder con el árbol local mientras termina la ingesta."
+            if lang.startswith("es")
+            else "I can answer from the local tree while ingest finishes."
+        )
+        response_parts = [status_line, follow_line]
+        if quick_tree and (preferred == "project_files" or asks_tree or asks_manifest or project_intent):
+            response_parts.append(quick_tree)
+        return {
+            "response": "\n\n".join(part for part in response_parts if part),
+            "tool_kind": "project_status",
+            "used_local": True,
+            "file_focus": file_focus,
+        }
+
+    # Local import to avoid pulling FAISS/embeddings at server import time.
+    from app.services.retrieval_service import list_project_symbols
+
     if preferred == "project_files" or asks_tree:
-        prefix = "app" if "app" in lower else ""
+        prefix = infer_directory_focus(routing_message, manifest) if isinstance(manifest, dict) else ""
+        if not prefix and "app" in lower:
+            prefix = "app"
+        if not prefix and file_focus_is_dir:
+            prefix = file_focus.strip().strip("/")
         return {
             "response": summarize_project_subtree(manifest, prefix=prefix, lang=lang, limit=40),
             "tool_kind": "project_files",
@@ -1158,6 +2291,16 @@ def _maybe_project_file_response(
         if first_path:
             file_focus = first_path
 
+    if file_focus_is_dir and (preferred == "project_excerpt" or preferred == "project_files" or asks_excerpt or asks_tree or referential_followup):
+        prefix = file_focus.strip().strip("/")
+        return {
+            "response": summarize_project_subtree(manifest, prefix=prefix, lang=lang, limit=40),
+            "tool_kind": "project_files",
+            "used_manifest": True,
+            "used_local": True,
+            "file_focus": prefix,
+        }
+
     if file_focus and (preferred == "project_excerpt" or asks_excerpt):
         try:
             root_resolved = root.resolve()
@@ -1170,22 +2313,9 @@ def _maybe_project_file_response(
             text = target.read_text(encoding="utf-8", errors="ignore") if target else ""
         except Exception:
             text = ""
-        excerpt = "\n".join(text.splitlines()[:60]).strip()
-        if not excerpt:
-            excerpt = "(sin contenido legible)" if lang.startswith("es") else "(no readable content)"
-        header = (
-            f"Archivo {file_focus}:"
-            if lang.startswith("es")
-            else f"File {file_focus}:"
-        )
-        return {
-            "response": f"{header}\n{excerpt}",
-            "tool_kind": "file_excerpt",
-            "used_local": True,
-            "file_focus": file_focus,
-        }
+        return _build_project_file_response(file_focus, text, lang=lang, root=root, manifest=manifest)
 
-    if symbol_focus and (preferred == "project_symbols" or asks_location):
+    if symbol_focus and (preferred == "project_symbols" or asks_location or asks_symbol_lookup):
         rows = list_project_symbols(active_project_id, q=symbol_focus or "", limit=8)
         if not rows:
             rows = scan_project_symbols(root, manifest=manifest, q=symbol_focus or "", limit=8)
@@ -1331,22 +2461,103 @@ def _build_turn_plan(
         for item in (state.get("missing_evidence") or [])
         if str(item).strip()
     ]
-    lower = normalize_for_routing(message)
+    routing_message = strip_attachment_context(message)
+    lower = normalize_for_routing(routing_message)
     current_file_focus = str(state.get("current_file_focus") or "").strip()
     current_symbol_focus = str(state.get("current_symbol_focus") or "").strip()
     current_artifact_focus = str(state.get("current_artifact_focus") or "").strip()
-    asks_tree = any(term in lower for term in ("what files", "files inside", "inside app", "folder app", "carpeta app", "tree", "estructura", "each file"))
-    asks_manifest = any(term in lower for term in ("architecture", "arquitectura", "stack", "entrypoint", "dependencies", "dependencias", "configs", "config", "framework"))
-    asks_excerpt = any(term in lower for term in ("show", "read", "open", "inside", "contenido", "content", "explain", "code", "inspect", "analiza", "analyze"))
+    explicit_symbol_focus = infer_symbol_focus(routing_message) or ""
+    symbol_focus = explicit_symbol_focus or current_symbol_focus
+    asks_tree = any(
+        term in lower
+        for term in (
+            "what files",
+            "files inside",
+            "inside app",
+            "folder app",
+            "folder",
+            "folders",
+            "directories",
+            "directory",
+            "carpeta app",
+            "carpeta",
+            "carpetas",
+            "directorios",
+            "tree",
+            "estructura",
+            "each file",
+            "cada archivo",
+            "cada .py",
+            "cada py",
+            "name of each folder",
+            "nombre de cada carpeta",
+        )
+    )
+    asks_manifest = any(
+        term in lower
+        for term in (
+            "architecture",
+            "arquitectura",
+            "stack",
+            "entrypoint",
+            "dependencies",
+            "dependencias",
+            "configs",
+            "config",
+            "framework",
+            "what does this project do",
+            "what does the project do",
+            "que hace el proyecto",
+            "qué hace el proyecto",
+            "que contiene",
+            "qué contiene",
+            "project overview",
+        )
+    )
+    asks_excerpt = any(
+        term in lower
+        for term in (
+            "show",
+            "read",
+            "open",
+            "inside",
+            "contenido",
+            "content",
+            "explain",
+            "code",
+            "inspect",
+            "analiza",
+            "analyze",
+            "describe",
+            "descripcion",
+            "descripción",
+            "what does",
+            "que hace",
+            "qué hace",
+        )
+    )
     asks_location = any(term in lower for term in ("where", "donde", "dónde", "which file", "archivo", "path", "ruta"))
-    explicit_project_scope = _has_explicit_project_scope(message)
+    asks_symbol_lookup = bool(
+        explicit_symbol_focus
+        and (
+            asks_location
+            or asks_excerpt
+            or any(term in lower for term in ("defined", "implemented", "declared", "used", "handled", "located"))
+        )
+    )
+    explicit_project_scope = _has_explicit_project_scope(routing_message)
+    explicit_directory_focus = _infer_active_project_directory_focus(routing_message, state) if has_active_project else ""
+    explicit_file_focus = _infer_contextual_project_file_focus(routing_message, _load_active_project_manifest(state), state) if has_active_project else ""
     project_intent = bool(
         mode_norm == "project"
         or explicit_project_scope
-        or is_repo_content_question(message)
-        or is_architecture_question(message)
+        or is_repo_content_question(routing_message)
+        or is_architecture_question(routing_message)
         or asks_tree
         or asks_manifest
+        or asks_symbol_lookup
+        or bool(explicit_directory_focus)
+        or bool(explicit_file_focus)
     )
     asks_delete_project = has_active_project and (
         any(term in lower for term in ("delete project", "remove project", "borrar proyecto", "eliminar proyecto"))
@@ -1355,15 +2566,46 @@ def _build_turn_plan(
             and any(term in lower for term in ("project", "proyecto", "repo", "zip"))
         )
     )
+    current_folder_focus = current_file_focus if _looks_like_directory_focus(current_file_focus) else ""
+    parent_tree_followup = has_active_project and bool(
+        current_file_focus
+        and not current_folder_focus
+        and _looks_like_project_tree_expansion_followup(routing_message)
+        and (
+            persisted_next_tool in {"project_manifest", "project_files", "project_symbols", "project_excerpt", "file_search"}
+            or current_artifact_focus
+            or current_task
+            or current_subtask
+            or current_symbol_focus
+        )
+    )
+    current_tree_focus = explicit_directory_focus or current_folder_focus or (
+        _parent_directory_focus(current_file_focus) if parent_tree_followup else ""
+    )
+    project_followup_clarifier = has_active_project and _looks_like_project_followup_prompt(routing_message) and bool(
+        persisted_next_tool in {"project_manifest", "project_files", "project_symbols", "project_excerpt", "file_search"}
+        or current_file_focus
+        or current_symbol_focus
+        or current_artifact_focus
+        or current_task
+        or current_subtask
+    )
+    if project_followup_clarifier and not (asks_tree or asks_manifest or asks_location or asks_symbol_lookup):
+        if parent_tree_followup or current_folder_focus or persisted_next_tool == "project_files":
+            asks_tree = True
+    if (explicit_directory_focus or parent_tree_followup) and has_active_project and len(str(routing_message or "").strip()) <= 120:
+        asks_tree = True
+    if explicit_file_focus and has_active_project and len(str(routing_message or "").strip()) <= 120 and not asks_tree:
+        asks_excerpt = True
     followup = (
         bool(current_file_focus or current_symbol_focus or current_artifact_focus)
-        and len((message or "").strip()) <= 96
+        and len((routing_message or "").strip()) <= 96
         and (
             project_intent
             or asks_excerpt
             or bool(re.search(r"\b(this|that|it|those|these|same|again|continue|next|previous|above|here|esto|eso|esta|ese|mismo|continuar)\b", lower))
         )
-    )
+    ) or project_followup_clarifier or parent_tree_followup
     if persisted_next_tool:
         if persisted_next_tool == "web_search" and source_plan in {"web_only", "local+web"}:
             next_tool = "web_search"
@@ -1377,15 +2619,21 @@ def _build_turn_plan(
             next_tool = persisted_next_tool
     local_project_question = has_active_project and source_plan == "local_only" and (
         project_intent
+        or project_followup_clarifier
+        or asks_symbol_lookup
         or any(term in lower for term in ("auth", "login", "backend", "frontend", "file", "files"))
     )
     if local_project_question and next_tool == "web_search":
         next_tool = "project_manifest"
     if has_active_project and project_intent and asks_tree:
         next_tool = "project_files"
-    elif has_active_project and current_file_focus and (project_intent or followup) and (asks_excerpt or followup):
+    elif has_active_project and explicit_file_focus and (project_intent or followup) and (asks_excerpt or followup):
         next_tool = "project_excerpt"
-    elif has_active_project and current_symbol_focus and (project_intent or followup) and (asks_location or asks_excerpt or followup):
+    elif has_active_project and current_tree_focus and (project_intent or followup) and (asks_tree or asks_excerpt or followup):
+        next_tool = "project_files"
+    elif has_active_project and current_file_focus and not parent_tree_followup and (project_intent or followup) and (asks_excerpt or followup):
+        next_tool = "project_excerpt"
+    elif has_active_project and symbol_focus and (project_intent or followup or local_project_question) and (asks_location or asks_excerpt or asks_symbol_lookup or followup):
         next_tool = "project_symbols"
     elif has_active_project and asks_manifest and not next_tool:
         next_tool = "project_manifest"
@@ -1393,10 +2641,10 @@ def _build_turn_plan(
         next_tool = "project_manifest"
     elif has_active_project and mode_norm == "project" and not next_tool:
         next_tool = "project_manifest"
-    if _is_clamav_question(message):
+    if _is_clamav_question(routing_message):
         steps.append("local_av_status")
         tool_candidates.append("clamav_status")
-    if _is_ingest_log_question(message):
+    if _is_ingest_log_question(routing_message):
         steps.append("local_ingest_logs")
         tool_candidates.append("ingest_log")
     if asks_delete_project:
@@ -1408,12 +2656,16 @@ def _build_turn_plan(
         tool_candidates.append("project_manifest")
         if asks_tree:
             tool_candidates.append("project_files")
-        if is_repo_content_question(message) or is_architecture_question(message) or is_code_question(message):
+        if is_repo_content_question(routing_message) or is_architecture_question(routing_message) or is_code_question(routing_message):
             steps.append("project_files_symbols")
             tool_candidates.extend(["project_symbols", "project_excerpt"])
-        elif current_symbol_focus and (asks_location or asks_excerpt or followup):
+        elif explicit_file_focus and (asks_excerpt or followup):
+            tool_candidates.append("project_excerpt")
+        elif symbol_focus and (asks_location or asks_excerpt or asks_symbol_lookup or followup):
             tool_candidates.append("project_symbols")
-        elif current_file_focus and (asks_excerpt or followup):
+        elif current_tree_focus and (asks_tree or asks_excerpt or followup):
+            tool_candidates.append("project_files")
+        elif current_file_focus and not parent_tree_followup and (asks_excerpt or followup):
             tool_candidates.append("project_excerpt")
     if source_plan in {"web_only", "local+web"}:
         steps.append("web_search")
@@ -1471,7 +2723,7 @@ def _build_turn_plan(
 
         args: Dict[str, Any] = {}
         if tool_name == "project_symbols":
-            q = current_symbol_focus
+            q = symbol_focus
             if not q:
                 m = re.search(r"\b(auth|login|jwt|oauth|token|session|db|database)\b", lower)
                 if m:
@@ -1483,9 +2735,11 @@ def _build_turn_plan(
             m = re.search(r"\b(app|src|backend|frontend|auth|login|db|api)\b", lower)
             if m:
                 args["q"] = m.group(1)
+            elif current_tree_focus:
+                args["q"] = current_tree_focus
         elif tool_name == "project_excerpt":
             # Only offer excerpt when we have a concrete file focus.
-            if not current_file_focus:
+            if not current_file_focus or current_folder_focus or parent_tree_followup:
                 continue
             args["path"] = current_file_focus
             args["start"] = 1
@@ -1508,7 +2762,7 @@ def _build_turn_plan(
             break
 
     routing_confidence = _estimate_routing_confidence(
-        message=message,
+        message=routing_message,
         source_plan=source_plan,
         has_active_project=has_active_project,
         explicit_project_scope=explicit_project_scope,
@@ -1583,6 +2837,13 @@ def _looks_like_internal_prompt_leak(text: str) -> bool:
     if len(list(_TRACE_LABEL_PATTERN.finditer(candidate))) >= 3:
         return True
     return False
+
+
+def _looks_like_partial_prompt_fragment(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    return any(all(token in lowered for token in group) for group in _PARTIAL_PROMPT_FRAGMENT_GROUPS)
 
 
 def _strip_inline_prompt_blob(text: str) -> tuple[str, bool]:
@@ -1810,7 +3071,7 @@ async def _sanitize_and_repair_llm_output(
     resp, inline_trace_stripped = _strip_inline_trace_blob(resp)
     resp, stripped = _strip_internal_trace_lines(resp)
     resp, stripped_anywhere = _strip_internal_trace_lines_anywhere(resp)
-    leaked = _looks_like_internal_prompt_leak(resp)
+    leaked = _looks_like_internal_prompt_leak(resp) or _looks_like_partial_prompt_fragment(resp)
     if not leaked and resp:
         return resp
 
@@ -1839,7 +3100,7 @@ async def _sanitize_and_repair_llm_output(
         retry_resp, _ = _strip_inline_trace_blob(retry_resp)
         retry_resp, _ = _strip_internal_trace_lines(retry_resp)
         retry_resp, _ = _strip_internal_trace_lines_anywhere(retry_resp)
-        if retry_resp and not _looks_like_internal_prompt_leak(retry_resp):
+        if retry_resp and not _looks_like_internal_prompt_leak(retry_resp) and not _looks_like_partial_prompt_fragment(retry_resp):
             record_event(conv_id, "llm_leak_repaired")
             return retry_resp
         record_event(conv_id, "llm_leak_fallback", level="warn")
@@ -1882,6 +3143,45 @@ _GEO_NON_GEO_HINTS: tuple[str, ...] = (
     "eth",
 )
 
+_CAPITAL_QUESTION_PREFIXES: tuple[str, ...] = (
+    "what is the capital of ",
+    "what's the capital of ",
+    "whats the capital of ",
+    "capital of ",
+    "what is the capital city of ",
+    "what's the capital city of ",
+    "what is the capital in ",
+    "cuál es la capital de ",
+    "cual es la capital de ",
+    "qué es la capital de ",
+    "que es la capital de ",
+    "capital de ",
+)
+
+_COUNTRY_CAPITALS: Dict[str, Dict[str, str]] = {
+    "argentina": {"en": "Buenos Aires", "es": "Buenos Aires"},
+    "brazil": {"en": "Brasília", "es": "Brasilia"},
+    "brasil": {"en": "Brasília", "es": "Brasilia"},
+    "canada": {"en": "Ottawa", "es": "Ottawa"},
+    "chile": {"en": "Santiago", "es": "Santiago"},
+    "colombia": {"en": "Bogotá", "es": "Bogotá"},
+    "france": {"en": "Paris", "es": "París"},
+    "germany": {"en": "Berlin", "es": "Berlín"},
+    "india": {"en": "New Delhi", "es": "Nueva Delhi"},
+    "italy": {"en": "Rome", "es": "Roma"},
+    "japan": {"en": "Tokyo", "es": "Tokio"},
+    "méxico": {"en": "Mexico City", "es": "Ciudad de México"},
+    "mexico": {"en": "Mexico City", "es": "Ciudad de México"},
+    "peru": {"en": "Lima", "es": "Lima"},
+    "russia": {"en": "Moscow", "es": "Moscú"},
+    "spain": {"en": "Madrid", "es": "Madrid"},
+    "united kingdom": {"en": "London", "es": "Londres"},
+    "uk": {"en": "London", "es": "Londres"},
+    "united states": {"en": "Washington, D.C.", "es": "Washington, D.C."},
+    "usa": {"en": "Washington, D.C.", "es": "Washington, D.C."},
+    "us": {"en": "Washington, D.C.", "es": "Washington, D.C."},
+}
+
 
 def _looks_like_geography_question(message: str) -> bool:
     normalized = normalize_for_routing(message)
@@ -1899,6 +3199,27 @@ def _looks_like_geography_question(message: str) -> bool:
 def _extract_geography_subject(message: str) -> str:
     normalized = normalize_for_routing(message)
     for prefix in _GEO_QUESTION_PREFIXES:
+        if not normalized.startswith(prefix):
+            continue
+        subject = normalized[len(prefix):].strip(" ?.!,:;")
+        return re.sub(r"\s+", " ", subject).strip()
+    return ""
+
+
+def _looks_like_capital_question(message: str) -> bool:
+    normalized = normalize_for_routing(message)
+    if not normalized:
+        return False
+    if _has_explicit_project_scope(message):
+        return False
+    if is_code_question(message) or is_market_question(message):
+        return False
+    return any(normalized.startswith(prefix) for prefix in _CAPITAL_QUESTION_PREFIXES)
+
+
+def _extract_capital_subject(message: str) -> str:
+    normalized = normalize_for_routing(message)
+    for prefix in _CAPITAL_QUESTION_PREFIXES:
         if not normalized.startswith(prefix):
             continue
         subject = normalized[len(prefix):].strip(" ?.!,:;")
@@ -1957,6 +3278,30 @@ def _local_geography_fact(subject: str, lang: str) -> str:
     return ""
 
 
+def _local_capital_fact(subject: str, lang: str) -> str:
+    normalized = normalize_for_routing(subject)
+    if not normalized:
+        return ""
+    if normalized.startswith("the "):
+        normalized = normalized[4:].strip()
+    for key, aliases in (
+        ("united states", ("united states", "usa", "us")),
+        ("united kingdom", ("united kingdom", "uk")),
+        ("mexico", ("mexico", "méxico")),
+        ("brazil", ("brazil", "brasil")),
+    ):
+        if normalized in aliases:
+            normalized = key
+            break
+    capital = _COUNTRY_CAPITALS.get(normalized)
+    if not capital:
+        return ""
+    name = capital["es"] if lang.startswith("es") else capital["en"]
+    if lang.startswith("es"):
+        return f"La capital de {subject.strip()} es {name}."
+    return f"The capital of {subject.strip()} is {name}."
+
+
 def _apply_output_quality_guard(
     *,
     user_message: str,
@@ -1971,13 +3316,13 @@ def _apply_output_quality_guard(
     response = str(response_text or "").strip()
     if not response:
         return response
-    if not _looks_like_geography_question(user_message):
+    if not _looks_like_geography_question(user_message) and not _looks_like_capital_question(user_message):
         return response
     if not _looks_like_code_heavy_answer(response):
         return response
 
-    subject = _extract_geography_subject(user_message)
-    fact = _local_geography_fact(subject, lang)
+    subject = _extract_geography_subject(user_message) or _extract_capital_subject(user_message)
+    fact = _local_geography_fact(subject, lang) or _local_capital_fact(subject, lang)
     meta = dict(web_meta or {})
     web_source = str(meta.get("source") or "").strip().lower()
     web_status = str(meta.get("status") or "").strip().lower()
@@ -2019,6 +3364,178 @@ def _apply_output_quality_guard(
     return fallback
 
 
+def _maybe_local_geography_response(
+    user_message: str,
+    lang: str,
+    *,
+    explicit_web: bool = False,
+    explicit_url: bool = False,
+) -> str:
+    """
+    Fast local answer for simple geography prompts.
+
+    This keeps common `where is X?` questions off the heavier web-search / LLM
+    path unless the user explicitly forces live web with `web:` or `url:`.
+    """
+    if explicit_web or explicit_url:
+        return ""
+    if not _looks_like_geography_question(user_message):
+        return ""
+
+    subject = _extract_geography_subject(user_message)
+    fact = _local_geography_fact(subject, lang)
+    if not fact:
+        return ""
+
+    hint = (
+        "Si quieres fuentes en vivo, usa `web: where is <place>`."
+        if lang.startswith("es")
+        else "If you want live sources, use `web: where is <place>`."
+    )
+    return f"{fact}\n\n{hint}"
+
+
+def _maybe_local_capital_response(
+    user_message: str,
+    lang: str,
+    *,
+    explicit_web: bool = False,
+    explicit_url: bool = False,
+) -> str:
+    """
+    Fast local answer for simple capital questions.
+    """
+    if explicit_web or explicit_url:
+        return ""
+    if not _looks_like_capital_question(user_message):
+        return ""
+
+    subject = _extract_capital_subject(user_message)
+    fact = _local_capital_fact(subject, lang)
+    if not fact:
+        return ""
+
+    hint = (
+        "Si quieres fuentes en vivo, usa `web: what is the capital of <country>`."
+        if lang.startswith("es")
+        else "If you want live sources, use `web: what is the capital of <country>`."
+    )
+    return f"{fact}\n\n{hint}"
+
+
+def _looks_like_programming_help_request(user_message: str) -> bool:
+    normalized = normalize_for_routing(user_message)
+    if not normalized:
+        return False
+    return any(
+        token in normalized
+        for token in (
+            "python",
+            "javascript",
+            "typescript",
+            "java ",
+            " java",
+            "html",
+            "css",
+            "sql",
+            "json",
+            "angular",
+            "react",
+            "vue",
+            "fastapi",
+            "flask",
+            "django",
+            "function",
+            "method",
+            "class",
+            "array",
+            "list",
+            "dict",
+            "dictionary",
+            "loop",
+            "sort",
+            "algorithm",
+            "code",
+            "login",
+            "jwt",
+            "backend",
+            "frontend",
+        )
+    )
+
+
+def _maybe_local_meta_response(
+    user_message: str,
+    lang: str,
+    *,
+    explicit_web: bool = False,
+    explicit_url: bool = False,
+) -> str:
+    if explicit_web or explicit_url:
+        return ""
+
+    normalized = normalize_for_routing(user_message)
+    if not normalized:
+        return ""
+
+    if normalized in {"ok", "okay", "okey", "thanks", "thank you", "ok thanks", "thanks ok", "gracias", "vale", "dale", "cool", "nice"}:
+        return "Listo. Dime qué sigue." if lang.startswith("es") else "OK. Tell me what you want to do next."
+
+    if any(
+        phrase in normalized
+        for phrase in (
+            "access to internet",
+            "internet access",
+            "browse the internet",
+            "browse internet",
+            "browse the web",
+            "browse web",
+            "can you browse",
+            "can u browse",
+            "do you have access",
+            "u have access to internet",
+            "you have access to internet",
+            "tienes acceso a internet",
+            "tienes acceso al internet",
+            "puedes navegar en internet",
+            "puedes navegar por internet",
+        )
+    ):
+        return (
+            "Sí. Puedo usar fuentes web en vivo cuando están disponibles. Si quieres forzar esa ruta, escribe `web:` antes de tu pregunta."
+            if lang.startswith("es")
+            else "Yes. I can use live web sources when they are available. If you want to force that path, start your message with `web:`."
+        )
+
+    if any(
+        phrase in normalized
+        for phrase in (
+            "what can you do",
+            "what u can do",
+            "how can you help",
+            "who are you",
+            "what are you",
+            "what is your name",
+            "what s your name",
+            "whats your name",
+            "how are you",
+            "que puedes hacer",
+            "qué puedes hacer",
+            "quien eres",
+            "quién eres",
+            "como estas",
+            "cómo estás",
+        )
+    ):
+        return (
+            "Soy AEGIS, un asistente técnico. Puedo ayudar con código, análisis de proyectos, archivos, imágenes, búsquedas web cuando están disponibles y herramientas cripto."
+            if lang.startswith("es")
+            else "I am AEGIS, a technical assistant. I can help with code, project analysis, files, images, web lookups when available, and crypto tools."
+        )
+
+    return ""
+
+
 def _finalize_user_response(text: str, *, lang: str) -> str:
     """
     Last-mile output guard before persisting/rendering user-visible text.
@@ -2028,11 +3545,30 @@ def _finalize_user_response(text: str, *, lang: str) -> str:
     cleaned, inline_trace_stripped = _strip_inline_trace_blob(cleaned)
     cleaned, stripped_header = _strip_internal_trace_lines(cleaned)
     cleaned, stripped_anywhere = _strip_internal_trace_lines_anywhere(cleaned)
-    if _looks_like_internal_prompt_leak(cleaned):
+    if _looks_like_internal_prompt_leak(cleaned) or _looks_like_partial_prompt_fragment(cleaned):
         return _safe_leak_fallback(lang)
     if not cleaned and (stripped_header or stripped_anywhere or inline_prompt_stripped or inline_trace_stripped):
         return _safe_leak_fallback(lang)
-    return cleaned
+    return _collapse_repeated_paragraphs(cleaned)
+
+
+def _collapse_repeated_paragraphs(text: str) -> str:
+    """
+    Collapse identical consecutive paragraphs to avoid repeated answer blocks.
+    """
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", str(text or "").strip()) if p.strip()]
+    if not paragraphs:
+        return str(text or "").strip()
+
+    collapsed: list[str] = []
+    last_norm = ""
+    for paragraph in paragraphs:
+        norm = re.sub(r"\s+", " ", paragraph).strip()
+        if norm == last_norm:
+            continue
+        collapsed.append(paragraph)
+        last_norm = norm
+    return "\n\n".join(collapsed).strip() or str(text or "").strip()
 
 
 def _truncate_response(text: str, lang: str = "es") -> str:
@@ -2186,11 +3722,44 @@ def _close_db_session(db: Session | None) -> None:
         logger.exception("Failed to close DB session cleanly.")
 
 
+def _memory_subject_from_request(request: Request) -> str:
+    auth_header = str(request.headers.get("Authorization") or "").strip()
+    api_key_header = str(request.headers.get("X-API-Key") or "").strip()
+    bearer = auth_header
+    if bearer.lower().startswith("bearer "):
+        token = bearer.split(" ", 1)[1].strip()
+        if token:
+            try:
+                payload = _decode_jwt_token(token)
+            except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                sub = str(payload.get("sub") or "").strip().lower()
+                if sub:
+                    return f"sub:{sub}"
+            return "jwt:" + hashlib.sha256(token.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    if api_key_header:
+        return "api:" + hashlib.sha256(api_key_header.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    if auth_header:
+        return "auth:" + hashlib.sha256(auth_header.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return "anonymous"
+
+
+def _current_memory_subject() -> str:
+    return str(_CURRENT_MEMORY_SUBJECT.get() or "").strip()
+
+
+def _current_durable_memory_snippet() -> str:
+    return get_durable_memory_summary(_current_memory_subject())
+
+
 def _ensure_conversation_id(
     raw_conv: str | None,
     db: Session | None,
     crud,
     db_available: bool,
+    *,
+    user_id: str | None = None,
 ) -> str:
     conv_id = str(raw_conv).strip() if raw_conv else None
 
@@ -2206,7 +3775,7 @@ def _ensure_conversation_id(
         return get_or_create_conversation(conv_id)
 
     if conv_id is None:
-        conv_id = str(crud.create_conversation(db, None))
+        conv_id = str(crud.create_conversation(db, user_id))
     return conv_id
 
 
@@ -2347,6 +3916,55 @@ def _extract_crypto_symbol(text: str) -> str | None:
     return None
 
 
+def _extract_crypto_horizon(text: str) -> int | None:
+    raw = str(text or "")
+    patterns = (
+        r"\b(?:h|horizon)\s*[:=]?\s*(\d{1,5})\s*m\b",
+        r"\b(?:next|for the next|for next)\s+(\d{1,5})\s*(?:m|min|mins|minute|minutes)\b",
+        r"\b(?:proximos|pr[oó]ximos|proximo|pr[oó]ximo)\s+(\d{1,5})\s*(?:m|min|mins|minuto|minutos)\b",
+        r"\b(\d{1,5})\s*(?:m|min|mins|minute|minutes|minuto|minutos)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, raw, flags=re.IGNORECASE)
+        if not match:
+            continue
+        try:
+            value = int(match.group(1))
+        except Exception:
+            continue
+        if 1 <= value <= 10080:
+            return value
+    return None
+
+
+def _looks_like_new_crypto_prediction_request(text: str) -> bool:
+    clean = normalize_for_routing(text)
+    if not clean:
+        return False
+    if any(
+        token in clean
+        for token in (
+            "predict",
+            "prediction",
+            "forecast",
+            "signal",
+            "prediccion",
+            "predicción",
+            "senal",
+            "señal",
+            "pronostico",
+            "pronóstico",
+        )
+    ):
+        return True
+    if re.search(r"\b(next|proximos|pr[oó]ximos|proximo|pr[oó]ximo)\b", clean) and re.search(
+        r"\b(\d{1,5})\s*(?:m|min|mins|minute|minutes|minuto|minutos)\b",
+        clean,
+    ):
+        return True
+    return False
+
+
 def _format_crypto_prediction(pred, lang: str) -> str:
     prob = pred.probability_up
     prob_pct = f"{prob*100:.1f}%" if isinstance(prob, (int, float)) else "N/A"
@@ -2358,10 +3976,46 @@ def _format_crypto_prediction(pred, lang: str) -> str:
     return f"Demo prediction for {pred.symbol} ({pred.horizon_minutes}m): current {curr}, predicted {nxt}, prob up {prob_pct}, signal {decision}."
 
 
-def _prediction_stats(symbol: str) -> dict:
+def _format_logged_crypto_prediction(row: Dict[str, Any], lang: str) -> str:
+    symbol = str(row.get("symbol") or "?").upper()
+    horizon = row.get("horizon_minutes") or "?"
+    prob = row.get("probability_up")
+    prob_pct = f"{float(prob) * 100:.1f}%" if isinstance(prob, (int, float)) else "N/A"
+    current = row.get("current_price")
+    predicted = row.get("predicted_price")
+    decision = str(row.get("decision") or "HOLD").upper()
+    if lang.startswith("es"):
+        if predicted is not None:
+            return (
+                f"Predicción reciente para {symbol} ({horizon}m): precio actual {current}, "
+                f"predicción {predicted}, prob. subida {prob_pct}, señal {decision}."
+            )
+        return (
+            f"Predicción reciente para {symbol} ({horizon}m): precio actual {current}, "
+            f"prob. subida {prob_pct}, señal {decision}."
+        )
+    if predicted is not None:
+        return (
+            f"Recent prediction for {symbol} ({horizon}m): current {current}, "
+            f"predicted {predicted}, prob up {prob_pct}, signal {decision}."
+        )
+    return f"Recent prediction for {symbol} ({horizon}m): current {current}, prob up {prob_pct}, signal {decision}."
+
+
+def _latest_crypto_prediction(symbol: str, horizon_minutes: int = 15) -> Dict[str, Any] | None:
+    try:
+        rows = pair_predictions_with_outcomes(limit=5, symbol=str(symbol or "").upper(), horizon_minutes=int(horizon_minutes or 15))
+    except Exception:
+        return None
+    if not rows:
+        return None
+    return rows[0]
+
+
+def _prediction_stats(symbol: str, horizon_minutes: int | None = None) -> dict:
     from app.api.crypto import prediction_stats as _prediction_stats_impl
 
-    return _prediction_stats_impl(symbol=symbol)  # type: ignore[call-arg]
+    return _prediction_stats_impl(symbol=symbol, horizon_minutes=horizon_minutes)  # type: ignore[call-arg]
 
 
 def _spot_price(symbol: str) -> float | None:
@@ -2374,8 +4028,9 @@ def _build_crypto_context(symbol: str, horizon_minutes: int = 15, recent: int = 
     """Build a short context string from recent predictions/outcomes and P&L."""
     try:
         sym = symbol.upper()
-        preds = pair_predictions_with_outcomes(limit=recent, symbol=sym)
-        stats = _prediction_stats(symbol=sym)
+        horizon = int(horizon_minutes or 15)
+        preds = pair_predictions_with_outcomes(limit=recent, symbol=sym, horizon_minutes=horizon)
+        stats = _prediction_stats(symbol=sym, horizon_minutes=horizon)
         pnl = compute_pnl(list_trades(limit=200, symbol=sym), _spot_price)
     except Exception:
         return ""
@@ -2398,12 +4053,12 @@ def _build_crypto_context(symbol: str, horizon_minutes: int = 15, recent: int = 
     return " | ".join(lines)
 
 
-def _maybe_crypto_prediction(symbol: str):
+def _maybe_crypto_prediction(symbol: str, *, horizon_minutes: int = 15, save: bool = False):
     """Call the internal crypto predictor without saving logs."""
     try:
         from app.api.crypto import PredictRequest, predict  # local import to avoid cycles
 
-        return predict(PredictRequest(symbol=symbol, save=False))
+        return predict(PredictRequest(symbol=symbol, horizon_minutes=int(horizon_minutes or 15), save=save))
     except Exception:
         logger.debug("Crypto prediction failed for %s", symbol, exc_info=True)
         return None
@@ -2422,6 +4077,10 @@ def _append_db_message(
         crud.append_message(db, conv_id, role, content)
         return True
     except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            logger.debug("DB rollback failed after append error for conv_id=%s", conv_id, exc_info=True)
         logger.exception("DB append failed for role=%s conv_id=%s", role, conv_id)
         return False
 
@@ -2515,6 +4174,7 @@ def _record_turn_state(
     mode: str = "",
     active_project_id: str | None = None,
 ) -> Dict[str, Any]:
+    subject = _current_memory_subject()
     if db_available and db is not None and crud is not None:
         try:
             current = crud.get_conversation_state(db, conv_id)
@@ -2529,6 +4189,15 @@ def _record_turn_state(
             )
             crud.set_conversation_state(db, conv_id, next_state)
             set_conversation_state(conv_id, next_state)
+            if subject:
+                update_durable_memory(
+                    subject,
+                    user_msg,
+                    assistant_msg,
+                    session_state=next_state,
+                    mode=mode,
+                    active_project_id=active_project_id,
+                )
             return next_state
         except Exception:
             logger.exception("Failed to update DB conversation state; falling back to memory.")
@@ -2541,7 +4210,17 @@ def _record_turn_state(
         mode=mode,
         active_project_id=active_project_id,
     )
-    return get_conversation_state(conv_id)
+    next_state = get_conversation_state(conv_id)
+    if subject:
+        update_durable_memory(
+            subject,
+            user_msg,
+            assistant_msg,
+            session_state=next_state,
+            mode=mode,
+            active_project_id=active_project_id,
+        )
+    return next_state
 
 
 def _finalize_response_turn(
@@ -2640,7 +4319,10 @@ def _maybe_missing_evidence_response(
     missing = [str(item).strip() for item in (state.get("missing_evidence") or []) if str(item).strip()]
     if not missing or source_plan != "local_only":
         return None
-    lower = str(message or "").lower()
+    if _extract_attachment_context_payload(message):
+        return None
+    routing_message = strip_attachment_context(message)
+    lower = str(routing_message or "").lower()
     next_tool = str(state.get("next_tool") or "").strip()
     has_focus = bool(
         str(state.get("current_file_focus") or "").strip()
@@ -2664,14 +4346,14 @@ def _maybe_missing_evidence_response(
         )
     )
     project_scoped = bool(
-        _has_explicit_project_scope(message)
-        or _looks_like_project_followup_prompt(message)
+        _has_explicit_project_scope(routing_message)
+        or _looks_like_project_followup_prompt(routing_message)
         or (
             str(state.get("active_project_id") or "").strip()
-            and _is_referential_followup(message, has_focus=has_focus)
+            and _is_referential_followup(routing_message, has_focus=has_focus)
         )
         or (
-            is_code_question(message)
+            is_code_question(routing_message)
             and location_or_impl_hint
         )
         or next_tool in {"project_manifest", "project_files", "project_symbols", "project_excerpt", "file_search"}
@@ -2731,11 +4413,14 @@ def _maybe_routing_clarification_response(
     state = normalize_session_state(session_state)
     if not str(state.get("active_project_id") or "").strip():
         return None
-    if _has_explicit_project_scope(message):
+    if _extract_attachment_context_payload(message):
+        return None
+    routing_message = strip_attachment_context(message)
+    if _has_explicit_project_scope(routing_message):
         return None
     # Clear build requests should proceed directly; forcing project/web prefixes
     # here creates avoidable friction for common "build me X" prompts.
-    build_intent = detect_build_intent(message)
+    build_intent = detect_build_intent(routing_message)
     if bool((build_intent or {}).get("is_build")):
         return None
 
@@ -2744,14 +4429,14 @@ def _maybe_routing_clarification_response(
         or str(state.get("current_symbol_focus") or "").strip()
         or str(state.get("current_artifact_focus") or "").strip()
     )
-    referential = _is_referential_followup(message, has_focus=current_focus)
+    referential = _is_referential_followup(routing_message, has_focus=current_focus)
     if referential:
         return None
-    if _looks_like_project_followup_prompt(message):
+    if _looks_like_project_followup_prompt(routing_message):
         return None
     # If the request is clearly project-intent and can be answered from the
     # active manifest, do not force `project:`/`web:` clarification.
-    if _maybe_active_project_response(message, lang, state):
+    if _maybe_active_project_response(routing_message, lang, state):
         return None
     plan_obj = dict(plan or {})
     plan_confidence = float(plan_obj.get("routing_confidence") or 0.0)
@@ -2765,7 +4450,7 @@ def _maybe_routing_clarification_response(
     )
 
     if not plan_signaled_low_confidence and not (
-        is_code_question(message) or _looks_like_general_question(message) or wants_links_or_sources(message)
+        is_code_question(routing_message) or _looks_like_general_question(routing_message) or wants_links_or_sources(routing_message)
     ):
         return None
 
@@ -2851,6 +4536,10 @@ def _maybe_web_evidence_exhausted_response(
     if raw_sources:
         return None
 
+    attachment_response = _maybe_attachment_context_response(message, lang)
+    if attachment_response:
+        return attachment_response
+
     meta = dict(web_meta or {})
     web_status = str(meta.get("status") or "").strip()
     web_source = str(meta.get("source") or "").strip()
@@ -2863,10 +4552,23 @@ def _maybe_web_evidence_exhausted_response(
     state = normalize_session_state(session_state)
     next_tool = str(state.get("next_tool") or "").strip() or "web_search"
     query_hint = str(web_query or state.get("last_web_query") or "").strip()[:220]
+    routing_message = strip_attachment_context(message)
+    semantic = classify_conversational_act(routing_message, session_state=state, mode="")
+    semantic_act = str(semantic.get("act") or "").strip()
+    build_intent = bool((detect_build_intent(routing_message) or {}).get("is_build"))
+    freshness_required = _needs_fresh_web_context(routing_message) or wants_links_or_sources(routing_message)
+    local_fallback_candidate = bool(
+        semantic_act in {"greeting", "help", "acknowledgement", "question_about_run", "classification"}
+        or build_intent
+        or is_code_question(routing_message)
+        or _looks_like_programming_help_request(routing_message)
+    )
     geo_subject = _extract_geography_subject(message)
     geo_fact = _local_geography_fact(geo_subject, lang) if geo_subject else ""
 
     if source_plan == "web_only":
+        if local_fallback_candidate and not freshness_required:
+            return None
         if geo_fact:
             response = (
                 f"{geo_fact}\n\n"
@@ -2891,16 +4593,12 @@ def _maybe_web_evidence_exhausted_response(
 
     if has_active_project:
         response = (
-            "No pude obtener evidencia web fresca suficiente. "
-            f"Siguiente paso sugerido: {next_tool}. "
-            "Puedo seguir con el contexto local del proyecto si indicas un archivo, símbolo o parte concreta."
+            "La web no está disponible ahora mismo. "
+            "Puedo seguir con el proyecto activo usando contexto local si indicas un archivo, símbolo o carpeta concreta."
             if lang.startswith("es")
-            else "I could not obtain enough fresh web evidence. "
-                 f"Suggested next step: {next_tool}. "
-                 "I can continue from local project context if you point me to a file, symbol, or concrete part of the project."
+            else "Web is unavailable right now. "
+                 "I can continue from the active local project context if you point me to a file, symbol, or folder."
         )
-        if query_hint:
-            response += f" Query: {query_hint}."
         return {"response": response, "tool_kind": "web_evidence_exhausted", "used_local": True}
 
     if geo_fact:
@@ -2914,11 +4612,11 @@ def _maybe_web_evidence_exhausted_response(
         return {"response": response, "tool_kind": "web_evidence_exhausted", "used_local": True}
 
     response = (
-        "No pude obtener evidencia web suficiente; continuaré con contexto local únicamente. "
+        "La web no está disponible ahora mismo; continuaré con contexto local únicamente. "
         f"Siguiente paso sugerido: {next_tool}. "
-        "Si necesitas fuentes en vivo, intenta de nuevo con `web:` cuando el acceso a internet esté disponible."
+        "Si necesitas fuentes en vivo, vuelve a intentar con `web:` cuando el acceso esté disponible."
         if lang.startswith("es")
-        else "I could not obtain enough web evidence, so I will continue with local-only context. "
+        else "Web is unavailable right now, so I will continue with local-only context. "
              f"Suggested next step: {next_tool}. "
              "If you need live sources, retry with `web:` when internet access is available."
     )
@@ -2937,7 +4635,7 @@ def _normalize_mode_value(raw_mode: str | None) -> str:
     if not value:
         return "chat"
     mode = value.split()[0]
-    if mode == "general":
+    if mode in {"general", "local"}:
         return "chat"
     if mode in _VALID_MODES:
         return mode
@@ -2950,6 +4648,7 @@ def _validate_turn_inputs(
     mode_value: str,
     lang: str,
     active_project_id: str | None,
+    crypto_symbol: str | None = None,
 ) -> Dict[str, Any] | None:
     """
     Validate mode/tool preconditions before routing/LLM synthesis.
@@ -3004,7 +4703,7 @@ def _validate_turn_inputs(
                 "vender",
             )
         )
-        if asks_crypto_detail and not _extract_crypto_symbol(message):
+        if asks_crypto_detail and not (_extract_crypto_symbol(message) or str(crypto_symbol or "").strip()):
             response = (
                 "Modo cripto requiere símbolo. Usa formato Binance como `BTCUSDT` (también `btc`, `eth`, `sol`). "
                 "Quotes permitidos: USDT, USDC, BUSD, FDUSD, TUSD, BTC, ETH."
@@ -3631,8 +5330,10 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
     - Fails closed with safe clarifications when routing evidence is insufficient.
     """
     db, crud, db_available = _open_db_session()
+    memory_subject = _memory_subject_from_request(request)
+    memory_token = _CURRENT_MEMORY_SUBJECT.set(memory_subject)
     try:
-        conv_id = _ensure_conversation_id(getattr(body, "conversation_id", None), db, crud, db_available)
+        conv_id = _ensure_conversation_id(getattr(body, "conversation_id", None), db, crud, db_available, user_id=memory_subject)
         lang = _normalize_lang(getattr(body, "lang", None))
 
         new_user_message = normalize_user_input(body.message or "")
@@ -3661,6 +5362,8 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
                 status="error",
             )
             return ChatResponse(response=response_text, conversation_id=conv_id, timestamp=_utcnow_naive(), context=context)
+
+        routing_message = _strip_attachment_context(new_user_message) or new_user_message
 
         trace_id = getattr(request.state, "trace_id", None)
         record_event(
@@ -3704,7 +5407,27 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
                 )
                 active_project_id = None
 
-        quick_time = maybe_answer_time_question(new_user_message, lang=lang)
+        prefixed_mode, prefixed_payload = split_mode_prefix(new_user_message)
+        mode_value_raw = str(getattr(body, "mode", "") or "").strip().lower()
+        mode_value = _normalize_mode_value(prefixed_mode or mode_value_raw)
+
+        ui_web_mode = bool(getattr(body, "use_web", False) or getattr(body, "web", False) or mode_value == "web")
+        is_crypto_mode = mode_value == "crypto"
+        is_web_mode = mode_value == "web"
+        is_url_mode = mode_value == "url"
+        if is_crypto_mode:
+            active_project_id = None
+
+        force_web_prefix = prefixed_mode == "web"
+        force_local_prefix = prefixed_mode == "local"
+        force_url_prefix = prefixed_mode == "url"
+
+        user_msg_for_llm = prefixed_payload if prefixed_mode else new_user_message
+        routing_message = _strip_attachment_context(user_msg_for_llm) or user_msg_for_llm
+        force_local = force_local_prefix or _explicit_local_only_request(routing_message)
+        force_web = (ui_web_mode or force_web_prefix) and not force_local and not is_crypto_mode and not is_url_mode
+
+        quick_time = maybe_answer_time_question(routing_message, lang=lang)
         if quick_time:
             resp = quick_time
             try:
@@ -3748,7 +5471,166 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
                 context=context,
             )
 
-        upload_summary = _maybe_local_upload_summary_response(new_user_message, lang)
+        geo_response = _maybe_local_geography_response(
+            routing_message,
+            lang,
+            explicit_web=force_web_prefix,
+            explicit_url=force_url_prefix,
+        )
+        if geo_response:
+            resp = _finalize_user_response(geo_response, lang=lang)
+            resp = _truncate_response(resp, lang=lang)
+            try:
+                _append_db_message(db, crud, conv_id, "assistant", resp)
+                conversation_state = _record_turn_state(
+                    db,
+                    crud,
+                    conv_id,
+                    db_available,
+                    user_msg=new_user_message,
+                    assistant_msg=resp,
+                    mode="chat",
+                    active_project_id=active_project_id,
+                )
+                record_event(conv_id, "geo_response", data={"response": resp, "explicit_web": False})
+            except Exception:
+                logger.exception("Failed to store geography response")
+                record_event(conv_id, "geo_response_store_failed", level="warn")
+            context = _build_response_context(
+                source_plan="local_only",
+                active_project_id=active_project_id,
+                lang=lang,
+                session_state=conversation_state,
+                used_local=bool(active_project_id),
+                effective_tool="geo_fact",
+                effective_tool_status="ok",
+                effective_tool_output=resp,
+            )
+            _finalize_response_turn(
+                conv_id,
+                user_message=new_user_message,
+                assistant_message=resp,
+                mode="chat",
+                source_plan="local_only",
+                active_project_id=active_project_id,
+                response_context=context,
+                item_kind="tool_result",
+                item_payload={"tool": "geo_fact", "response": resp},
+            )
+            return ChatResponse(
+                response=resp,
+                conversation_id=conv_id,
+                timestamp=_utcnow_naive(),
+                context=context,
+            )
+
+        capital_response = _maybe_local_capital_response(
+            routing_message,
+            lang,
+            explicit_web=force_web_prefix,
+            explicit_url=force_url_prefix,
+        )
+        if capital_response:
+            resp = _finalize_user_response(capital_response, lang=lang)
+            resp = _truncate_response(resp, lang=lang)
+            try:
+                _append_db_message(db, crud, conv_id, "assistant", resp)
+                conversation_state = _record_turn_state(
+                    db,
+                    crud,
+                    conv_id,
+                    db_available,
+                    user_msg=new_user_message,
+                    assistant_msg=resp,
+                    mode="chat",
+                    active_project_id=active_project_id,
+                )
+                record_event(conv_id, "capital_response", data={"response": resp, "explicit_web": False})
+            except Exception:
+                logger.exception("Failed to store capital response")
+                record_event(conv_id, "capital_response_store_failed", level="warn")
+            context = _build_response_context(
+                source_plan="local_only",
+                active_project_id=active_project_id,
+                lang=lang,
+                session_state=conversation_state,
+                used_local=bool(active_project_id),
+                effective_tool="capital_fact",
+                effective_tool_status="ok",
+                effective_tool_output=resp,
+            )
+            _finalize_response_turn(
+                conv_id,
+                user_message=new_user_message,
+                assistant_message=resp,
+                mode="chat",
+                source_plan="local_only",
+                active_project_id=active_project_id,
+                response_context=context,
+                item_kind="tool_result",
+                item_payload={"tool": "capital_fact", "response": resp},
+            )
+            return ChatResponse(
+                response=resp,
+                conversation_id=conv_id,
+                timestamp=_utcnow_naive(),
+                context=context,
+            )
+
+        meta_response = _maybe_local_meta_response(
+            routing_message,
+            lang,
+            explicit_web=force_web_prefix,
+            explicit_url=force_url_prefix,
+        )
+        if meta_response:
+            resp = _finalize_user_response(meta_response, lang=lang)
+            resp = _truncate_response(resp, lang=lang)
+            try:
+                _append_db_message(db, crud, conv_id, "assistant", resp)
+                conversation_state = _record_turn_state(
+                    db,
+                    crud,
+                    conv_id,
+                    db_available,
+                    user_msg=new_user_message,
+                    assistant_msg=resp,
+                    mode="chat",
+                    active_project_id=active_project_id,
+                )
+                record_event(conv_id, "meta_response", data={"response": resp, "explicit_web": False})
+            except Exception:
+                logger.exception("Failed to store meta response")
+                record_event(conv_id, "meta_response_store_failed", level="warn")
+            context = _build_response_context(
+                source_plan="local_only",
+                active_project_id=active_project_id,
+                lang=lang,
+                session_state=conversation_state,
+                used_local=bool(active_project_id),
+                effective_tool="meta_fact",
+                effective_tool_status="ok",
+                effective_tool_output=resp,
+            )
+            _finalize_response_turn(
+                conv_id,
+                user_message=new_user_message,
+                assistant_message=resp,
+                mode="chat",
+                source_plan="local_only",
+                active_project_id=active_project_id,
+                response_context=context,
+                item_kind="tool_result",
+                item_payload={"tool": "meta_fact", "response": resp},
+            )
+            return ChatResponse(
+                response=resp,
+                conversation_id=conv_id,
+                timestamp=_utcnow_naive(),
+                context=context,
+            )
+
+        upload_summary = _maybe_local_upload_summary_response(routing_message, lang)
         if upload_summary:
             try:
                 _append_db_message(db, crud, conv_id, "assistant", upload_summary)
@@ -3796,26 +5678,12 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
         except RuntimeError:
             loop = asyncio.get_event_loop()
 
-        prefixed_mode, prefixed_payload = split_mode_prefix(new_user_message)
-        mode_value_raw = str(getattr(body, "mode", "") or "").strip().lower()
-        mode_value = _normalize_mode_value(prefixed_mode or mode_value_raw)
-
-        ui_web_mode = bool(getattr(body, "use_web", False) or getattr(body, "web", False) or mode_value == "web")
-        is_crypto_mode = mode_value == "crypto"
-        is_web_mode = mode_value == "web"
-        is_url_mode = mode_value == "url"
-
-        force_web_prefix = prefixed_mode == "web"
-        force_url_prefix = prefixed_mode == "url"
-
-        force_web = (ui_web_mode or force_web_prefix) and not is_crypto_mode and not is_url_mode
-        user_msg_for_llm = prefixed_payload if prefixed_mode else new_user_message
-
         validation_payload = _validate_turn_inputs(
             message=user_msg_for_llm or new_user_message,
             mode_value=mode_value,
             lang=lang,
             active_project_id=active_project_id,
+            crypto_symbol=_extract_crypto_symbol(user_msg_for_llm or new_user_message),
         )
         if validation_payload:
             response_text = str(validation_payload.get("response") or "")
@@ -3871,9 +5739,10 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
 
         web_query = _prepare_web_query(user_msg_for_llm, session_state=conversation_state)
         source_plan = _decide_source_plan(
-            new_user_message,
+            routing_message,
             mode_value=mode_value,
             force_web=force_web,
+            force_local=force_local,
             is_crypto_mode=is_crypto_mode,
             has_active_project=bool(active_project_id),
             session_state=conversation_state,
@@ -3886,7 +5755,7 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
             db_available,
             update_session_state(
                 conversation_state,
-                new_user_message,
+                routing_message,
                 "",
                 web_query=planned_web_query,
                 mode=mode_value or "chat",
@@ -3899,12 +5768,13 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
             data={
                 "mode": mode_value or "general",
                 "force_web": force_web,
+                "force_local": force_local,
                 "web_query": web_query,
                 "source_plan": source_plan,
             },
         )
         plan = _build_turn_plan(
-            message=new_user_message,
+            message=routing_message,
             mode_value=mode_value,
             source_plan=source_plan,
             has_active_project=bool(active_project_id),
@@ -3966,15 +5836,80 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
             )
 
         prefer_web_route = _should_prefer_web_route(
-            new_user_message,
+            routing_message,
             source_plan=source_plan,
             mode_value=mode_value or "chat",
             force_web=force_web,
+            force_local=force_local,
             session_state=conversation_state,
         )
 
+        attachment_tool_response = _maybe_attachment_context_response(new_user_message, lang)
+        if attachment_tool_response:
+            response_text = str(attachment_tool_response.get("response") or "")
+            append_turn_item(
+                conv_id,
+                turn_id,
+                kind="tool_call",
+                payload={"tool": attachment_tool_response.get("tool_kind")},
+            )
+            append_turn_item(
+                conv_id,
+                turn_id,
+                kind="tool_result",
+                payload={"tool": attachment_tool_response.get("tool_kind"), "response": response_text},
+            )
+            _append_db_message(db, crud, conv_id, "assistant", response_text)
+            conversation_state = _record_turn_state(
+                db,
+                crud,
+                conv_id,
+                db_available,
+                user_msg=new_user_message,
+                assistant_msg=response_text,
+                mode="chat",
+                active_project_id=active_project_id,
+            )
+            conversation_state = _replan_conversation_state(
+                db,
+                crud,
+                conv_id,
+                db_available,
+                conversation_state,
+                tool_name=str(attachment_tool_response.get("tool_kind") or "attachment_context"),
+                success=True,
+                mode=mode_value or "chat",
+                response_emitted=True,
+            )
+            _append_replan_turn_item(
+                conv_id,
+                turn_id,
+                reason=str(attachment_tool_response.get("tool_kind") or "attachment_context"),
+                state=conversation_state,
+            )
+            record_event(conv_id, "response_completed", data={"kind": "attachment_context"})
+            context = _build_response_context(
+                source_plan="local_only",
+                active_project_id=active_project_id,
+                lang=lang,
+                session_state=conversation_state,
+                used_local=True,
+                effective_tool=str(attachment_tool_response.get("tool_kind") or "attachment_context"),
+                effective_tool_status="ok",
+                effective_tool_output=response_text,
+                web_query=planned_web_query,
+                plan=plan,
+            )
+            finish_turn(conv_id, turn_id, assistant_message=response_text, response_context=context)
+            return ChatResponse(
+                response=response_text,
+                conversation_id=conv_id,
+                timestamp=_utcnow_naive(),
+                context=context,
+            )
+
         missing_evidence_response = None if prefer_web_route else _maybe_missing_evidence_response(
-            new_user_message,
+            routing_message,
             lang,
             conversation_state,
             source_plan=source_plan,
@@ -4033,7 +5968,7 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
             )
 
         routing_clarification = _maybe_routing_clarification_response(
-            new_user_message,
+            routing_message,
             lang,
             conversation_state,
             source_plan=source_plan,
@@ -4098,7 +6033,7 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
                 context=context,
             )
 
-        tool_response = _maybe_operations_response(new_user_message, lang)
+        tool_response = _maybe_operations_response(routing_message, lang)
         if tool_response:
             append_turn_item(
                 conv_id,
@@ -4158,7 +6093,7 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
             )
 
         project_tool_response = None if (source_plan == "web_only" or prefer_web_route) else _maybe_project_file_response(
-            new_user_message,
+            routing_message,
             lang,
             conversation_state,
             preferred_tool=str(plan.get("next_tool") or "").strip() or None,
@@ -4248,7 +6183,7 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
                 context=context,
             )
 
-        project_local_response = None if (source_plan == "web_only" or prefer_web_route) else _maybe_active_project_response(new_user_message, lang, conversation_state)
+        project_local_response = None if (source_plan == "web_only" or prefer_web_route) else _maybe_active_project_response(routing_message, lang, conversation_state)
         if project_local_response:
             try:
                 append_turn_item(
@@ -4646,21 +6581,9 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
                 context=context,
             )
 
-        active_project_context = _active_project_context_text(conversation_state, lang)
-        messages_for_llm = build_messages(
-            conv_id,
-            user_msg_for_llm,
-            web_context,
-            max_total_chars=MAX_PROMPT_CHARS,
-            history_messages=history_override,
-            summary_override=summary_override,
-            session_state=conversation_state,
-            project_context=active_project_context,
-        )
-
-        is_code = is_code_question(new_user_message)
-        is_market = is_market_question(new_user_message)
-        build_intent = detect_build_intent(new_user_message)
+        is_code = is_code_question(routing_message)
+        is_market = is_market_question(routing_message)
+        build_intent = detect_build_intent(routing_message)
 
         mode = "general"
         if is_code:
@@ -4670,14 +6593,43 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
         if mode_value in {"chat", "code", "crypto", "web", "url"}:
             mode = "web" if mode_value in {"web", "url"} else mode_value
 
+        active_project_context = "" if mode == "crypto" else _active_project_context_text(conversation_state, lang)
+        messages_for_llm = build_messages(
+            conv_id,
+            user_msg_for_llm,
+            web_context,
+            max_total_chars=MAX_PROMPT_CHARS,
+            history_messages=history_override,
+            summary_override=summary_override,
+            session_state=conversation_state,
+            project_context=active_project_context,
+            durable_memory_snippet=_current_durable_memory_snippet(),
+        )
+        attachment_llm_guidance = _build_attachment_llm_guidance(new_user_message, lang)
+        if attachment_llm_guidance:
+            insert_at = max(len(messages_for_llm) - 1, 1)
+            messages_for_llm.insert(insert_at, {"role": "system", "content": attachment_llm_guidance})
+
         crypto_summary = ""
         if mode == "crypto":
             sym = _extract_crypto_symbol(user_msg_for_llm)
+            horizon = _extract_crypto_horizon(user_msg_for_llm) or 15
             if sym:
-                pred = _maybe_crypto_prediction(sym)
-                context_line = _build_crypto_context(sym)
+                wants_new_prediction = _looks_like_new_crypto_prediction_request(user_msg_for_llm)
+                recent_pred = None if wants_new_prediction else _latest_crypto_prediction(sym, horizon)
+                pred = None
+                if wants_new_prediction or recent_pred is None:
+                    pred = _maybe_crypto_prediction(
+                        sym,
+                        horizon_minutes=horizon,
+                        save=(wants_new_prediction or recent_pred is None),
+                    )
+                context_line = _build_crypto_context(sym, horizon_minutes=horizon)
                 if pred:
                     crypto_summary = _format_crypto_prediction(pred, lang)
+                elif recent_pred:
+                    crypto_summary = _format_logged_crypto_prediction(recent_pred, lang)
+                if crypto_summary:
                     ctx = "Crypto prediction context: " + crypto_summary
                     if context_line:
                         ctx += " | " + context_line
@@ -4687,8 +6639,10 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
                         "crypto_prediction",
                         data={
                             "symbol": sym,
-                            "decision": getattr(pred, "decision", None),
-                            "probability_up": getattr(pred, "probability_up", None),
+                            "horizon_minutes": horizon,
+                            "decision": getattr(pred, "decision", None) if pred else recent_pred.get("decision") if recent_pred else None,
+                            "probability_up": getattr(pred, "probability_up", None) if pred else recent_pred.get("probability_up") if recent_pred else None,
+                            "source": "fresh" if pred else "history",
                         },
                     )
 
@@ -4701,7 +6655,7 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
             resp = clean_model_output(resp_raw or "(empty response)")
             should_retry_overrefusal = (
                 (bool(build_intent.get("is_build")) or bool(is_code))
-                and not is_obviously_unsafe_request(new_user_message)
+                and not is_obviously_unsafe_request(routing_message)
                 and looks_like_overrefusal(resp)
             )
             if should_retry_overrefusal:
@@ -4725,7 +6679,7 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
 
             should_retry_low_value = (
                 (bool(build_intent.get("is_build")) or bool(is_code))
-                and not is_obviously_unsafe_request(new_user_message)
+                and not is_obviously_unsafe_request(routing_message)
                 and looks_like_low_value_response(resp)
             )
             if should_retry_low_value:
@@ -4761,10 +6715,10 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
             if (
                 _is_internal_instruction_fallback(resp)
                 and (bool(build_intent.get("is_build")) or bool(is_code))
-                and not is_obviously_unsafe_request(new_user_message)
+                and not is_obviously_unsafe_request(routing_message)
             ):
                 deterministic_code = _safe_build_code_fallback(
-                    user_message=new_user_message,
+                    user_message=routing_message,
                     lang=lang,
                     build_intent=build_intent,
                 )
@@ -4773,7 +6727,7 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
                     record_event(conv_id, "llm_build_fallback_used", level="warn")
                     resp = deterministic_code
             resp = _apply_output_quality_guard(
-                user_message=new_user_message,
+                user_message=routing_message,
                 response_text=resp,
                 lang=lang,
                 source_plan=source_plan,
@@ -4848,6 +6802,7 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
         )
 
     finally:
+        _CURRENT_MEMORY_SUBJECT.reset(memory_token)
         _close_db_session(db)
 
 
@@ -5047,6 +7002,8 @@ async def agent_step(conversation_id: str, body: AgentStepRequest, request: Requ
 
     lang = _normalize_lang(body.lang)
     db, crud, db_available = _open_db_session()
+    memory_subject = _memory_subject_from_request(request)
+    memory_token = _CURRENT_MEMORY_SUBJECT.set(memory_subject)
     turn_id = ""
     raw_sources: list[dict] = []
     web_context = ""
@@ -5193,7 +7150,14 @@ async def agent_step(conversation_id: str, body: AgentStepRequest, request: Requ
             if "project_files" in tool_candidates and used_tools < max_calls:
                 used_tools += 1
                 append_turn_item(conversation_id, turn_id, kind="tool_started", payload={"tool": "project_files"}, status="ok")
-                prefix = "app" if "app" in (message or "").lower() else ""
+                state_folder_focus = str(state.get("current_file_focus") or "").strip()
+                if not _looks_like_directory_focus(state_folder_focus):
+                    state_folder_focus = ""
+                prefix = infer_directory_focus(message, manifest) if manifest else ""
+                if not prefix and state_folder_focus:
+                    prefix = state_folder_focus
+                if not prefix and "app" in (message or "").lower():
+                    prefix = "app"
                 text = summarize_project_subtree(manifest, prefix=prefix, lang=lang, limit=50) if manifest else ""
                 if text:
                     evidence_items.append(
@@ -5227,7 +7191,7 @@ async def agent_step(conversation_id: str, body: AgentStepRequest, request: Requ
             if "project_symbols" in tool_candidates and used_tools < max_calls:
                 used_tools += 1
                 append_turn_item(conversation_id, turn_id, kind="tool_started", payload={"tool": "project_symbols"}, status="ok")
-                q = str(state.get("current_symbol_focus") or "").strip()
+                q = infer_symbol_focus(message) or str(state.get("current_symbol_focus") or "").strip()
                 if not q:
                     q = "auth" if "auth" in (message or "").lower() else ""
                 retrieval_disabled = (os.getenv("AEGIS_DISABLE_RETRIEVAL", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -5278,7 +7242,7 @@ async def agent_step(conversation_id: str, body: AgentStepRequest, request: Requ
                 append_turn_item(conversation_id, turn_id, kind="tool_started", payload={"tool": "project_excerpt"}, status="ok")
                 pth = str(state.get("current_file_focus") or "").strip() or infer_file_focus(message, manifest) or ""
                 excerpt = ""
-                if pth:
+                if pth and not _looks_like_directory_focus(pth):
                     target = root / pth
                     _ensure_within_project_root(root, target)
                     if target.exists() and target.is_file():
@@ -5405,6 +7369,7 @@ async def agent_step(conversation_id: str, body: AgentStepRequest, request: Requ
                 max_total_chars=MAX_PROMPT_CHARS,
                 session_state=state,
                 project_context=active_project_context,
+                durable_memory_snippet=_current_durable_memory_snippet(),
             )
             if evidence_prompt:
                 messages_for_llm.insert(1, {"role": "system", "content": f"Evidence (use first):\n{evidence_prompt}"})
@@ -5473,6 +7438,7 @@ async def agent_step(conversation_id: str, body: AgentStepRequest, request: Requ
         )
 
     finally:
+        _CURRENT_MEMORY_SUBJECT.reset(memory_token)
         _close_db_session(db)
 
 
@@ -5512,6 +7478,8 @@ async def agent_run(conversation_id: str, body: AgentRunRequest, request: Reques
     tool_retry_backoff_ms = max(0, int(body.tool_retry_backoff_ms or 0))
 
     db, crud, db_available = _open_db_session()
+    memory_subject = _memory_subject_from_request(request)
+    memory_token = _CURRENT_MEMORY_SUBJECT.set(memory_subject)
     turn_id = ""
     raw_sources: list[dict] = []
     web_context = ""
@@ -5794,7 +7762,14 @@ async def agent_run(conversation_id: str, body: AgentRunRequest, request: Reques
                                 append_turn_item(conversation_id, turn_id, kind="tool_finished", payload={"iteration": idx + 1, "tool": "project_manifest"}, status="ok")
 
                             elif tool_name == "project_files":
-                                prefix = "app" if "app" in (message or "").lower() else ""
+                                state_folder_focus = str(state.get("current_file_focus") or "").strip()
+                                if not _looks_like_directory_focus(state_folder_focus):
+                                    state_folder_focus = ""
+                                prefix = infer_directory_focus(message, manifest) if manifest else ""
+                                if not prefix and state_folder_focus:
+                                    prefix = state_folder_focus
+                                if not prefix and "app" in (message or "").lower():
+                                    prefix = "app"
                                 text = summarize_project_subtree(manifest, prefix=prefix, lang=lang, limit=50) if manifest else ""
                                 if text:
                                     ev = EvidenceItem(
@@ -5831,7 +7806,7 @@ async def agent_run(conversation_id: str, body: AgentRunRequest, request: Reques
                                 append_turn_item(conversation_id, turn_id, kind="tool_finished", payload={"iteration": idx + 1, "tool": "project_architecture"}, status="ok")
 
                             elif tool_name == "project_symbols":
-                                q = str(state.get("current_symbol_focus") or "").strip()
+                                q = infer_symbol_focus(message) or str(state.get("current_symbol_focus") or "").strip()
                                 if not q:
                                     q = "auth" if "auth" in (message or "").lower() else ""
                                 retrieval_disabled = (os.getenv("AEGIS_DISABLE_RETRIEVAL", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -5872,7 +7847,7 @@ async def agent_run(conversation_id: str, body: AgentRunRequest, request: Reques
                             elif tool_name == "project_excerpt":
                                 pth = str(state.get("current_file_focus") or "").strip() or infer_file_focus(message, manifest) or ""
                                 excerpt = ""
-                                if pth:
+                                if pth and not _looks_like_directory_focus(pth):
                                     target = root / pth
                                     _ensure_within_project_root(root, target)
                                     if target.exists() and target.is_file():
@@ -6132,6 +8107,7 @@ async def agent_run(conversation_id: str, body: AgentRunRequest, request: Reques
                 max_total_chars=MAX_PROMPT_CHARS,
                 session_state=state,
                 project_context=active_project_context,
+                durable_memory_snippet=_current_durable_memory_snippet(),
             )
             if evidence_prompt:
                 messages_for_llm.insert(1, {"role": "system", "content": f"Evidence (use first):\n{evidence_prompt}"})
@@ -6229,6 +8205,7 @@ async def agent_run(conversation_id: str, body: AgentRunRequest, request: Reques
             iterations_completed=len(iterations),
         )
     finally:
+        _CURRENT_MEMORY_SUBJECT.reset(memory_token)
         _close_db_session(db)
 
 
@@ -6444,7 +8421,7 @@ async def execute_tool(conversation_id: str, body: ToolExecuteRequest, request: 
                     "project_id": project_id,
                     "items": items[:limit],
                     "matches": ranked[:limit],
-                    "focus": infer_file_focus(q, manifest) if q else None,
+                    "focus": (infer_file_focus(q, manifest) or infer_directory_focus(q, manifest)) if q else None,
                 }
             elif tool == "project_symbols":
                 q = str(args.get("q") or "").strip()

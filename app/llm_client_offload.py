@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-Local llama.cpp (WizardCoder) backend.
+Local llama.cpp / Groq-compatible backend.
 
 - One-time GGUF load (thread-safe)
 - Formats OpenAI-style messages into WizardCoder [INST]
@@ -9,12 +9,15 @@ Local llama.cpp (WizardCoder) backend.
 - Fixes transcript echoing ("User:"/"Assistant:" loops) and empty-output hiccups
 """
 
+import json
 import logging
 import os
 import re
 import threading
 import time
-from typing import Any, Dict, List, Optional 
+from typing import Any, Dict, List, Optional
+import requests
+
 from app.tools import sanitize_messages
 
 logger = logging.getLogger(__name__)
@@ -98,6 +101,45 @@ LLM_STALL_BUSY_AFTER_SECONDS = max(
 )
 
 
+def _get_str_env(name: str, default: str = "") -> str:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip()
+
+
+def _configured_provider() -> str:
+    raw = _get_str_env("AEGIS_LLM_PROVIDER", "local").lower()
+    if raw in {"local", "groq", "auto"}:
+        return raw
+    if raw:
+        logger.warning("Invalid AEGIS_LLM_PROVIDER=%r, falling back to local", raw)
+    return "local"
+
+
+def _remote_model_name() -> str:
+    return _get_str_env("AEGIS_GROQ_MODEL", "")
+
+
+def _remote_base_url() -> str:
+    return _get_str_env("AEGIS_GROQ_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
+
+
+def _remote_api_key() -> str:
+    return _get_str_env("AEGIS_GROQ_API_KEY") or _get_str_env("GROQ_API_KEY")
+
+
+def _remote_timeout_seconds() -> float:
+    try:
+        return max(1.0, float(_get_str_env("AEGIS_GROQ_TIMEOUT_SECONDS", "20")))
+    except ValueError:
+        return 20.0
+
+
+def _remote_user_agent() -> str:
+    return _get_str_env("AEGIS_GROQ_USER_AGENT", "AEGISChat/2026 Groq API Client")
+
+
 # ============================================================
 # STATUS
 # ============================================================
@@ -105,20 +147,60 @@ LLM_STALL_BUSY_AFTER_SECONDS = max(
 def llm_status() -> Dict[str, Any]:
     model_exists = os.path.exists(MODEL_PATH)
     llama_class = _get_llama_class()
+    provider = _configured_provider()
+    remote_model = _remote_model_name()
+    remote_base_url = _remote_base_url()
+    remote_api_key = _remote_api_key()
+    remote_ready = bool(remote_model and remote_api_key)
+    local_available = bool(llama_class is not None and model_exists)
+    local_ready = bool(local_available and _llama is not None)
+
+    if provider == "groq":
+        effective_provider = "groq"
+        fallback_available = bool(remote_ready)
+        available = bool(remote_ready)
+        status = "ready" if remote_ready else "error"
+    elif provider == "auto":
+        effective_provider = "local" if local_available else ("groq" if remote_ready else "local")
+        fallback_available = bool(local_available or remote_ready)
+        available = bool(local_available or remote_ready)
+        if local_ready or remote_ready:
+            status = "ready"
+        elif local_available or remote_model or remote_api_key:
+            status = "configured"
+        else:
+            status = "error"
+    else:
+        effective_provider = "local" if local_available else ("groq" if remote_ready else "local")
+        fallback_available = bool(local_available or remote_ready)
+        available = bool(local_available or remote_ready)
+        if local_ready or remote_ready:
+            status = "ready"
+        elif local_available or remote_model or remote_api_key:
+            status = "configured"
+        else:
+            status = "error"
+
+    active_model = remote_model if provider == "groq" else (remote_model if effective_provider == "groq" and remote_model else MODEL_PATH)
     return {
         "model_path": MODEL_PATH,
+        "model": active_model,
         "model_exists": model_exists,
+        "provider": provider,
+        "effective_provider": effective_provider,
+        "remote_model": remote_model,
+        "remote_base_url": remote_base_url,
+        "remote_ready": remote_ready,
+        "fallback_available": fallback_available,
         "ctx": AEGIS_LLAMA_CTX,
         "threads": AEGIS_LLAMA_THREADS,
         "gpu_layers": AEGIS_N_GPU_LAYERS,
         "batch": AEGIS_LLAMA_BATCH,
         "max_new_tokens": MAX_NEW_TOKENS,
         "loaded": _llama is not None,
-        "available": llama_class is not None,
+        "available": available,
         "import_error": _llama_import_error,
-        "status": "ready" if (llama_class is not None and model_exists and _llama is not None) else (
-            "configured" if (llama_class is not None and model_exists) else "error"
-        ),
+        "status": status,
     }
 
 
@@ -230,6 +312,122 @@ def _postprocess(text: str) -> str:
     text = _PREFIX_STRIP_RE.sub("", text)
     return text.strip()
 
+def _looks_like_local_failure(text: str) -> bool:
+    if not text:
+        return True
+    lowered = text.lower()
+    return any(
+        frag in lowered
+        for frag in (
+            "llm backend is not fully configured",
+            "local llm backend is not available",
+            "llama-cpp-python missing",
+            "local model is busy",
+            "couldn't generate a response",
+            "empty response",
+        )
+    )
+
+
+def _looks_like_remote_failure(text: str) -> bool:
+    if not text:
+        return True
+    lowered = text.lower()
+    return any(
+        frag in lowered
+        for frag in (
+            "groq backend is not configured",
+            "groq backend failed",
+            "groq request failed",
+            "groq http error",
+            "groq response was empty",
+            "groq response missing",
+        )
+    )
+
+
+def _normalize_provider_choice(value: Optional[str]) -> Optional[str]:
+    choice = str(value or "").strip().lower()
+    if choice in {"local", "groq", "auto"}:
+        return choice
+    return None
+
+
+def _call_groq_chat(
+    messages: List[Dict[str, str]],
+    max_tokens: int,
+    temperature: float = 0.3,
+    top_p: float = 0.95,
+    stop: Optional[List[str]] = None,
+) -> str:
+    api_key = _remote_api_key()
+    model = _remote_model_name()
+    if not api_key:
+        return "Groq backend is not configured (AEGIS_GROQ_API_KEY or GROQ_API_KEY is missing)."
+    if not model:
+        return "Groq backend is not configured (AEGIS_GROQ_MODEL is missing)."
+
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "top_p": top_p,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    if stop:
+        payload["stop"] = stop
+
+    url = f"{_remote_base_url()}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": _remote_user_agent(),
+    }
+
+    try:
+        resp = requests.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=_remote_timeout_seconds(),
+        )
+        raw = resp.text
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        response = getattr(exc, "response", None)
+        body = ""
+        code = getattr(response, "status_code", None) or getattr(resp, "status_code", "?")
+        if response is not None:
+            body = getattr(response, "text", "") or ""
+        elif "resp" in locals():
+            body = getattr(resp, "text", "") or ""
+        return f"Groq HTTP error {code}: {body or exc}"
+    except requests.RequestException as exc:
+        logger.exception("Groq request failed: %s", exc)
+        return f"Groq request failed: {exc}"
+
+    try:
+        data = json.loads(raw)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Groq returned non-JSON response: %s", exc)
+        return f"Groq returned non-JSON response: {raw[:240]}"
+
+    choices = data.get("choices") or []
+    if not isinstance(choices, list) or not choices:
+        return "Groq response missing choices."
+
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    message = first.get("message") or {}
+    if isinstance(message, dict):
+        text = str(message.get("content") or "").strip()
+    else:
+        text = ""
+    if not text:
+        return "Groq response was empty."
+    return _postprocess(text)
+
 
 # ============================================================
 # Default profile: safer for mid-range, CPU-first. Use FAST_MODE=1 for even lighter settings.
@@ -320,19 +518,13 @@ def _call_llama_chat_with_timeout(
 # PUBLIC ENTRYPOINT
 # ============================================================
 
-def generate_response(
+def _generate_local_response(
     messages: List[Dict[str, str]],
-    max_new_tokens: Optional[int] = None,
+    max_tokens: int,
     temperature: float = 0.2,
     top_p: float = 0.95,
-    **_: Any,
 ) -> str:
     messages = sanitize_messages(messages)
-
-    if max_new_tokens is None or max_new_tokens <= 0:
-        max_tokens = MAX_NEW_TOKENS
-    else:
-        max_tokens = min(int(max_new_tokens), MAX_NEW_TOKENS)
 
     if _get_llama_class() is None:
         logger.error("llama-cpp-python missing; cannot generate response.")
@@ -368,10 +560,10 @@ def generate_response(
             logger.info("[llm_offload] queued %.2fs before generation slot", queue_wait_s)
 
     try:
-        start = time.perf_counter()
+        start_ts = time.perf_counter()
         generation_key = threading.get_ident()
         with _active_generation_lock:
-            _active_generations[generation_key] = start
+            _active_generations[generation_key] = start_ts
 
         text = ""
         try:
@@ -385,7 +577,7 @@ def generate_response(
             logger.exception("[llm_offload] llama.cpp error: %s", exc)
             text = ""
 
-        duration = time.perf_counter() - start
+        duration = time.perf_counter() - start_ts
 
         logger.debug(
             "[llm_offload] generate_response tokens=%s took %.2fs (loaded=%s)",
@@ -394,9 +586,6 @@ def generate_response(
             _llama is not None,
         )
 
-        # IMPORTANT FIX:
-        # Sometimes llama.cpp returns empty text (rare but real).
-        # Retry ONCE with safer settings instead of blaming GPU/path.
         if not text:
             logger.error("[llm_offload] Empty response (retrying once with safer params)")
             try:
@@ -429,6 +618,157 @@ def generate_response(
                 pass
 
 
+def _generate_groq_response(
+    messages: List[Dict[str, str]],
+    max_tokens: int,
+    temperature: float = 0.2,
+    top_p: float = 0.95,
+) -> str:
+    messages = sanitize_messages(messages)
+    return _call_groq_chat(
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+    )
+
+
+def generate_response(
+    messages: List[Dict[str, str]],
+    max_new_tokens: Optional[int] = None,
+    temperature: float = 0.2,
+    top_p: float = 0.95,
+    preferred_provider: Optional[str] = None,
+    **_: Any,
+) -> str:
+    """
+    Generic LLM entrypoint used by the rest of the app.
+
+    - Sanitizes messages.
+    - Caps tokens using MAX_NEW_TOKENS.
+    - Routes between local llama.cpp and Groq when configured.
+    - On failure, returns a safe placeholder instead of crashing.
+    """
+    profile_provider = _configured_provider()
+    profile_remote_ready = bool(_remote_api_key() and _remote_model_name())
+    route_provider = _normalize_provider_choice(preferred_provider) or profile_provider
+
+    if max_new_tokens is None or max_new_tokens <= 0:
+        max_tokens = int(MAX_NEW_TOKENS)
+    else:
+        max_tokens = int(min(max_new_tokens, MAX_NEW_TOKENS))
+
+    temperature = float(temperature if temperature is not None else 0.2)
+    top_p = float(top_p if top_p is not None else 0.95)
+
+    messages = sanitize_messages(messages)
+
+    if route_provider == "groq":
+        attempt_order = ["groq"]
+    elif route_provider == "local":
+        attempt_order = ["local", "groq"] if profile_remote_ready else ["local"]
+    else:
+        attempt_order = ["local", "groq"] if profile_remote_ready else ["local"]
+
+    last_error = ""
+    for backend in attempt_order:
+        try:
+            if backend == "groq":
+                text = _generate_groq_response(messages, max_tokens, temperature, top_p)
+                if _looks_like_remote_failure(text):
+                    last_error = text
+                    continue
+                return text
+
+            text = _generate_local_response(messages, max_tokens, temperature, top_p)
+            if _looks_like_local_failure(text):
+                last_error = text
+                continue
+            return text
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("LLM backend %s failed: %s", backend, exc)
+            last_error = str(exc)
+
+    if last_error:
+        return last_error
+    return (
+        "LLM backend is not fully configured. "
+        "The server is running, but no model is available."
+    )
+
+
+class LLMClient:
+    """
+    Thin wrapper to allow DI/mocking in services if needed.
+    """
+
+    def generate(
+        self,
+        messages: List[Dict],
+        max_new_tokens: Optional[int] = None,
+        mode: str = "general",
+        **kwargs: Any,
+    ) -> str:
+        return generate_response(messages, max_new_tokens=max_new_tokens, mode=mode, **kwargs)
+
+
+# Why this file is very important (almost “more important” than others)
+
+# This file is basically the LLM front-door for your whole backend. Everything that wants “AI magic” should go through here:
+
+# Single source of truth
+# Any route (/chat, tools, memory summarization, RAG, etc.) should import generate_response (or LLMClient) from here, not from llm_client_offload. That means one place to:
+
+# Set token limits (MAX_NEW_TOKENS)
+
+# Sanitize messages
+
+# Handle logging and fallbacks
+
+# Add global behaviors (e.g., safety filters, telemetry)
+
+# Hard decoupling from the backend engine
+# Today: you use local WizardCoder via llm_client_offload.
+# Tomorrow: you might want:
+
+# OpenAI / Anthropic cloud fallback
+
+# Two different models (e.g., “fast” and “smart”)
+
+# Routing by temperature, cost, or context length
+
+# You do not want to change 50 endpoints and services; you change the logic here, in one file, and the rest of the app just keeps calling generate_response.
+
+# Architecture boundary
+# Think of layers:
+
+# API / services: app/api/chat.py, memory, tools, etc.
+# ➜ depend on this file (app.models.llm_client)
+
+# LLM Backend(s): app/llm_client_offload.py (and maybe app/llm_client_openai.py later)
+# ➜ do the low-level heavy lifting (talk to llama.cpp, HTTP API, etc.)
+
+# This file is the clean interface between “business logic” and “LLM implementation”. That’s textbook clean architecture / hexagonal stuff.
+
+# Testability
+# Because you have the LLMClient class here, in one place, you can:
+
+# Inject a fake client in tests that returns deterministic strings.
+
+# Swap real vs mock just by changing DI, without touching your API endpoints.
+
+# Future features
+# When you add:
+
+# Per-user temperature/top_p policies
+
+# Model selection per conversation
+
+# Tracing, logging, metrics, cost accounting
+
+# All that orchestration belongs here. That’s why this file is strategic.
+
+# Short version: this file is the brain adapter. Everything else is “body parts” asking for help; this is the thing that decides how to talk to the actual model. Treat it nice.
 # Helpful env reference:
 # # export AEGIS_MODEL_PATH=./models/wizardcoder-python-7b-v1.0.Q5_K_M.gguf
 # # export AEGIS_LLAMA_CTX=2048

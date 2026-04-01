@@ -52,10 +52,12 @@ fi
 
 RUNTIME_PROFILE="${AEGIS_RUNTIME_PROFILE:-strict}"
 PRODUCT_TRACK="${AEGIS_PRODUCT_TRACK:-core}"
+CONTRACT_MODE="${AEGIS_START_CONTRACT_MODE:-full}"
 
 exec "$PYTHON_BIN" app/scripts/start_with_preflight.py \
   --runtime-profile "$RUNTIME_PROFILE" \
   --product-track "$PRODUCT_TRACK" \
+  --contract-mode "$CONTRACT_MODE" \
   --api-key "$API_KEY" \
   --files-api-key "$FILES_KEY" \
   --admin-api-key "$ADMIN_KEY" \

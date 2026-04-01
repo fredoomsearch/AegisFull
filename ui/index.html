@@ -23,7 +23,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 
   <!-- Your CSS -->
-  <link rel="stylesheet" href="/ui/styles.css?v=20260310d" />
+  <link rel="stylesheet" href="/ui/styles.css?v=20260331a" />
 </head>
 
 <body>
@@ -50,6 +50,30 @@
         <div class="mode-indicator" id="modeIndicator">Modo: Chat</div>
         <span id="runtimeStatusBadge" class="pill muted header-web-badge" title="Estado runtime">RUN: —</span>
         <span id="webStatusBadge" class="pill muted header-web-badge" title="Estado web">WEB: —</span>
+        <div id="llmProviderShell" class="llm-provider-shell">
+          <button id="llmProviderBtn" class="pill header-web-badge llm-provider-btn llm-provider-btn-pending" type="button" title="Models: runtime LLM selector">
+            <span class="llm-provider-btn-dot" aria-hidden="true"></span>
+            <span class="llm-provider-btn-text">Models: --</span>
+          </button>
+          <div id="llmProviderMenu" class="llm-provider-menu hidden" aria-hidden="true">
+            <div id="llmProviderMenuTitle" class="llm-provider-menu-title">Models</div>
+            <div id="llmProviderSummary" class="llm-provider-summary">Runtime LLM provider</div>
+            <button id="llmProviderLocalBtn" class="llm-provider-option" type="button" title="Run the local GGUF model on this machine">
+              <span class="llm-provider-option-row">
+                <span class="llm-provider-option-name">Local</span>
+                <span id="llmProviderLocalState" class="llm-provider-option-state">Available</span>
+              </span>
+              <span id="llmProviderLocalNote" class="llm-provider-option-note">Runs the GGUF model on this machine.</span>
+            </button>
+            <button id="llmProviderCloudBtn" class="llm-provider-option" type="button" title="Use the Groq cloud model for faster general chat">
+              <span class="llm-provider-option-row">
+                <span class="llm-provider-option-name">Cloud</span>
+                <span id="llmProviderCloudState" class="llm-provider-option-state">Available</span>
+              </span>
+              <span id="llmProviderCloudNote" class="llm-provider-option-note">Uses Groq for faster chat and stronger general reasoning.</span>
+            </button>
+          </div>
+        </div>
         <div class="lang-controls">
           <button id="langEs" class="lang-btn selected" aria-pressed="true">ES</button>
           <button id="langEn" class="lang-btn" aria-pressed="false">EN</button>
@@ -63,9 +87,6 @@
         </div>
 
         <div class="header-icons">
-          <button id="apiKeyBtn" class="icon-btn" title="Configurar API key" data-i18n-title="api_key_title">
-            <i class="fa-solid fa-key"></i>
-          </button>
           <button id="globalSnapshotBtn" class="icon-btn" title="Ver snapshot del sistema" data-i18n-title="snapshot_btn_title">
             <i class="fa-solid fa-camera"></i>
           </button>
@@ -186,7 +207,7 @@
               <button id="urlBtn" class="icon-btn" aria-pressed="false" title="Modo leer URL" data-i18n-title="mode_url_title"><i class="fas fa-link"></i></button>
               <button id="cryptoBtn" class="icon-btn" aria-pressed="false" title="Modo cripto" data-i18n-title="mode_crypto_title"><i class="fas fa-coins"></i></button>
               <button id="imgBtn" class="icon-btn" aria-pressed="false" title="Modo imagen" data-i18n-title="mode_image_title"><i class="fas fa-image"></i></button>
-              <button id="attachBtn" class="icon-btn image-upload-inline-btn" aria-pressed="false" title="Subir imagen para contexto" data-i18n-title="image_upload_chat_title" hidden aria-hidden="true"><i class="fas fa-upload"></i></button>
+              <button id="attachBtn" class="icon-btn image-upload-inline-btn" aria-pressed="false" title="Adjuntar archivo o imagen" data-i18n-title="attachment_button_title"><i class="fas fa-upload"></i></button>
               <button id="layoutToggle" class="icon-btn" aria-pressed="false" title="Ocultar paneles laterales" data-i18n-title="layout_toggle_title"><i class="fas fa-up-right-and-down-left-from-center"></i></button>
             </div>
           </div>
@@ -197,6 +218,8 @@
 
           <div class="controls-right">
             <button id="stopBtn" class="stop-btn" type="button" hidden>Stop</button>
+            <span id="backendProcessBadge" class="pill muted backend-process-pill" title="Current backend process">Backend: ?</span>
+            <button id="backendStopBtn" class="stop-btn danger" type="button" title="Stop backend server">Backend Stop</button>
             <button id="sendBtn" class="send-btn" type="button" data-i18n="send_btn">Enviar</button>
           </div>
         </div>
@@ -476,7 +499,6 @@
           </div>
           <div style="display:flex; gap:10px; margin-top:14px;">
             <button id="apiKeySave" class="action-btn" type="button">Guardar</button>
-            <button id="apiKeyClear" class="action-btn danger" type="button">Borrar</button>
           </div>
         </div>
       </div>
@@ -566,7 +588,7 @@ ZRXUSDT, CAKEUSDT, CELOUSDT, GMXUSDT, FLOWUSDT
     <!-- hidden file input removed with import shortcut -->
     <input id="imgInput" type="file" accept="image/*" class="visually-hidden" />
     <input id="attachmentInput" type="file" accept="image/*,.pdf,.docx,.txt,.md,.json,.csv,.yaml,.yml,.log,.ini,.toml,.xml,.html,.htm,.py,.js,.ts,.sql" class="visually-hidden" />
-    <input id="projectUploadInput" type="file" accept=".zip" class="visually-hidden" />
+    <input id="projectUploadInput" type="file" accept=".zip" class="visually-hidden" multiple />
   </div>
 
   <script>
@@ -625,6 +647,6 @@ ZRXUSDT, CAKEUSDT, CELOUSDT, GMXUSDT, FLOWUSDT
     })();
   </script>
 
-  <script src="/ui/app.js?v=20260310d" defer onerror="window.__AEGIS_UI_BOOT_ERROR__='failed to load /ui/app.js';"></script>
+  <script src="/ui/app.js?v=20260331a" defer onerror="window.__AEGIS_UI_BOOT_ERROR__='failed to load /ui/app.js';"></script>
 </body>
 </html>

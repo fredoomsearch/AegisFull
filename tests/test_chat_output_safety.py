@@ -144,6 +144,51 @@ def test_finalize_user_response_strips_prefixed_trace_labels():
     assert out.startswith("Respuesta final limpia.")
 
 
+def test_finalize_user_response_collapses_repeated_paragraphs():
+    raw = (
+        "[2026-03-19 18:12:40] Russia is a country in Eastern Europe and Central Asia.\n\n"
+        "[2026-03-19 18:12:40] Russia is a country in Eastern Europe and Central Asia.\n\n"
+        "[2026-03-19 18:12:40] Russia is a country in Eastern Europe and Central Asia."
+    )
+    out = chat_api._finalize_user_response(raw, lang="en")
+    assert out.count("Russia is a country in Eastern Europe and Central Asia.") == 1
+    assert out.count("[2026-03-19 18:12:40]") == 1
+
+
+def test_maybe_local_geography_response_returns_fast_local_fact():
+    out = chat_api._maybe_local_geography_response("where is russia?", "en")
+    assert "Russia spans Eastern Europe and Northern Asia" in out
+    assert "web: where is <place>" in out
+
+
+def test_maybe_local_capital_response_returns_fast_local_fact():
+    out = chat_api._maybe_local_capital_response("what is the capital of japan?", "en")
+    assert "Tokyo" in out
+    assert "web: what is the capital of <country>" in out
+
+
+def test_maybe_active_project_response_returns_manifest_summary_for_project_question(monkeypatch):
+    monkeypatch.setattr(
+        chat_api,
+        "_load_active_project_manifest",
+        lambda _session_state: {
+            "architecture": {"layers": ["api", "ui"]},
+            "entrypoints": ["app/main.py"],
+            "package_files": ["requirements.txt"],
+            "config_files": ["config.yml"],
+        },
+    )
+    state = {
+        "active_project_id": "proj_123",
+        "current_topic": "login flow",
+        "answer_style": {"concise": True},
+    }
+    out = chat_api._maybe_active_project_response("what does this project contain?", "en", state)
+    assert out is not None
+    assert "project" in out.lower()
+    assert "entrypoints" in out.lower() or "detected layers" in out.lower() or "config/infra files" in out.lower()
+
+
 def test_finalize_user_response_strips_instruction_fragment_with_dominant_language_rule():
     raw = (
         "Found 3 sources. Now answering with context.\n\n"
@@ -154,6 +199,13 @@ def test_finalize_user_response_strips_instruction_fragment_with_dominant_langua
     assert out.startswith("Found 3 sources.")
     assert "Be accurate, direct, and practical" not in out
     assert "follow the dominant language" not in out
+
+
+def test_finalize_user_response_falls_back_on_partial_prompt_fragment():
+    raw = "a . . (Spanish/English). . , , , or . or wrappers like"
+    out = chat_api._finalize_user_response(raw, lang="en")
+    assert "internal instructions" in out.lower()
+    assert "wrappers like" not in out.lower()
 
 
 def test_internal_instruction_fallback_detector_matches_known_phrase():

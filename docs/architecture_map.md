@@ -1,74 +1,192 @@
-# AEGIS Architecture Map (Canonical vs Legacy)
+# AEGIS Architecture Map
 
-This is a quick “what lives where” map so future-you doesn’t have to re-learn the repo.
-Primary reference remains `docs/canonical_map.md`.
+Date: 2026-03-31
 
-## Control plane (startup + validation)
-- Launchers:
-  - `./start_aegis.sh` (full gate + uvicorn)
-  - `./start_demo.sh` (fast demo defaults)
-  - `./start_standard.sh` (forces `AEGIS_RUNTIME_PROFILE=standard`)
-  - `./start_strict.sh` (forces `AEGIS_RUNTIME_PROFILE=strict`)
-  - `./stop_aegis.sh` (best-effort stop)
-- Gate orchestration: `app/scripts/start_with_preflight.py`
-- Host E2E checks: `app/scripts/e2e_flow_check.py`
-- Hard contract + soak/no-loop strict checks: `app/scripts/hard_contract_check.py`, `app/scripts/soak_gate.py`, `app/scripts/no_loop_stress_check.py`
-- Browser smoke (best-effort by default): `app/scripts/browser_smoke.py`
-- Extended verification tier: `app/scripts/verify_full.py`
-- Strict go/no-go wrapper: `./go_strict.sh`
+This is the canonical architecture doc for the repo.
 
-## Runtime status (single source of truth)
-- Readiness: `GET /system/readyz` → `app/api/system.py`
-- Snapshot (debug UI): `GET /system/snapshot` → `app/api/system.py`
-- Capabilities registry: `GET /system/capabilities` → `app/api/system.py` + `app/services/capabilities_service.py`
-- API surfaces status: `GET /system/snapshot` → `api_surfaces` block
+## Tree Architecture
 
-## Conversation plane (agent-ish orchestration)
-- Main chat router: `POST /chat` → `app/api/chat.py`
-  - tool-first routing: project/manifest/files/symbols/logs before LLM
-  - hybrid web routing: local-only vs local+web vs web-only
-  - response context metadata: `context.source_plan`, `context.source_origin`, etc.
-- Session state (“planner hints”): `app/services/session_state.py`
-- Turn/items/events tracing:
-  - turns: `app/services/conversation_turns.py` + `/chat/{id}/turns`
-  - events: `app/services/conversation_events.py` + `/chat/{id}/events`
+```text
+AegisChat
+├── Control Plane
+│   ├── start_aegis.sh
+│   ├── app/scripts/start_with_preflight.py
+│   ├── app/scripts/verify_full.py
+│   └── app/api/system.py
+├── Conversation / Comp Plane
+│   ├── app/api/chat.py
+│   ├── app/services/session_state.py
+│   ├── app/models/llm_client.py
+│   └── app/models/llm_utils.py
+├── Grounding Plane
+│   ├── app/api/files.py
+│   ├── app/services/project_store.py
+│   ├── app/services/project_manifest.py
+│   ├── app/services/project_introspection.py
+│   ├── app/services/retrieval_service.py
+│   ├── app/services/web_search.py
+│   ├── app/services/time_service.py
+│   └── app/tools.py
+├── Memory Plane
+│   ├── app/services/session_state.py
+│   ├── app/services/conversation_turns.py
+│   ├── app/services/durable_memory.py
+│   ├── app/memory.py
+│   └── app/db/*
+├── Execution Plane
+│   ├── app/api/chat.py
+│   ├── app/api/files.py
+│   ├── app/api/image.py
+│   ├── app/api/crypto.py
+│   └── execute_tool / agent paths
+├── Governance Plane
+│   ├── app/api/system.py
+│   ├── app/services/capabilities_service.py
+│   ├── app/services/runtime_metrics.py
+│   ├── quantitative routing in app/models/llm_client.py
+│   └── adaptive crypto policy in app/api/crypto.py
+└── UI Plane
+    ├── ui/index.html
+    ├── ui/app.js
+    └── ui/styles.css
+```
 
-## Project plane (ZIP/repo ingest + project tools)
-- Canonical project API: `app/api/files.py` (`/files/*`)
-  - upload ZIP, clone, register root, ingest jobs
-  - project manifest summary + architecture + dependencies/entrypoints/configs
-  - scoped file search, symbol search, excerpts
-- Project registry: `app/services/project_store.py`
-- Manifest: `app/services/project_manifest.py`
-- Introspection (fuzzy file search, symbol scan fallback): `app/services/project_introspection.py`
-- Ingest pipeline: `app/scripts/ingest_repo.py`
-- Retrieval/index: `app/services/retrieval_service.py` (project-scoped)
-- Legacy `/tools/*` is not a project API path anymore (deprecation shim only).
+## Layer Contract
 
-## Knowledge plane (LLM + embeddings + web)
-- Local LLM backend: `app/llm_client_offload.py` (llama.cpp GGUF)
-- Embeddings: `app/services/embedding_service.py`
-- Web search (canonical): `app/services/web_search.py` (+ cache/meta/status)
-- URL fetch + SSRF guards + text sanitizers + browser binary discovery: `app/tools.py`
-- Library-to-code map: `docs/dependencies_map.md`
+### 1. Control Plane
 
-## Security/ops
-- Auth guards + scopes (API key/JWT): `app/api/deps.py`
-- Antivirus service (ClamAV): `app/services/antivirus_service.py` + `/files/av/*`
-- Image backend + fallback visibility + checkpoint resolver metadata: `app/api/image.py` (`/image/checkpoints`)
+Purpose:
+- start the runtime
+- verify the runtime
+- expose readiness and snapshot truth
 
-## UI plane (single-file frontend)
-- UI entry: `ui/index.html`
-- UI logic: `ui/app.js`
-- Styles: `ui/styles.css`
-  - source origin pills, runtime badges, turns view
+Main files:
+- `start_aegis.sh`
+- `app/scripts/start_with_preflight.py`
+- `app/scripts/verify_full.py`
+- `app/api/system.py`
 
-## Legacy / compatibility surfaces
-- `/tools/*` API: `app/api/toolssupport.py` (mounted only as deprecation shim, always `410 Gone`)
-- Detailed explanation: `docs/legacy_experiments.md`
+### 2. Conversation / Comp Plane
 
-## Canonical integrity checklist
+Purpose:
+- detect the conversational act
+- track subject and follow-up context
+- choose source policy
+- choose provider/tool route
 
-- Project lifecycle goes through `/files/*` only.
-- Conversation runtime truth goes through `/chat*` + `/system/readyz`.
-- Legacy surfaces are explicit and non-operational (`410`), not silently active.
+Main files:
+- `app/api/chat.py`
+- `app/services/session_state.py`
+- `app/models/llm_client.py`
+- `app/models/llm_utils.py`
+
+Implemented semantic contract:
+- `act`
+- `subject`
+- `source_policy`
+- `web_required`
+- `allow_run`
+- `override_memory`
+
+### 3. Grounding Plane
+
+Purpose:
+- prefer local operational truth first
+- use web only when needed and allowed
+- avoid unsupported answers with no evidence
+
+Main files:
+- `app/api/files.py`
+- `app/services/project_manifest.py`
+- `app/services/project_introspection.py`
+- `app/services/retrieval_service.py`
+- `app/services/web_search.py`
+- `app/services/time_service.py`
+- `app/tools.py`
+
+Source order:
+1. local project truth
+2. local runtime/helpers
+3. web context
+4. LLM synthesis
+
+### 4. Memory Plane
+
+Purpose:
+- keep turn continuity
+- preserve active project/focus
+- carry durable user facts/preferences across sessions
+
+Main files:
+- `app/services/session_state.py`
+- `app/services/conversation_turns.py`
+- `app/services/durable_memory.py`
+- `app/memory.py`
+- `app/db/*`
+
+### 5. Execution Plane
+
+Purpose:
+- execute bounded actions safely
+- keep agent/tool use explicit and observable
+
+Main files:
+- `app/api/chat.py`
+- `app/api/files.py`
+- `app/api/image.py`
+- `app/api/crypto.py`
+
+Key execution paths:
+- `POST /chat`
+- `POST /chat/{id}/agent_step`
+- `POST /chat/{id}/agent_run`
+- `POST /chat/{id}/agent_continue`
+- `POST /chat/{id}/execute_tool`
+
+### 6. Governance Plane
+
+Purpose:
+- measure runtime quality
+- route by quantitative signal
+- expose adaptive policy
+- support champion/challenger observation
+
+Main files:
+- `app/api/system.py`
+- `app/services/runtime_metrics.py`
+- `app/models/llm_client.py`
+- `app/api/crypto.py`
+
+Current governance features:
+- readiness and snapshot
+- quantitative route signal for model selection
+- crypto adaptive thresholds and scope fallback
+- model competition distribution metrics
+
+### 7. UI Plane
+
+Purpose:
+- expose the runtime without hiding status
+- keep mode and source behavior visible
+
+Main files:
+- `ui/index.html`
+- `ui/app.js`
+- `ui/styles.css`
+
+## What Is Complete
+
+- semantic routing is real, not just prompt text
+- durable memory exists and is prompt-visible
+- local vs Groq routing exists
+- quantitative routing exists
+- crypto adaptive policy exists
+- comp snapshot exists in prompt and runtime snapshot
+- release verification surfaces are strong
+
+## What Is Still Partial
+
+- `app/api/notifications.py` is not part of the core verification chain
+- `app/api/data.py` remains diagnostic rather than a primary release gate
+- extended browser proofs are available but not in the slim strict default
+- model competition is measured, but automatic long-run promotion policy is still limited

@@ -112,3 +112,35 @@ def test_start_aegis_can_respect_active_venv_when_enabled(tmp_path: Path) -> Non
     chosen = out_file.read_text(encoding="utf-8").strip()
     assert chosen.startswith("foreign:")
     assert str(foreign_venv / "bin" / "python") in chosen
+
+
+def test_start_aegis_passes_contract_mode_to_preflight(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    project_venv = repo / "venv"
+    out_file = tmp_path / "chosen_python.txt"
+
+    _write_fake_python(project_venv / "bin" / "python", "project")
+    _write_activate(project_venv / "bin" / "activate", project_venv)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "AEGIS_API_KEY": "k",
+            "FILES_API_KEY": "k",
+            "AEGIS_START_CONTRACT_MODE": "strict",
+            "FAKE_OUT": str(out_file),
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", str(repo / "start_aegis.sh"), "--sentinel"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    chosen = out_file.read_text(encoding="utf-8").strip()
+    assert "--contract-mode strict" in chosen

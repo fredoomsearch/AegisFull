@@ -12,6 +12,7 @@ Why this module exists:
 """
 
 import html as _html
+import hashlib
 import logging
 import os
 import re
@@ -57,12 +58,20 @@ PROVIDER_ORDER = [
     p.strip()
     for p in (
         os.getenv("AEGIS_SEARCH_PROVIDERS")
-        or "brave_html,ddgs,startpage_html,ddg_html,ddg_json"
+        or "brave_html,startpage_html,qwant_html,ddg_html,ddg_json,ddgs"
     ).split(",")
     if p.strip()
 ]
 if not PROVIDER_ORDER:
-    PROVIDER_ORDER = ["brave_html", "ddgs", "startpage_html", "ddg_html", "ddg_json"]
+    PROVIDER_ORDER = ["brave_html", "startpage_html", "qwant_html", "ddg_html", "ddg_json", "ddgs"]
+
+ROTATION_MODE = (os.getenv("AEGIS_SEARCH_ROTATION_MODE", "auto") or "auto").strip().lower()
+QUERY_SHARD_ROTATION = (os.getenv("AEGIS_SEARCH_QUERY_SHARD_ROTATION", "1") or "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 WARMUP_ON_START = os.getenv("AEGIS_SEARCH_WARMUP_ON_START", "1").lower() in {
     "1",
@@ -185,6 +194,112 @@ _PROVIDERS: Dict[str, Dict[str, object]] = {
     },
 }
 
+
+def _provider_transport(provider_name: str) -> str:
+    if provider_name == "ddgs":
+        return "python"
+    if provider_name.endswith("_html"):
+        return "html"
+    if provider_name.endswith("_json"):
+        return "json"
+    return "custom"
+
+
+def _provider_availability(provider_name: str) -> dict[str, Any]:
+    cfg = _PROVIDERS.get(provider_name)
+    if cfg is None:
+        return {
+            "available": False,
+            "configured": False,
+            "reason": "provider_not_configured",
+            "transport": _provider_transport(provider_name),
+        }
+    if provider_name == "ddgs" and not _HAS_DDGS:
+        return {
+            "available": False,
+            "configured": True,
+            "reason": "duckduckgo_search_not_installed",
+            "transport": _provider_transport(provider_name),
+        }
+    return {
+        "available": True,
+        "configured": True,
+        "reason": "",
+        "transport": _provider_transport(provider_name),
+    }
+
+
+def _provider_signal_cost(windows: Sequence[dict[str, Any]]) -> tuple[float, float]:
+    call_cost = 0.0
+    error_cost = 0.0
+    for item in windows:
+        window_seconds = int(item.get("window_seconds") or 0)
+        weight = 4.0 if 0 < window_seconds <= 60 else 1.0
+        call_cost += float(item.get("call_count") or 0) * weight
+        error_cost += float(item.get("error_count") or 0) * weight
+    return call_cost, error_cost
+
+
+def _query_rotation_offset(query: str, lang_code: str, size: int) -> int:
+    if size <= 1 or not QUERY_SHARD_ROTATION:
+        return 0
+    seed = f"{lang_code}:{query}".encode("utf-8", errors="ignore")
+    digest = hashlib.sha1(seed).digest()
+    return int.from_bytes(digest[:4], "big") % size
+
+
+def _resolve_provider_plan(query: str, lang_code: str) -> tuple[list[str], list[dict[str, Any]]]:
+    snapshot_rows = {
+        str(row.get("provider") or "").strip(): row
+        for row in search_state.provider_snapshot(PROVIDER_ORDER)
+    }
+    provider_rows: list[dict[str, Any]] = []
+    ready_rows: list[dict[str, Any]] = []
+    cooling_rows: list[dict[str, Any]] = []
+    unavailable_rows: list[dict[str, Any]] = []
+
+    for base_index, provider_name in enumerate(PROVIDER_ORDER):
+        availability = _provider_availability(provider_name)
+        row = snapshot_rows.get(provider_name) or {
+            "provider": provider_name,
+            "status": "ready",
+            "cooldown_until": 0.0,
+            "cooling_down": False,
+            "windows": [],
+        }
+        windows = list(row.get("windows") or [])
+        call_cost, error_cost = _provider_signal_cost(windows)
+        entry = {
+            **row,
+            "provider": provider_name,
+            "available": bool(availability.get("available")),
+            "configured": bool(availability.get("configured")),
+            "reason": str(availability.get("reason") or ""),
+            "transport": str(availability.get("transport") or ""),
+            "call_cost": call_cost,
+            "error_cost": error_cost,
+            "base_index": base_index,
+        }
+        provider_rows.append(entry)
+        if not entry["available"]:
+            unavailable_rows.append(entry)
+        elif bool(entry.get("cooling_down")):
+            cooling_rows.append(entry)
+        else:
+            ready_rows.append(entry)
+
+    ready_rows.sort(key=lambda item: (float(item.get("error_cost") or 0.0), float(item.get("call_cost") or 0.0), int(item.get("base_index") or 0)))
+    cooling_rows.sort(key=lambda item: (float(item.get("cooldown_until") or 0.0), float(item.get("error_cost") or 0.0), float(item.get("call_cost") or 0.0), int(item.get("base_index") or 0)))
+    unavailable_rows.sort(key=lambda item: (str(item.get("reason") or ""), int(item.get("base_index") or 0)))
+
+    if ROTATION_MODE in {"auto", "balanced", "health"} and ready_rows:
+        offset = _query_rotation_offset(query, lang_code, len(ready_rows))
+        if offset:
+            ready_rows = ready_rows[offset:] + ready_rows[:offset]
+
+    effective_order = [str(item.get("provider") or "").strip() for item in ready_rows + cooling_rows + unavailable_rows if str(item.get("provider") or "").strip()]
+    return effective_order, provider_rows
+
 # DuckDuckGo HTML regex: grab <a class="result__a" href="...">Title</a>
 _DDG_A_RE = re.compile(
     r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
@@ -303,6 +418,9 @@ def _build_meta(
     fetched_at: float | None = None,
     expires_at: float | None = None,
     providers_tried: Sequence[str] | None = None,
+    providers_skipped: Sequence[str] | None = None,
+    effective_provider_order: Sequence[str] | None = None,
+    rotation_mode: str = "",
 ) -> Dict[str, Any]:
     return {
         "query": cleaned_query,
@@ -319,6 +437,9 @@ def _build_meta(
         "fetched_at": float(fetched_at or 0.0),
         "expires_at": float(expires_at or 0.0),
         "providers_tried": [str(item) for item in (providers_tried or []) if str(item).strip()],
+        "providers_skipped": [str(item) for item in (providers_skipped or []) if str(item).strip()],
+        "effective_provider_order": [str(item) for item in (effective_provider_order or []) if str(item).strip()],
+        "rotation_mode": str(rotation_mode or ROTATION_MODE or "fixed"),
     }
 
 
@@ -381,25 +502,43 @@ def web_search_structured_with_meta(
                     logger.debug("Failed to parse cached results for %r", cleaned)
 
         providers_tried: list[str] = []
-        for provider_name in PROVIDER_ORDER:
+        effective_provider_order, provider_rows = _resolve_provider_plan(cleaned, lang_code)
+        providers_skipped: list[str] = [
+            f"{str(row.get('provider') or '').strip()}:{str(row.get('reason') or '').strip()}"
+            for row in provider_rows
+            if not bool(row.get("available")) and str(row.get("provider") or "").strip() and str(row.get("reason") or "").strip()
+        ]
+        for provider_name in effective_provider_order:
             cfg = _PROVIDERS.get(provider_name)
             if not cfg:
                 logger.debug("web_search_structured_with_meta: unknown provider %s", provider_name)
+                providers_skipped.append(f"{provider_name}:unknown_provider")
+                continue
+            availability = _provider_availability(provider_name)
+            if not bool(availability.get("available")):
+                reason = str(availability.get("reason") or "unavailable").strip() or "unavailable"
+                skipped_key = f"{provider_name}:{reason}"
+                if skipped_key not in providers_skipped:
+                    providers_skipped.append(skipped_key)
                 continue
             providers_tried.append(provider_name)
             try:
                 results = _call_provider(provider_name, cfg, cleaned, n, lang_code)
             except ProviderCooldownError as exc:
                 logger.info("Provider %s cooling down: %s", provider_name, exc)
+                providers_skipped.append(f"{provider_name}:cooldown")
                 continue
             except ProviderLimitError as exc:
                 logger.info("Provider %s quota hit: %s", provider_name, exc)
+                providers_skipped.append(f"{provider_name}:quota")
                 continue
             except Exception:
+                providers_skipped.append(f"{provider_name}:error")
                 continue
 
             if not results:
                 logger.debug("Provider %s returned no results for %r", provider_name, cleaned)
+                providers_skipped.append(f"{provider_name}:empty")
                 continue
 
             trimmed = results[:n]
@@ -415,9 +554,17 @@ def web_search_structured_with_meta(
                 attempted=True,
                 live_web_used=True,
                 providers_tried=providers_tried,
+                providers_skipped=providers_skipped,
+                effective_provider_order=effective_provider_order,
+                rotation_mode=ROTATION_MODE,
             )
 
-        logger.warning("web_search_structured: all providers exhausted for %r", cleaned)
+        logger.warning(
+            "web_search_structured: all providers exhausted for %r (tried=%s skipped=%s)",
+            cleaned,
+            providers_tried,
+            providers_skipped,
+        )
         stale = search_state.get_stale_cached_results(cleaned, n, lang=lang_code)
         if stale:
             try:
@@ -438,6 +585,9 @@ def web_search_structured_with_meta(
                     fetched_at=float(stale_meta.get("fetched_at") or 0.0),
                     expires_at=float(stale_meta.get("expires_at") or 0.0),
                     providers_tried=providers_tried,
+                    providers_skipped=providers_skipped,
+                    effective_provider_order=effective_provider_order,
+                    rotation_mode=ROTATION_MODE,
                 )
             except Exception:
                 logger.debug("Failed to parse stale cache for %r", cleaned)
@@ -449,6 +599,9 @@ def web_search_structured_with_meta(
             source="none",
             attempted=True,
             providers_tried=providers_tried,
+            providers_skipped=providers_skipped,
+            effective_provider_order=effective_provider_order,
+            rotation_mode=ROTATION_MODE,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("web_search_structured_with_meta failed for query=%r: %s", query, exc)
@@ -891,13 +1044,64 @@ def stop_background_warmup(timeout_s: float = 2.0) -> bool:
 
 def get_web_search_status(*, probe: bool = False, probe_query: str = "python fastapi", probe_results: int = 1) -> dict:
     """Return provider health/cooldown/cache policy summary for readiness UI."""
-    provider_rows = search_state.provider_snapshot(PROVIDER_ORDER)
-    any_ready = any(not bool(row.get("cooling_down")) for row in provider_rows) if provider_rows else bool(PROVIDER_ORDER)
+    effective_provider_order, ranked_rows = _resolve_provider_plan(probe_query, "en")
+    raw_provider_rows = ranked_rows
+    provider_rows: list[dict[str, Any]] = []
+    unavailable_reasons: list[str] = []
+    available_provider_count = 0
+    ready_provider_count = 0
+    cooling_provider_count = 0
+
+    for row in raw_provider_rows:
+        provider_name = str(row.get("provider") or "").strip()
+        availability = _provider_availability(provider_name)
+        cooling_down = bool(row.get("cooling_down"))
+        available = bool(availability.get("available"))
+        status = "unavailable"
+        if available:
+            available_provider_count += 1
+            if cooling_down:
+                cooling_provider_count += 1
+                status = "cooldown"
+            else:
+                ready_provider_count += 1
+                status = "ready"
+        else:
+            reason = str(availability.get("reason") or "").strip()
+            if reason:
+                unavailable_reasons.append(f"{provider_name}:{reason}")
+
+        provider_rows.append(
+            {
+                **row,
+                "status": status,
+                "available": available,
+                "configured": bool(availability.get("configured")),
+                "reason": str(availability.get("reason") or ""),
+                "transport": str(availability.get("transport") or ""),
+            }
+        )
+
+    status = "unavailable"
+    if provider_rows:
+        if ready_provider_count > 0:
+            status = "ready"
+        elif available_provider_count > 0:
+            status = "cooldown"
+
     payload = {
-        "status": "ready" if any_ready else "cooldown",
+        "status": status,
         "providers": provider_rows,
         "provider_order": list(PROVIDER_ORDER),
+        "effective_provider_order": list(effective_provider_order),
         "provider_count": len(PROVIDER_ORDER),
+        "known_provider_count": len(_PROVIDERS),
+        "available_provider_count": available_provider_count,
+        "ready_provider_count": ready_provider_count,
+        "cooling_provider_count": cooling_provider_count,
+        "unavailable_provider_count": max(0, len(PROVIDER_ORDER) - available_provider_count),
+        "unavailable_reasons": unavailable_reasons,
+        "rotation_mode": ROTATION_MODE,
         "cache_ttl_seconds": CACHE_TTL_SECONDS,
         "disk_cache_ttl_seconds": DISK_CACHE_TTL_SECONDS,
         "timeout_seconds": HTTP_TIMEOUT,
@@ -917,10 +1121,11 @@ def get_web_search_status(*, probe: bool = False, probe_query: str = "python fas
         payload["probe_provider"] = meta.get("provider")
         payload["probe_source"] = meta.get("source")
         payload["probe_status"] = meta.get("status")
-        if not results:
+        if not results and payload["status"] == "ready":
             payload["status"] = "degraded"
     except Exception as exc:  # noqa: BLE001
         payload["probe_ok"] = False
         payload["probe_error"] = str(exc)
-        payload["status"] = "degraded"
+        if payload["status"] == "ready":
+            payload["status"] = "degraded"
     return payload

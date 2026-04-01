@@ -15,13 +15,11 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import URL, make_url
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from app.core.config import settings
 from app.db.models import Base  # side-effect import to register models
 
 logger = logging.getLogger(__name__)
-DISABLE_DB = (os.getenv("AEGIS_DISABLE_DB", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 # ---------------------------------------------------------
@@ -32,9 +30,6 @@ def _build_database_url() -> str:
     raw = (os.getenv("DATABASE_URL") or settings.DB_URL or "").strip()
     if raw:
         return raw
-    if DISABLE_DB:
-        # Keep imports/startup working in no-DB mode (local demos, smoke tests).
-        return "sqlite+pysqlite:///:memory:"
 
     host = os.getenv("POSTGRES_HOST") or os.getenv("PGHOST") or ""
     db = os.getenv("POSTGRES_DB") or os.getenv("PGDATABASE") or ""
@@ -52,7 +47,7 @@ def _build_database_url() -> str:
             port=int(port) if port else None,
             database=db,
         )
-        return str(url)
+        return url.render_as_string(hide_password=False)
 
     raise RuntimeError("DATABASE_URL or POSTGRES_* env vars must be set for PostgreSQL.")
 
@@ -82,16 +77,7 @@ def _engine_params(db_url: str) -> tuple[URL, dict[str, Any]]:
         )
         return url_obj, engine_kwargs
 
-    if backend == "sqlite" and DISABLE_DB:
-        engine_kwargs["connect_args"] = {"check_same_thread": False}
-        if (url_obj.database or "").strip() in {"", ":memory:"}:
-            # Single in-memory connection shared across sessions.
-            engine_kwargs["poolclass"] = StaticPool
-        return url_obj, engine_kwargs
-
-    raise ValueError(
-        f"Unsupported backend '{backend}'. Only PostgreSQL is allowed unless AEGIS_DISABLE_DB=1."
-    )
+    raise ValueError(f"Unsupported backend '{backend}'. Only PostgreSQL is allowed.")
 
 
 DATABASE_URL: str = _build_database_url()
@@ -139,6 +125,7 @@ def init_db_manual() -> None:
     try:
         print("Creando tablas manualmente...")
         Base.metadata.create_all(bind=engine)
+        _ensure_compat_columns(engine)
         print("Tablas creadas correctamente.")
     except Exception as e:  # noqa: BLE001
         print(f"Error al crear tablas: {e}")

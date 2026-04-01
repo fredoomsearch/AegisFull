@@ -91,6 +91,7 @@ FILES_AV_FAIL_OPEN = os.getenv("FILES_AV_FAIL_OPEN", "1") != "0"
 FILES_AV_RETRIES = max(0, int(os.getenv("FILES_AV_RETRIES", "1") or "1"))
 FILES_ALLOW_ROOT_PARAM = (os.getenv("FILES_ALLOW_ROOT_PARAM", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
 FILES_MAX_EDIT_BYTES = int(os.getenv("FILES_MAX_EDIT_BYTES", str(2 * 1024 * 1024)))
+FILES_AUTO_INGEST = os.getenv("FILES_AUTO_INGEST", "1") != "0"
 
 _SAFE_NAME = re.compile(r"[^a-zA-Z0-9._-]+")
 _SAFE_BRANCH = re.compile(r"^[A-Za-z0-9._\-/]+$")
@@ -137,6 +138,45 @@ def _resolve_registered_project_root(project: Dict[str, Any]) -> Path:
     if _is_under_upload_root(raw):
         return ensure_under_upload_root(raw)
     return _ensure_under_project_root(raw)
+
+
+def _project_ready_state(project: Dict[str, Any] | None, manifest: Dict[str, Any] | None = None) -> str:
+    record = project if isinstance(project, dict) else {}
+    status = str(record.get("status") or "").strip().lower()
+    stats = manifest.get("stats") if isinstance(manifest, dict) and isinstance(manifest.get("stats"), dict) else {}
+    chunk_count = int(record.get("chunk_count") or stats.get("chunk_count") or 0)
+
+    if status in {"error", "failed"}:
+        return "error"
+    if status in {"ingesting", "queued", "indexing"}:
+        return "indexing"
+    if manifest or status in {"ingested", "ready", "indexed"} or chunk_count > 0:
+        return "ready"
+    return "needs_ingest"
+
+
+def _annotate_project_readiness(project: Dict[str, Any], manifest: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    payload = dict(project or {})
+    payload["ready_state"] = _project_ready_state(payload, manifest)
+    payload["manifest_ready"] = bool(manifest)
+    return payload
+
+
+async def _queue_auto_ingest(project_id: str) -> Dict[str, Any] | None:
+    if not FILES_AUTO_INGEST or not str(project_id or "").strip():
+        return None
+    try:
+        result = await ingest_path(IngestRequest(project_id=project_id, background=True))
+        return result if isinstance(result, dict) else None
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else json.dumps(exc.detail, ensure_ascii=False)
+        logger.warning("auto-ingest queue failed for %s: %s", project_id, detail)
+        update_project(project_id, metadata={"auto_ingest_error": str(detail)[:240]})
+        return {"status": "queue_failed", "detail": str(detail)[:240]}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("auto-ingest queue failed for %s", project_id, exc_info=True)
+        update_project(project_id, metadata={"auto_ingest_error": str(exc)[:240]})
+        return {"status": "queue_failed", "detail": str(exc)[:240]}
 
 
 def _project_root_from_query(
@@ -1155,14 +1195,26 @@ async def upload_zip(
         raise HTTPException(status_code=400, detail="Corrupt or invalid zip")
 
     remember_last_upload(dest, source="upload-zip")
-    register_project(project_id, dest, source="upload-zip", status="uploaded")
+    project = register_project(project_id, dest, source="upload-zip", status="uploaded")
+    auto_ingest = await _queue_auto_ingest(project_id)
+    project = get_project(project_id) or project
+    manifest = load_project_manifest(project.get("manifest_path") or project.get("root_path") or "")
+    ready_project = _annotate_project_readiness(project, manifest)
+    auto_status = str((auto_ingest or {}).get("status") or "").strip().lower()
 
     return {
         "status": "ok",
         "project_id": project_id,
         "path": str(dest),
         "av_status": av_status,
-        "hint": "Now call /files/ingest with this path.",
+        "project": ready_project,
+        "ready_state": ready_project.get("ready_state"),
+        "auto_ingest": auto_ingest,
+        "hint": (
+            "Auto-ingest queued."
+            if auto_status == "queued"
+            else "Now call /files/ingest with this path."
+        ),
     }
 
 
@@ -1231,13 +1283,20 @@ async def clone_repo(payload: CloneRequest) -> Dict[str, Any]:
                 raise HTTPException(status_code=413, detail=f"Repo too large ({size_mb} MB). Increase max_mb or use smaller depth.")
             av_status = _av_scan_path(dest)
             remember_last_upload(dest, source="clone")
-            register_project(project_id, dest, source="clone", status="uploaded", metadata={"repo_url": repo_url})
+            project = register_project(project_id, dest, source="clone", status="uploaded", metadata={"repo_url": repo_url})
+            auto_ingest = await _queue_auto_ingest(project_id)
+            project = get_project(project_id) or project
+            manifest = load_project_manifest(project.get("manifest_path") or project.get("root_path") or "")
+            ready_project = _annotate_project_readiness(project, manifest)
             return {
                 "status": "ok",
                 "project_id": project_id,
                 "path": str(dest),
                 "branch_used": branch,
                 "av_status": av_status,
+                "project": ready_project,
+                "ready_state": ready_project.get("ready_state"),
+                "auto_ingest": auto_ingest,
             }
 
     # Attempt 2: clone without specifying branch (lets git choose default)
@@ -1258,7 +1317,11 @@ async def clone_repo(payload: CloneRequest) -> Dict[str, Any]:
 
     av_status = _av_scan_path(dest)
     remember_last_upload(dest, source="clone")
-    register_project(project_id, dest, source="clone", status="uploaded", metadata={"repo_url": repo_url})
+    project = register_project(project_id, dest, source="clone", status="uploaded", metadata={"repo_url": repo_url})
+    auto_ingest = await _queue_auto_ingest(project_id)
+    project = get_project(project_id) or project
+    manifest = load_project_manifest(project.get("manifest_path") or project.get("root_path") or "")
+    ready_project = _annotate_project_readiness(project, manifest)
 
     return {
         "status": "ok",
@@ -1266,6 +1329,9 @@ async def clone_repo(payload: CloneRequest) -> Dict[str, Any]:
         "path": str(dest),
         "branch_used": used,
         "av_status": av_status,
+        "project": ready_project,
+        "ready_state": ready_project.get("ready_state"),
+        "auto_ingest": auto_ingest,
     }
 
 
@@ -1307,11 +1373,22 @@ async def register_root(payload: RegisterRootRequest) -> Dict[str, Any]:
     project_id = str((payload.project_id or "").strip() or target.name)
     project = register_project(project_id, target, source="workspace", status="uploaded")
     remember_last_upload(target, source="register-root")
+    auto_ingest = await _queue_auto_ingest(str(project.get("project_id") or project_id))
+    project = get_project(str(project.get("project_id") or project_id)) or project
+    manifest = load_project_manifest(project.get("manifest_path") or project.get("root_path") or "")
+    ready_project = _annotate_project_readiness(project, manifest)
     return {
         "status": "ok",
         "project_id": str(project.get("project_id") or project_id),
         "path": str(target),
-        "hint": "Now call /files/ingest with this project_id or path if you want indexed retrieval.",
+        "project": ready_project,
+        "ready_state": ready_project.get("ready_state"),
+        "auto_ingest": auto_ingest,
+        "hint": (
+            "Auto-ingest queued."
+            if str((auto_ingest or {}).get("status") or "").strip().lower() == "queued"
+            else "Now call /files/ingest with this project_id or path if you want indexed retrieval."
+        ),
     }
 
 
@@ -1497,7 +1574,11 @@ async def projects(
     limit: int = Query(25, ge=1, le=200),
 ) -> Dict[str, Any]:
     """List registered projects (source of truth for UI selection)."""
-    return {"items": list_projects(limit=limit)}
+    items: list[Dict[str, Any]] = []
+    for project in list_projects(limit=limit):
+        manifest = load_project_manifest(project.get("manifest_path") or project.get("root_path") or "")
+        items.append(_annotate_project_readiness(project, manifest))
+    return {"items": items}
 
 
 @router.get("/av/status")
@@ -1535,13 +1616,16 @@ async def project_detail(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     manifest = load_project_manifest(project.get("manifest_path") or project.get("root_path") or "")
+    ready_project = _annotate_project_readiness(project, manifest)
     return {
         "status": "ok",
-        "project": project,
+        "project": ready_project,
         "manifest": manifest,
         "summary": summarize_manifest(manifest, lang=lang) if manifest else None,
         "architecture_summary": summarize_architecture(manifest.get("architecture") or {}, lang=lang) if manifest and isinstance(manifest.get("architecture"), dict) else None,
         "intelligence": build_project_intelligence_summary(_resolve_registered_project_root(project), manifest=manifest) if manifest else None,
+        "ready_state": ready_project.get("ready_state"),
+        "manifest_ready": bool(manifest),
     }
 
 

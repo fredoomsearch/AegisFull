@@ -59,6 +59,36 @@ def test_ingest_accepts_workspace_paths(monkeypatch):
         delete_project(project_id)
 
 
+def test_register_root_auto_queues_ingest(monkeypatch):
+    root = Path("tmp") / f"workspace_auto_ingest_{uuid.uuid4().hex[:8]}"
+    (root / "app").mkdir(parents=True, exist_ok=True)
+    (root / "app" / "service.py").write_text("def login():\n    return 'ok'\n", encoding="utf-8")
+    project_id = root.name
+    seen: dict[str, str] = {}
+
+    async def fake_ingest(req):
+        seen["project_id"] = str(req.project_id or "")
+        seen["background"] = str(bool(req.background)).lower()
+        files_api.update_project(project_id, status="ingesting")
+        return {"status": "queued", "job_id": "job-auto-1", "project_id": project_id}
+
+    monkeypatch.setattr(files_api, "ingest_path", fake_ingest)
+
+    try:
+        registered = asyncio.run(files_api.register_root(files_api.RegisterRootRequest(path=str(root), project_id=project_id)))
+        assert registered["project_id"] == project_id
+        assert registered["auto_ingest"]["status"] == "queued"
+        assert registered["auto_ingest"]["job_id"] == "job-auto-1"
+        assert registered["ready_state"] == "indexing"
+        project = get_project(project_id)
+        assert project is not None
+        assert project.get("status") == "ingesting"
+        assert seen == {"project_id": project_id, "background": "true"}
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        delete_project(project_id)
+
+
 def test_ingest_uses_absolute_ingest_script_path(monkeypatch):
     root = Path("tmp") / f"workspace_ingest_abs_{uuid.uuid4().hex[:8]}"
     (root / "app").mkdir(parents=True, exist_ok=True)

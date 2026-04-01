@@ -19,7 +19,9 @@ from typing import Dict, List, Optional
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 UPLOAD_ROOT = Path(os.getenv("FILES_UPLOAD_ROOT", "data/uploads")).resolve()
 STATE_FILE = UPLOAD_ROOT / ".aegis_upload_state.json"
-_PATH_TOKEN_RE = re.compile(r"(~?/[^\s,;\"'<>]+|data/uploads/[^\s,;\"'<>]+)")
+_PATH_TOKEN_RE = re.compile(
+    r"(~?/(?:[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*)|data/uploads/(?:[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*))"
+)
 
 
 def _safe_resolve(path: Path) -> Optional[Path]:
@@ -36,12 +38,12 @@ def resolve_upload_path(raw_path: str) -> Optional[Path]:
     raw = (raw_path or "").strip()
     if not raw:
         return None
+    if "\x00" in raw or any(ord(ch) < 32 for ch in raw):
+        return None
 
     cand = Path(raw).expanduser()
     if not cand.is_absolute():
-        cand = (PROJECT_ROOT / cand).resolve()
-    else:
-        cand = cand.resolve()
+        cand = PROJECT_ROOT / cand
 
     safe = _safe_resolve(cand)
     if safe is None or not safe.exists() or not safe.is_dir():
@@ -91,7 +93,7 @@ def get_last_upload_path() -> Optional[Path]:
 
 
 def extract_upload_path_from_text(text: str) -> Optional[str]:
-    raw = text or ""
+    raw = str(text or "").replace("\x00", " ")
     for token in _PATH_TOKEN_RE.findall(raw):
         token = token.strip().rstrip(".,;:)]}\"'")
         if not token:

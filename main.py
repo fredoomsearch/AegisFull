@@ -253,14 +253,6 @@ if UI_DIR.exists():
     app.mount("/ui", StaticFiles(directory=str(UI_DIR), html=False), name="ui-static")
 else:
     logger.warning("[main] UI_DIR does not exist: %s", UI_DIR)
-
-# Serve data/ (for generated images/logs) read-only
-DATA_DIR = BASE_DIR / "data"
-if DATA_DIR.exists():
-    app.mount("/data", StaticFiles(directory=str(DATA_DIR), html=False), name="data-static")
-else:
-    logger.warning("[main] DATA_DIR does not exist: %s", DATA_DIR)
-
 FAVICON_PATH = UI_DIR / "urlimg.png"
 
 
@@ -323,9 +315,21 @@ def favicon():
 
 def _warm_llm_once() -> None:
     try:
-        logger.info("[main] Warming up LLM backend...")
-        from app.llm_client_offload import generate_response  # local import (safer for startup/tests)
+        from app.llm_client_offload import generate_response, llm_status  # local import (safer for startup/tests)
 
+        status = llm_status()
+        provider = str(status.get("provider") or "").strip().lower()
+        effective = str(status.get("effective_provider") or "").strip().lower()
+        remote_ready = bool(status.get("remote_ready"))
+
+        if provider == "groq":
+            if remote_ready:
+                logger.info("[main] Skipping local GGUF warm-up because provider=groq and remote_ready=true.")
+            else:
+                logger.warning("[main] Skipping local GGUF warm-up because provider=groq but remote_ready=false.")
+            return
+
+        logger.info("[main] Warming up LLM backend... provider=%s effective=%s", provider or "local", effective or "local")
         generate_response(
             [
                 {"role": "system", "content": "You are AEGIS."},
@@ -414,6 +418,12 @@ def _register_routers() -> None:
 
 app.router.lifespan_context = lifespan
 _register_routers()
+
+# Serve data/ (for generated images/logs) read-only
+# Mounted after routers so /data/health can match first.
+DATA_DIR = BASE_DIR / "data"
+if DATA_DIR.exists():
+    app.mount("/data", StaticFiles(directory=str(DATA_DIR), html=False), name="data-static")
 
 
 @app.get("/healthz")

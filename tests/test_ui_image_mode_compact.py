@@ -13,6 +13,7 @@ def test_compact_image_mode_ui_controls_present():
     assert 'id="attachBtn"' in html
     assert 'id="imageQuickBar"' in html
     assert 'id="imageModeGuide"' in html
+    assert 'hidden' not in html.split('id="attachBtn"', 1)[1].split(">", 1)[0]
 
 
 def test_legacy_image_panel_removed_from_html():
@@ -37,6 +38,16 @@ def test_image_mode_guide_mentions_img_and_img3d():
     js = _read("ui/app.js")
     assert "/img your prompt" in js
     assert "/img3d robot in neon city" in js
+
+
+def test_attachment_button_is_mode_aware():
+    js = _read("ui/app.js")
+    assert "function updateAttachmentButtonUI" in js
+    assert "dom.attachBtn.hidden = false;" in js
+    assert "Attach file, document, or image to chat" in js
+    assert "Upload reference image for analysis" in js
+    assert "Imagen de referencia lista" in js
+    assert "File attached:" in js
 
 
 def test_image_mode_supports_plain_draw_prompts_and_stop_button():

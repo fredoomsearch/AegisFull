@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import os
 import pwd
 import subprocess
@@ -9,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import time
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,6 +32,56 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--files-api-key", default="")
     parser.add_argument("--timeout", type=int, default=45)
     parser.add_argument("--strict", action="store_true", help="Fail instead of skipping when browser runtime is unavailable.")
+    parser.add_argument(
+        "--cleanup-orphans",
+        action="store_true",
+        help="Print and kill Chrome/Chromium processes started by this smoke run's temp profile.",
+    )
+    parser.add_argument(
+        "--crypto-proof",
+        action="store_true",
+        help="Exercise the crypto panel after the base smoke and verify visible crypto resources.",
+    )
+    parser.add_argument(
+        "--geo-proof",
+        action="store_true",
+        help="Send a geography question after the base smoke and verify the fast local answer on the page.",
+    )
+    parser.add_argument(
+        "--memory-speed-proof",
+        action="store_true",
+        help="Send a capital question after the base smoke and verify the fast local concise answer on the page.",
+    )
+    parser.add_argument(
+        "--web-proof",
+        action="store_true",
+        help="Switch the UI to Web mode, run a live search, and verify the sources panel updates.",
+    )
+    parser.add_argument(
+        "--project-proof",
+        action="store_true",
+        help="Verify the project/files panel loads the active project tree and summary cards.",
+    )
+    parser.add_argument(
+        "--files-proof",
+        action="store_true",
+        help="Upload a tiny ZIP from the files panel and verify upload + ingest coverage.",
+    )
+    parser.add_argument(
+        "--image-proof",
+        action="store_true",
+        help="Switch to image mode, upload a reference image, and verify the image attach path.",
+    )
+    parser.add_argument(
+        "--url-proof",
+        action="store_true",
+        help="Switch to URL mode and verify a local live URL search/read turn.",
+    )
+    parser.add_argument(
+        "--extended-ui-proofs",
+        action="store_true",
+        help="Bundle the heavier project/files/image/url browser checks for a separate optional pass.",
+    )
     return parser.parse_args()
 
 
@@ -110,8 +162,92 @@ def _looks_like_browser_runtime_exception(exc: Exception) -> bool:
     return False
 
 
+def _cleanup_orphan_browsers(profile_dir: str | None) -> list[dict[str, object]]:
+    """
+    Best-effort cleanup for Chromium sessions launched with our temp profile.
+    We only target processes whose command line mentions the profile path.
+    """
+    if not profile_dir:
+        return []
+
+    cleaned: list[dict[str, object]] = []
+    try:
+        proc = subprocess.run(
+            ["pgrep", "-af", profile_dir],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except Exception:
+        return cleaned
+
+    lines = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    pids: list[int] = []
+    for line in lines:
+        try:
+            pid = int(line.split(None, 1)[0])
+        except Exception:
+            continue
+        pids.append(pid)
+
+    if not pids:
+        return cleaned
+
+    unique_pids = sorted(set(pids))
+    for pid in unique_pids:
+        cleaned.append({"pid": pid, "signal": "TERM", "profile": profile_dir})
+        try:
+            subprocess.run(["kill", "-TERM", str(pid)], capture_output=True, text=True, check=False, timeout=5)
+        except Exception:
+            pass
+
+    time.sleep(0.4)
+
+    survivors: list[int] = []
+    for pid in unique_pids:
+        try:
+            probe = subprocess.run(["kill", "-0", str(pid)], capture_output=True, text=True, check=False, timeout=5)
+            if probe.returncode == 0:
+                survivors.append(pid)
+        except Exception:
+            continue
+
+    for pid in survivors:
+        cleaned.append({"pid": pid, "signal": "KILL", "profile": profile_dir})
+        try:
+            subprocess.run(["kill", "-KILL", str(pid)], capture_output=True, text=True, check=False, timeout=5)
+        except Exception:
+            pass
+
+    return cleaned
+
+
+_SINGLE_PIXEL_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO8L1z8AAAAASUVORK5CYII="
+)
+
+
+def _prepare_browser_proof_assets(root: Path) -> dict[str, Path]:
+    proof_dir = Path(tempfile.mkdtemp(prefix="proof_", dir=str(root)))
+    image_path = proof_dir / "proof.png"
+    image_path.write_bytes(_SINGLE_PIXEL_PNG)
+
+    zip_path = proof_dir / "proof_project.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("README.txt", "AEGIS browser smoke proof project.\n")
+        zf.writestr("src/app.py", "print('aegis browser smoke proof')\n")
+
+    return {"dir": proof_dir, "image": image_path, "zip": zip_path}
+
+
 def main() -> int:
     args = parse_args()
+    if args.extended_ui_proofs:
+        args.project_proof = True
+        args.files_proof = True
+        args.image_proof = True
+        args.url_proof = True
     if not SELENIUM_AVAILABLE:
         return _skip("selenium-unavailable", strict=args.strict)
     if not CHROMEDRIVER_AUTOINSTALLER_AVAILABLE:
@@ -156,8 +292,11 @@ def main() -> int:
     driver = None
     profile_dir = None
     xdg_dir = None
+    proof_assets: dict[str, Path] = {}
     wait_timeout = max(10, int(args.timeout))
     started = time.monotonic()
+    cleanup_report: list[dict[str, object]] = []
+    current_stage = "startup"
     try:
         options = ChromeOptions()
         options.binary_location = browser_binary
@@ -203,15 +342,27 @@ def main() -> int:
         except Exception:
             xdg_dir = None
 
+        try:
+            if profile_dir and (args.files_proof or args.image_proof):
+                proof_assets = _prepare_browser_proof_assets(Path(profile_dir))
+        except Exception:
+            proof_assets = {}
+
         driver = webdriver.Chrome(service=ChromeService(executable_path=chromedriver_path), options=options)
         wait = WebDriverWait(driver, wait_timeout)
 
+        current_stage = "browser-startup"
+        _print({"browser_stage": current_stage})
         driver.get(args.base_url.rstrip("/") + "/")
+        current_stage = "page-load"
+        _print({"browser_stage": current_stage})
         wait.until(EC.presence_of_element_located((By.ID, "msg")))
 
         api_key = (args.api_key or "").strip()
         files_key = (args.files_api_key or api_key).strip()
         if api_key:
+            current_stage = "auth-seed"
+            _print({"browser_stage": current_stage})
             # Also set a manual root to ensure UI doesn't drift into "manual root" when active project id exists.
             # This validates the "single project identity" UX contract.
             driver.execute_script(
@@ -229,11 +380,15 @@ def main() -> int:
                 files_key,
             )
             # Selenium Python WebDriver uses refresh() directly.
+            current_stage = "refresh-after-auth"
+            _print({"browser_stage": current_stage})
             driver.refresh()
             wait.until(EC.presence_of_element_located((By.ID, "msg")))
 
         # Keep the message area unobstructed when optional side panel is open.
         try:
+            current_stage = "panel-toggle"
+            _print({"browser_stage": current_stage})
             side_toggle = driver.find_element(By.ID, "chatSideToggle")
             if side_toggle.is_displayed():
                 driver.execute_script("arguments[0].click();", side_toggle)
@@ -291,6 +446,310 @@ def main() -> int:
             # Let the main try/except handle strict vs non-strict.
             raise
 
+        crypto_proof = {}
+        if args.crypto_proof:
+            current_stage = "crypto-proof"
+            _print({"browser_stage": current_stage})
+            crypto_chat_before = driver.find_element(By.ID, "chat").text
+
+            try:
+                crypto_btn = driver.find_element(By.ID, "cryptoBtn")
+                driver.execute_script("arguments[0].click();", crypto_btn)
+            except Exception:
+                pass
+
+            wait.until(
+                lambda d: "crypto" in d.find_element(By.ID, "modeIndicator").text.lower()
+                or "cripto" in d.find_element(By.ID, "modeIndicator").text.lower()
+            )
+
+            show_crypto = driver.find_element(By.ID, "showCryptoPanelBtn")
+            driver.execute_script("arguments[0].click();", show_crypto)
+            wait.until(lambda d: "chart-hidden" not in (d.find_element(By.ID, "chartPanel").get_attribute("class") or ""))
+
+            crypto_msg = driver.find_element(By.ID, "msg")
+            crypto_msg.clear()
+            crypto_msg.send_keys("BTCUSDT H=2m")
+            crypto_msg.send_keys(Keys.ENTER)
+
+            wait.until(lambda d: len(d.find_element(By.ID, "chat").text.strip()) > len(crypto_chat_before.strip()))
+            wait.until(
+                lambda d: (
+                    "h=" in d.find_element(By.ID, "cryptoContextPill").text.lower()
+                    or "p=" in d.find_element(By.ID, "cryptoContextPill").text.lower()
+                    or d.find_element(By.ID, "cryptoContextPill").text.strip() not in {"", "—"}
+                )
+            )
+            wait.until(lambda d: "BTCUSDT" in d.find_element(By.ID, "predictionCompareTitle").text.upper())
+
+            stats_btn = driver.find_element(By.ID, "statsBtn")
+            driver.execute_script("arguments[0].click();", stats_btn)
+            wait.until(
+                lambda d: (
+                    "stats" in d.find_element(By.ID, "sources-content").text.lower()
+                    or "no stats data" in d.find_element(By.ID, "sources-content").text.lower()
+                    or "sin datos de stats" in d.find_element(By.ID, "sources-content").text.lower()
+                )
+            )
+
+            preds_btn = driver.find_element(By.ID, "predsBtn")
+            driver.execute_script("arguments[0].click();", preds_btn)
+            wait.until(
+                lambda d: (
+                    "predictions" in d.find_element(By.ID, "sources-content").text.lower()
+                    or "recent predictions" in d.find_element(By.ID, "sources-content").text.lower()
+                    or "últimas predicciones" in d.find_element(By.ID, "sources-content").text.lower()
+                    or "no predictions" in d.find_element(By.ID, "sources-content").text.lower()
+                    or "sin predicciones" in d.find_element(By.ID, "sources-content").text.lower()
+                )
+            )
+
+            crypto_proof = {
+                "mode": driver.find_element(By.ID, "modeIndicator").text,
+                "crypto_context": driver.find_element(By.ID, "cryptoContextPill").text,
+                "price_source": driver.find_element(By.ID, "priceSourceBadge").text,
+                "compare_title": driver.find_element(By.ID, "predictionCompareTitle").text,
+                "sources_preview": driver.find_element(By.ID, "sources-content").text[:240],
+            }
+
+        geo_proof = {}
+        if args.geo_proof:
+            current_stage = "geo-proof"
+            _print({"browser_stage": current_stage})
+            geo_chat_before = driver.find_element(By.ID, "chat").text
+            geo_msg = driver.find_element(By.ID, "msg")
+            geo_msg.clear()
+            geo_msg.send_keys("where is russia?")
+            geo_msg.send_keys(Keys.ENTER)
+
+            wait.until(lambda d: len(d.find_element(By.ID, "chat").text.strip()) > len(geo_chat_before.strip()))
+            wait.until(
+                lambda d: (
+                    "russia spans eastern europe and northern asia" in d.find_element(By.ID, "chat").text.lower()
+                    or "if you want live sources" in d.find_element(By.ID, "chat").text.lower()
+                    or "web: where is <place>" in d.find_element(By.ID, "chat").text.lower()
+                )
+            )
+            chat_text = driver.find_element(By.ID, "chat").text
+            geo_proof = {
+                "question": "where is russia?",
+                "answer_preview": chat_text[-500:],
+                "contains_fast_fact": "russia spans eastern europe and northern asia" in chat_text.lower(),
+                "contains_web_prompt": "web: where is <place>" in chat_text.lower(),
+            }
+
+        memory_speed_proof = {}
+        if args.memory_speed_proof:
+            current_stage = "memory-speed-proof"
+            _print({"browser_stage": current_stage})
+            cap_chat_before = driver.find_element(By.ID, "chat").text
+            cap_msg = driver.find_element(By.ID, "msg")
+            cap_msg.clear()
+            cap_msg.send_keys("what is the capital of japan?")
+            cap_msg.send_keys(Keys.ENTER)
+
+            wait.until(lambda d: len(d.find_element(By.ID, "chat").text.strip()) > len(cap_chat_before.strip()))
+            wait.until(
+                lambda d: (
+                    "tokyo" in d.find_element(By.ID, "chat").text.lower()
+                    or "tokio" in d.find_element(By.ID, "chat").text.lower()
+                )
+            )
+            chat_text = driver.find_element(By.ID, "chat").text
+            memory_speed_proof = {
+                "question": "what is the capital of japan?",
+                "answer_preview": chat_text[-500:],
+                "contains_fast_fact": "tokyo" in chat_text.lower() or "tokio" in chat_text.lower(),
+                "contains_web_prompt": "web: what is the capital of <country>" in chat_text.lower(),
+                "looks_concise": len(chat_text.strip()) <= 1200,
+            }
+
+        web_proof = {}
+        if args.web_proof:
+            current_stage = "web-proof"
+            _print({"browser_stage": current_stage})
+            web_chat_before = driver.find_element(By.ID, "chat").text
+
+            try:
+                web_btn = driver.find_element(By.ID, "webBtn")
+                if web_btn.is_displayed():
+                    current_stage = "web-proof-click"
+                    _print({"browser_stage": current_stage})
+                    driver.execute_script("arguments[0].click();", web_btn)
+            except Exception:
+                pass
+
+            current_stage = "web-proof-submit"
+            _print({"browser_stage": current_stage})
+            web_msg = driver.find_element(By.ID, "msg")
+            web_msg.clear()
+            web_msg.send_keys("web: latest python 3.12 release notes")
+            web_msg.send_keys(Keys.ENTER)
+
+            current_stage = "web-proof-response"
+            _print({"browser_stage": current_stage})
+            wait.until(lambda d: len(d.find_element(By.ID, "chat").text.strip()) > len(web_chat_before.strip()))
+            current_stage = "web-proof-sources"
+            _print({"browser_stage": current_stage})
+            wait.until(
+                lambda d: (
+                    d.find_element(By.ID, "sources-content").text.strip() not in {"", "No additional URLs.", "Sin URLs adicionales."}
+                    or d.find_element(By.ID, "webStatusBadge").text.strip() not in {"WEB: —", "WEB: auto"}
+                    or int(d.execute_script("return document.querySelectorAll('#sources-content .source-card').length;") or 0) > 0
+                )
+            )
+            source_cards = driver.execute_script(
+                "return document.querySelectorAll('#sources-content .source-card').length;"
+            )
+            web_proof = {
+                "question": "where is russia?",
+                "mode": driver.find_element(By.ID, "modeIndicator").text,
+                "web_badge": driver.find_element(By.ID, "webStatusBadge").text,
+                "sources_preview": driver.find_element(By.ID, "sources-content").text[:240],
+                "source_cards": int(source_cards or 0),
+            }
+
+        url_proof = {}
+        if args.url_proof:
+            current_stage = "url-proof"
+            _print({"browser_stage": current_stage})
+            url_chat_before = driver.find_element(By.ID, "chat").text
+
+            try:
+                url_btn = driver.find_element(By.ID, "urlBtn")
+                driver.execute_script("arguments[0].click();", url_btn)
+            except Exception:
+                pass
+
+            wait.until(lambda d: "url" in d.find_element(By.ID, "modeIndicator").text.lower())
+
+            url_msg = driver.find_element(By.ID, "msg")
+            url_msg.clear()
+            url_msg.send_keys(args.base_url.rstrip("/") + "/")
+            url_msg.send_keys(Keys.ENTER)
+
+            wait.until(lambda d: len(d.find_element(By.ID, "chat").text.strip()) > len(url_chat_before.strip()))
+            wait.until(
+                lambda d: d.find_element(By.ID, "sources-content").text.strip() not in {"", "No additional URLs.", "Sin URLs adicionales."}
+            )
+            url_chat_text = driver.find_element(By.ID, "chat").text
+            url_proof = {
+                "question": args.base_url.rstrip("/") + "/",
+                "mode": driver.find_element(By.ID, "modeIndicator").text,
+                "sources_preview": driver.find_element(By.ID, "sources-content").text[:240],
+                "contains_read_prefix": "read:" in url_chat_text.lower() or "leído:" in url_chat_text.lower(),
+            }
+
+        image_proof = {}
+        if args.image_proof and proof_assets.get("image"):
+            current_stage = "image-proof"
+            _print({"browser_stage": current_stage})
+            img_chat_before = driver.find_element(By.ID, "chat").text
+
+            try:
+                img_btn = driver.find_element(By.ID, "imgBtn")
+                driver.execute_script("arguments[0].click();", img_btn)
+            except Exception:
+                pass
+
+            wait.until(
+                lambda d: "image" in d.find_element(By.ID, "modeIndicator").text.lower()
+                or "imagen" in d.find_element(By.ID, "modeIndicator").text.lower()
+            )
+
+            img_input = driver.find_element(By.ID, "imgInput")
+            img_input.send_keys(str(proof_assets["image"]))
+
+            wait.until(lambda d: len(d.find_element(By.ID, "chat").text.strip()) > len(img_chat_before.strip()))
+            wait.until(
+                lambda d: (
+                    "reference image ready" in d.find_element(By.ID, "chat").text.lower()
+                    or "imagen de referencia lista" in d.find_element(By.ID, "chat").text.lower()
+                )
+            )
+            image_proof = {
+                "mode": driver.find_element(By.ID, "modeIndicator").text,
+                "image_ready": True,
+                "chat_preview": driver.find_element(By.ID, "chat").text[-240:],
+            }
+
+        files_proof = {}
+        if args.files_proof and proof_assets.get("zip"):
+            current_stage = "files-proof"
+            _print({"browser_stage": current_stage})
+            files_chat_before = driver.find_element(By.ID, "chat").text
+
+            try:
+                files_panel_btn = driver.find_element(By.ID, "showFilesPanelBtn")
+                driver.execute_script("arguments[0].click();", files_panel_btn)
+            except Exception:
+                pass
+
+            upload_input = driver.find_element(By.ID, "projectUploadInput")
+            upload_input.send_keys(str(proof_assets["zip"]))
+
+            wait.until(lambda d: len(d.find_element(By.ID, "chat").text.strip()) > len(files_chat_before.strip()))
+            wait.until(
+                lambda d: (
+                    "zip uploaded" in d.find_element(By.ID, "chat").text.lower()
+                    or "zip subido" in d.find_element(By.ID, "chat").text.lower()
+                )
+            )
+            wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "#projectTree .tree-node")) > 0)
+
+            try:
+                ingest_btn = driver.find_element(By.ID, "ingestStatusBtn")
+                driver.execute_script("arguments[0].click();", ingest_btn)
+            except Exception:
+                pass
+
+            wait.until(
+                lambda d: (
+                    "ingest" in d.find_element(By.ID, "chat").text.lower()
+                    or "ingesta" in d.find_element(By.ID, "chat").text.lower()
+                )
+            )
+            wait.until(
+                lambda d: (
+                    "done" in d.find_element(By.ID, "ingestStatusText").text.lower()
+                    or "finished" in d.find_element(By.ID, "ingestStatusText").text.lower()
+                    or "finalizada" in d.find_element(By.ID, "ingestStatusText").text.lower()
+                )
+            )
+            files_proof = {
+                "uploaded_zip": str(proof_assets["zip"].name),
+                "active_project": driver.find_element(By.ID, "activeProjectBadge").text,
+                "tree_nodes": int(driver.execute_script("return document.querySelectorAll('#projectTree .tree-node').length;") or 0),
+                "ingest_status": driver.find_element(By.ID, "ingestStatusText").text,
+            }
+
+        project_proof = {}
+        if args.project_proof:
+            current_stage = "project-proof"
+            _print({"browser_stage": current_stage})
+            try:
+                files_panel_btn = driver.find_element(By.ID, "showFilesPanelBtn")
+                driver.execute_script("arguments[0].click();", files_panel_btn)
+            except Exception:
+                pass
+
+            wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "#projectTree .tree-node")) > 0)
+            wait.until(
+                lambda d: (
+                    d.find_element(By.ID, "activeProjectBadge").text.strip() not in {"", "Sin proyecto activo", "No active project"}
+                    and len(d.find_elements(By.CSS_SELECTOR, "#projectTree .tree-node")) > 0
+                )
+            )
+            tree_nodes = driver.execute_script(
+                "return document.querySelectorAll('#projectTree .tree-node').length;"
+            )
+            project_meta_text = driver.find_element(By.ID, "projectMeta").text
+            project_proof = {
+                "tree_nodes": int(tree_nodes or 0),
+                "project_meta_preview": project_meta_text[:240],
+                "active_project_badge": driver.find_element(By.ID, "activeProjectBadge").text,
+            }
+
         payload = {
             "ok": True,
             "mode": driver.find_element(By.ID, "modeIndicator").text,
@@ -298,10 +757,28 @@ def main() -> int:
             "elapsed_ms": int((time.monotonic() - started) * 1000),
             "browser": browser_binary,
         }
+        if crypto_proof:
+            payload["crypto_proof"] = crypto_proof
+        if geo_proof:
+            payload["geo_proof"] = geo_proof
+        if memory_speed_proof:
+            payload["memory_speed_proof"] = memory_speed_proof
+        if web_proof:
+            payload["web_proof"] = web_proof
+        if url_proof:
+            payload["url_proof"] = url_proof
+        if image_proof:
+            payload["image_proof"] = image_proof
+        if files_proof:
+            payload["files_proof"] = files_proof
+        if project_proof:
+            payload["project_proof"] = project_proof
         _print(payload)
         return 0
     except Exception as exc:  # noqa: BLE001
         msg = str(exc)
+        if not msg:
+            msg = f"{current_stage}:{exc.__class__.__name__}"
         # If Chrome/runtime couldn't start (or flaked due to host constraints), treat as environment issue (best-effort)
         # unless strict. Keep the heuristics broad; these failures are common on CI/minimal servers.
         if not args.strict:
@@ -317,6 +794,15 @@ def main() -> int:
                 driver.quit()
         except Exception:
             pass
+        # Best-effort orphan cleanup: kill only browsers started with this run's
+        # temporary profile directory, not any user-owned Chromium session.
+        try:
+            if args.cleanup_orphans:
+                cleanup_report = _cleanup_orphan_browsers(profile_dir)
+                if cleanup_report:
+                    _print({"cleanup_orphans": cleanup_report})
+        except Exception:
+            pass
         if profile_dir:
             try:
                 shutil.rmtree(profile_dir, ignore_errors=True)
@@ -325,6 +811,11 @@ def main() -> int:
         if xdg_dir:
             try:
                 shutil.rmtree(xdg_dir, ignore_errors=True)
+            except Exception:
+                pass
+        if proof_assets:
+            try:
+                shutil.rmtree(proof_assets.get("dir"), ignore_errors=True)
             except Exception:
                 pass
 

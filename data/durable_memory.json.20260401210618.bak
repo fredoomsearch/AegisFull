@@ -1,0 +1,85 @@
+{
+  "anonymous": {
+    "subject": "anonymous",
+    "facts": [],
+    "preferences": [
+      "prefers concise answers"
+    ],
+    "notes": [
+      "active_project: proj_388431",
+      "active_project: proj_8a741d",
+      "active_project: proj_dcca9c",
+      "active_project: proj_983d4d",
+      "active_project: proj_c3aaee",
+      "active_project: proj_434930",
+      "active_project: proj_6fb8fe",
+      "active_project: proj_d59ddd",
+      "mode: url",
+      "mode: chat",
+      "mode: web",
+      "active_project: proj_4eba4a",
+      "active_project: proj_1b1751",
+      "active_project: proj_78ad2f",
+      "active_project: proj_f9554e",
+      "active_project: proj_078a01",
+      "active_project: proj_cd2c3c",
+      "active_project: proj_4b805c",
+      "active_project: proj_2fdd23",
+      "active_project: proj_f83b27",
+      "active_project: proj_a7ff44",
+      "active_project: proj_f260dd",
+      "active_project: proj_e777ae",
+      "mode: agent"
+    ],
+    "created_at_ms": 1774936849059,
+    "updated_at_ms": 1775075158244
+  },
+  "sub:user": {
+    "subject": "sub:user",
+    "facts": [],
+    "preferences": [
+      "prefers concise answers"
+    ],
+    "notes": [
+      "active_project: e2e_smoke_1774982085_4868ad",
+      "active_project: e2e_smoke_1774985067_dd3854",
+      "active_project: e2e_smoke_1774985258_71d402",
+      "active_project: e2e_smoke_1774985469_ee73c7",
+      "active_project: e2e_smoke_1775005805_a0cfaa",
+      "active_project: portfolio_update_package_08d4c9",
+      "active_project: DtappPy_d5f1a1",
+      "active_project: e2e_smoke_1775050694_affc28",
+      "active_project: e2e_smoke_1775050917_8528ca",
+      "active_project: e2e_smoke_1775052619_51ddcf",
+      "active_project: portfolio_update_package_782b3a",
+      "active_project: portfolio_update_package_f43a0a",
+      "active_project: e2e_smoke_1775059682_2354e6",
+      "active_project: DtappPy_548046",
+      "active_project: portfolio_update_package_c01c1f",
+      "active_project: DtappPy_3c6f70",
+      "mode: agent",
+      "active_project: e2e_smoke_1775075204_584fbf",
+      "active_project: whioutoKn",
+      "mode: web",
+      "active_project: portfolio_update_package_0a793c",
+      "mode: crypto",
+      "active_project: DtAPPpyFront_7f45ca",
+      "mode: chat"
+    ],
+    "created_at_ms": 1774936943964,
+    "updated_at_ms": 1775077566796
+  },
+  "api:d07fc14a3a308251": {
+    "subject": "api:d07fc14a3a308251",
+    "facts": [],
+    "preferences": [
+      "prefers concise answers"
+    ],
+    "notes": [
+      "mode: web",
+      "mode: agent"
+    ],
+    "created_at_ms": 1774939702536,
+    "updated_at_ms": 1775075332583
+  }
+}

@@ -83,3 +83,21 @@ def test_summarize_runtime_capabilities_strict_full_blocks_on_image_or_browser(m
     assert data["ready"] is False
     assert data["status"] == "error"
     assert data["product_track"] == "full"
+
+
+def test_summarize_runtime_capabilities_dedupes_degraded_reasons(monkeypatch):
+    monkeypatch.setenv("AEGIS_RUNTIME_PROFILE", "strict")
+    monkeypatch.setenv("AEGIS_PRODUCT_TRACK", "full")
+    data = summarize_runtime_capabilities(
+        {
+            "embeddings": {"status": "loaded"},
+            "retrieval": {"status": "loaded"},
+            "llm": {"status": "configured", "available": True, "model_exists": True, "loaded": False},
+            "web_search": {"status": "ready"},
+            "image": {"status": "degraded", "images_dir_exists": True},
+            "clamav": {"status": "ready"},
+            "project_tools": {"status": "ready", "available": True},
+            "browser_runtime": {"status": "ready"},
+        }
+    )
+    assert data["degraded_reasons"] == ["image:degraded"]

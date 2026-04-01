@@ -5,6 +5,7 @@ import argparse
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -191,6 +192,15 @@ def _looks_like_internal_leak(text: str) -> bool:
     return any(marker in lowered for marker in any_markers)
 
 
+def _response_is_concise(text: str) -> bool:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return False
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", cleaned) if part.strip()]
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", cleaned) if part.strip()]
+    return len(paragraphs) <= 5 and len(sentences) <= 5 and len(cleaned) <= 600
+
+
 def check_health(ctx: ClientCtx) -> bool:
     r = ctx.request("GET", "/healthz", json_body=None)
     data = _json_or_text(r)
@@ -233,6 +243,78 @@ def check_chat(ctx: ClientCtx) -> bool:
         return True
     _print_fail("chat", f"status={r.status_code} body={data}")
     return False
+
+
+def _check_llm_prompt_mode_contracts(build_messages_fn=None) -> list[str]:
+    if build_messages_fn is None:
+        from app.models.llm_utils import build_messages as build_messages_fn
+
+    cases = (
+        {
+            "name": "base",
+            "message": "Where is Colombia?",
+            "must_have": (
+                "You are AEGIS",
+                "Always reply in the user's language",
+            ),
+            "must_not_have": (
+                "You are in CODE MODE.",
+                "You are in BUILD MODE.",
+            ),
+        },
+        {
+            "name": "code",
+            "message": "Explain this Python traceback and fix it",
+            "must_have": (
+                "You are AEGIS",
+                "You are in CODE MODE.",
+            ),
+            "must_not_have": (
+                "You are in BUILD MODE.",
+            ),
+        },
+        {
+            "name": "build",
+            "message": "Build a login system with Angular frontend and Python backend",
+            "must_have": (
+                "You are AEGIS",
+                "You are in BUILD MODE.",
+                "Prefer backend: python.",
+                "Prefer frontend: angular.",
+            ),
+            "must_not_have": (),
+        },
+    )
+
+    failures: list[str] = []
+    for case in cases:
+        messages = build_messages_fn(
+            "e2e-llm-modes",
+            case["message"],
+            history_messages=[],
+            summary_override="",
+            session_state={},
+        )
+        if not isinstance(messages, list) or not messages or str(messages[0].get("role") or "") != "system":
+            failures.append(f"{case['name']}:missing-system-message")
+            continue
+        system_text = str(messages[0].get("content") or "")
+        for marker in case["must_have"]:
+            if marker not in system_text:
+                failures.append(f"{case['name']}:missing:{marker}")
+        for marker in case["must_not_have"]:
+            if marker in system_text:
+                failures.append(f"{case['name']}:unexpected:{marker}")
+    return failures
+
+
+def check_llm_prompt_modes(_ctx: ClientCtx) -> bool:
+    failures = _check_llm_prompt_mode_contracts()
+    if failures:
+        _print_fail("llm/prompt-modes", " | ".join(failures[:4]))
+        return False
+    _print_ok("llm/prompt-modes", "base+code+build")
+    return True
 
 
 def check_contextual_web(ctx: ClientCtx) -> bool:
@@ -590,6 +672,113 @@ def check_project_context(ctx: ClientCtx) -> bool:
     return False
 
 
+def check_memory_and_speed(ctx: ClientCtx) -> bool:
+    if not ctx.conversation_id:
+        _print_fail("memory-speed", "missing conversation_id")
+        return False
+    if not ctx.uploaded_project_id:
+        _print_fail("memory-speed", "missing uploaded_project_id")
+        return False
+
+    state_resp = ctx.request("GET", f"/chat/{ctx.conversation_id}/state", json_body=None)
+    state_data = _json_or_text(state_resp)
+    if state_resp.status_code != 200 or not isinstance(state_data, dict) or not isinstance(state_data.get("state"), dict):
+        _print_fail("memory-speed/state", f"status={state_resp.status_code} body={state_data}")
+        return False
+
+    state_before = dict(state_data.get("state") or {})
+    if str(state_before.get("active_project_id") or "") != ctx.uploaded_project_id:
+        _print_fail(
+            "memory-speed/state",
+            f"expected active_project_id={ctx.uploaded_project_id} got={state_before.get('active_project_id')}",
+        )
+        return False
+
+    followup_resp = ctx.request(
+        "POST",
+        "/chat",
+        json_body={
+            "message": "also show the current project docs",
+            "lang": "en",
+            "mode": "web",
+            "conversation_id": ctx.conversation_id,
+            "use_existing": True,
+            "synthesize": False,
+        },
+    )
+    followup_data = _json_or_text(followup_resp)
+    if followup_resp.status_code != 200 or not isinstance(followup_data, dict):
+        _print_fail("memory-speed/followup", f"status={followup_resp.status_code} body={followup_data}")
+        return False
+
+    followup_response = str(followup_data.get("response") or "").strip()
+    if _looks_like_internal_leak(followup_response):
+        _print_fail("memory-speed/followup", "internal-prompt-leak-detected")
+        return False
+
+    state_resp_after = ctx.request("GET", f"/chat/{ctx.conversation_id}/state", json_body=None)
+    state_data_after = _json_or_text(state_resp_after)
+    if state_resp_after.status_code != 200 or not isinstance(state_data_after, dict) or not isinstance(
+        state_data_after.get("state"), dict
+    ):
+        _print_fail("memory-speed/state-after", f"status={state_resp_after.status_code} body={state_data_after}")
+        return False
+    state_after = dict(state_data_after.get("state") or {})
+    if str(state_after.get("last_mode") or "") != "web":
+        _print_fail("memory-speed/state-after", f"expected last_mode=web got={state_after.get('last_mode')}")
+        return False
+    if str(state_after.get("active_project_id") or "") != ctx.uploaded_project_id:
+        _print_fail(
+            "memory-speed/state-after",
+            f"expected active_project_id={ctx.uploaded_project_id} got={state_after.get('active_project_id')}",
+        )
+        return False
+    if state_before.get("goal") and state_after.get("goal") and str(state_before.get("goal")) != str(state_after.get("goal")):
+        _print_fail("memory-speed/state-after", "goal drifted across mode switch")
+        return False
+
+    capital_start = time.perf_counter()
+    capital_resp = ctx.request(
+        "POST",
+        "/chat",
+        json_body={
+            "message": "what is the capital of japan?",
+            "lang": "en",
+            "mode": "chat",
+            "conversation_id": ctx.conversation_id,
+            "use_existing": True,
+        },
+    )
+    capital_elapsed_ms = int((time.perf_counter() - capital_start) * 1000)
+    capital_data = _json_or_text(capital_resp)
+    if capital_resp.status_code != 200 or not isinstance(capital_data, dict):
+        _print_fail("memory-speed/capital", f"status={capital_resp.status_code} body={capital_data}")
+        return False
+
+    capital_response = str(capital_data.get("response") or "").strip()
+    capital_context = capital_data.get("context") if isinstance(capital_data.get("context"), dict) else {}
+    if "Tokyo" not in capital_response and "Tokio" not in capital_response:
+        _print_fail("memory-speed/capital", "missing Tokyo")
+        return False
+    if not _response_is_concise(capital_response):
+        _print_fail("memory-speed/capital", "response not concise")
+        return False
+    if str(capital_context.get("source_plan") or "") != "local_only":
+        _print_fail("memory-speed/capital", f"unexpected source_plan={capital_context.get('source_plan')}")
+        return False
+    if str(capital_context.get("effective_tool") or "") != "capital_fact":
+        _print_fail("memory-speed/capital", f"unexpected effective_tool={capital_context.get('effective_tool')}")
+        return False
+    if str(capital_context.get("web_status") or "") != "not-used":
+        _print_fail("memory-speed/capital", f"unexpected web_status={capital_context.get('web_status')}")
+        return False
+    _print_ok(
+        "memory-speed",
+        f"mode-switch-ok concise-ok fast-path=capital_fact elapsed_ms={capital_elapsed_ms}",
+    )
+    return True
+
+
 def check_turns_and_ops(ctx: ClientCtx) -> bool:
     if not ctx.conversation_id:
         _print_fail("chat/turns", "missing conversation_id")
@@ -654,6 +843,26 @@ def check_system(ctx: ClientCtx) -> bool:
         return True
     _print_fail("system/readyz", f"status={r2.status_code} body={data2}")
     return False
+
+
+def check_auxiliary_surfaces(ctx: ClientCtx) -> bool:
+    ok = True
+    checks = [
+        ("GET", "/data/health", None),
+        ("GET", "/notifications/health", None),
+    ]
+    for method, path, params in checks:
+        r = ctx.request(method, path, json_body=None, params=params)
+        data = _json_or_text(r)
+        if r.status_code == 200 and isinstance(data, dict) and str(data.get("status") or "") == "ok":
+            if path == "/data/health":
+                _print_ok(path, f"db={data.get('db')} latency_ms={data.get('latency_ms')}")
+            else:
+                _print_ok(path, "ok")
+        else:
+            _print_fail(path, f"status={r.status_code} body={data}")
+            ok = False
+    return ok
 
 
 def check_crypto(ctx: ClientCtx) -> bool:
@@ -939,6 +1148,7 @@ def _run_checks(args: argparse.Namespace, *, base_url: str, transport: Transport
         checks.append(check_auth_token)
     if not args.skip_chat:
         checks.append(check_chat)
+        checks.append(check_llm_prompt_modes)
         if args.inprocess:
             checks.append(check_contextual_web)
     if not args.skip_image:
@@ -947,9 +1157,12 @@ def _run_checks(args: argparse.Namespace, *, base_url: str, transport: Transport
         checks.append(check_upload_and_ingest)
         if not args.skip_chat:
             checks.append(check_project_context)
+            checks.append(check_memory_and_speed)
             checks.append(check_turns_and_ops)
     if not args.skip_system:
         checks.append(check_system)
+    if not args.inprocess:
+        checks.append(check_auxiliary_surfaces)
     if not args.skip_crypto:
         checks.append(check_crypto)
 

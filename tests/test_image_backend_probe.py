@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from app.scripts import image_backend_probe as probe
 
 
@@ -154,3 +156,50 @@ def test_probe_backend_torch_cuda_required_without_python_bin_fails(monkeypatch)
     )
     assert out.ok is False
     assert "torch-cuda-required" in out.error
+
+
+def test_runtime_image_status_treats_mixed_recent_success_and_fallback_as_ready(monkeypatch, tmp_path):
+    from app.api import image as image_api
+
+    log_file = tmp_path / "image-log.jsonl"
+    rows = [
+        {"backend_ok": True, "fallback_used": False, "backend_error": ""},
+        {"backend_ok": False, "fallback_used": True, "backend_error": "connection refused"},
+    ]
+    log_file.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+
+    monkeypatch.setattr(image_api, "LOG_FILE", log_file)
+    monkeypatch.setattr(image_api, "_probe_backend", lambda *_a, **_k: (True, 200, None))
+    monkeypatch.setattr(
+        image_api,
+        "_resolve_checkpoint",
+        lambda *_a, **_k: ("DreamShaper_8_pruned.safetensors", "DreamShaper_8_pruned.safetensors", ["DreamShaper_8_pruned.safetensors"], None),
+    )
+
+    status = image_api.runtime_image_status()
+    assert status["status"] == "ready"
+    assert status["recent_backend_successes"] == 1
+    assert status["recent_fallbacks"] == 1
+    assert status["transient_fallbacks"] is True
+
+
+def test_runtime_image_status_keeps_degraded_when_only_fallbacks_exist(monkeypatch, tmp_path):
+    from app.api import image as image_api
+
+    log_file = tmp_path / "image-log.jsonl"
+    rows = [
+        {"backend_ok": False, "fallback_used": True, "backend_error": "connection refused"},
+    ]
+    log_file.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+
+    monkeypatch.setattr(image_api, "LOG_FILE", log_file)
+    monkeypatch.setattr(image_api, "_probe_backend", lambda *_a, **_k: (True, 200, None))
+    monkeypatch.setattr(
+        image_api,
+        "_resolve_checkpoint",
+        lambda *_a, **_k: ("DreamShaper_8_pruned.safetensors", "DreamShaper_8_pruned.safetensors", ["DreamShaper_8_pruned.safetensors"], None),
+    )
+
+    status = image_api.runtime_image_status()
+    assert status["status"] == "degraded"
+    assert status["fallback_only"] is True

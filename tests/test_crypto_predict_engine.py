@@ -33,6 +33,8 @@ def test_predict_prefers_trained_engine_when_available(monkeypatch):
     assert resp.decision == "BUY"
     assert resp.additional_info["engine"] == "trained"
     assert resp.additional_info["model_used"] == "ensemble"
+    assert resp.additional_info["policy"]["route_mode"] == "trained"
+    assert (resp.raw or {}).get("policy", {}).get("route_mode") == "trained"
     assert "trained-model prediction" in (resp.additional_info["note"] or "")
     assert (resp.raw or {}).get("trained_artifact") == "models/rf_model.joblib"
 
@@ -289,6 +291,7 @@ def test_predict_logs_threshold_fields(monkeypatch):
 
     assert captured["entry"]["buy_threshold"] == 0.9
     assert captured["entry"]["sell_threshold"] == 0.1
+    assert captured["entry"]["predicted_price"] == 203.5
     assert captured["entry"]["threshold_strategy"]["trade_count"] == 12
 
 
@@ -509,6 +512,40 @@ def test_predict_blocks_low_consensus_support(monkeypatch):
     assert (resp.raw or {}).get("consensus", {}).get("supporters") == 3
     assert (resp.raw or {}).get("consensus", {}).get("total_models") == 5
     assert (resp.raw or {}).get("consensus", {}).get("support_ratio") == pytest.approx(0.6)
+
+
+def test_crypto_policy_endpoint_exposes_route_and_gates(monkeypatch):
+    import app.api.crypto as crypto_api
+
+    monkeypatch.setattr(
+        crypto_api,
+        "optimize_thresholds",
+        lambda **_kwargs: {"buy_threshold": 0.78, "sell_threshold": 0.22, "trade_count": 19},
+    )
+    monkeypatch.setattr(
+        crypto_api,
+        "assess_scope_credibility",
+        lambda **_kwargs: {
+            "status": "cautious",
+            "actionable": True,
+            "should_abstain": False,
+            "score": 0.67,
+            "reasons": ["thin_edge"],
+            "trade_count": 19,
+            "recommendation": {"buy_threshold": 0.78, "sell_threshold": 0.22, "trade_count": 19},
+        },
+    )
+
+    resp = crypto_api.crypto_policy(symbol="BTC", horizon_minutes=15, regime="bull_high_vol")
+
+    assert resp["scope"]["symbol"] == "BTC"
+    assert resp["scope"]["engine"] == "trained"
+    assert resp["scope"]["limit"] == crypto_api.CRYPTO_THRESHOLD_LOOKBACK
+    assert resp["policy_profile"]["default_buy_threshold"] == crypto_api.CRYPTO_DEFAULT_BUY_THRESHOLD
+    assert resp["recommendation"]["buy_threshold"] == 0.78
+    assert resp["credibility"]["status"] == "cautious"
+    assert resp["summary"]["route_mode"] == "trained"
+    assert resp["summary"]["should_abstain"] is False
 
 
 def test_recent_stats_separates_trained_and_demo_engines(tmp_path, monkeypatch):
@@ -941,6 +978,61 @@ def test_crypto_credibility_endpoint(tmp_path, monkeypatch):
     assert payload["scope"]["symbol"] == "BTCUSDT"
     assert payload["assessment"]["trade_count"] >= 8
     assert payload["assessment"]["status"] in {"trusted", "cautious", "blocked"}
+
+
+def test_predict_uses_adaptive_leaderboard_fallback_when_scope_history_is_missing(monkeypatch):
+    import app.api.crypto as crypto_api
+
+    monkeypatch.setattr(crypto_api, "_binance_spot_price", lambda _sym: 100.0)
+    monkeypatch.setattr(crypto_api, "optimize_thresholds", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        crypto_api,
+        "scope_leaderboard",
+        lambda **_kwargs: [
+            {
+                "symbol": "BTCUSDT",
+                "horizon_minutes": 15,
+                "regime": "bull_high_vol",
+                "buy_threshold": 0.74,
+                "sell_threshold": 0.28,
+                "trade_count": 18,
+                "precision": 0.76,
+                "positive_net_rate": 0.67,
+                "net_expectancy_pct": 0.011,
+                "max_drawdown_pct": 0.05,
+                "score": 0.81,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        crypto_api,
+        "_predict_with_trained_models",
+        lambda *_a, **_k: {
+            "model_used": "ensemble",
+            "probability_up": 0.78,
+            "predicted_price": 102.0,
+            "decision": "BUY",
+            "current_price": 100.0,
+            "trained_model_type": "ensemble",
+            "trained_artifact": "models/rf_model.joblib",
+            "dataset_hash": "hash123",
+            "trained_at": "2026-03-16T12:00:00+00:00",
+            "validation_mode": "walk_forward",
+            "interval_minutes": 15,
+            "regime": "bull_high_vol",
+            "per_model_probs": {"rf": 0.81, "dl": 0.8, "xgb": 0.79, "cat": 0.78, "seta": 0.82},
+        },
+    )
+    monkeypatch.setattr(crypto_api, "fetch_crypto_news", lambda *_a, **_k: {"provider": "stub", "items": []})
+
+    req = crypto_api.PredictRequest(symbol="BTC", horizon_minutes=15, model="ensemble", save=False)
+    resp = crypto_api.predict(req)
+
+    assert resp.additional_info["adaptive_policy"]["strategy_source"].startswith("leaderboard:")
+    assert resp.raw["adaptive_policy"]["selected_strategy"]["buy_threshold"] == 0.74
+    assert resp.additional_info["policy"]["thresholds"]["threshold_strategy"]["buy_threshold"] == 0.74
+
+
 
 
 def test_predict_request_validates_horizon_bounds():

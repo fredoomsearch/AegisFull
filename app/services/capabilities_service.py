@@ -192,7 +192,7 @@ def summarize_runtime_capabilities(capabilities: Dict[str, Any]) -> Dict[str, An
 
     emb_ok = emb.get("status") != "error"
     retrieval_ok = retrieval.get("status") != "error"
-    llm_ok = bool(llm.get("available")) and bool(llm.get("model_exists") or llm.get("loaded"))
+    llm_ok = bool(llm.get("available")) and bool(llm.get("model_exists") or llm.get("loaded") or llm.get("remote_ready"))
     image_storage_ok = bool(image.get("images_dir_exists"))
     image_backend_ok = image.get("status") == "ready"
     web_ok = web.get("status") == "ready"
@@ -227,6 +227,9 @@ def summarize_runtime_capabilities(capabilities: Dict[str, Any]) -> Dict[str, An
         degraded_reasons.append(f"image:{image.get('status') or 'not-ready'}")
     if strict_profile and not web_ok:
         degraded_reasons.append(f"web:{web.get('status') or 'not-ready'}")
+
+    if degraded_reasons:
+        degraded_reasons = list(dict.fromkeys(str(item) for item in degraded_reasons if str(item).strip()))
 
     status = "ready" if core_ready else "error"
     if core_ready and degraded_reasons:

@@ -46,6 +46,16 @@ def test_extract_upload_path_from_text(tmp_path):
     assert "proj_b" in found
 
 
+def test_resolve_upload_path_rejects_embedded_null_byte(tmp_path):
+    upload_root = tmp_path / "uploads"
+    proj = upload_root / "proj_null"
+    proj.mkdir(parents=True)
+
+    inspector = _reload_inspector(upload_root)
+    got = inspector.resolve_upload_path(f"{proj}\x00bad")
+    assert got is None
+
+
 def test_inspect_upload_tree_counts_files(tmp_path):
     upload_root = tmp_path / "uploads"
     proj = upload_root / "proj_c"

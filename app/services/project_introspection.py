@@ -101,6 +101,20 @@ _ARCH_QUESTION_HINTS = (
     "capabilities",
     "capacidades",
 )
+_RELATION_PRIORITY_DIRS = (
+    "app/",
+    "api/",
+    "services/",
+    "models/",
+    "repositories/",
+    "routes/",
+    "controllers/",
+    "utils/",
+    "tests/",
+    "ui/",
+    "frontend/",
+    "backend/",
+)
 
 
 def language_for_path(path: Path) -> str:
@@ -290,6 +304,182 @@ def summarize_project_subtree(
     return f"{header}\n{body}"
 
 
+def infer_directory_focus(text: str, manifest: Dict[str, Any]) -> str:
+    query = str(text or "").lower()
+    file_tree = manifest.get("file_tree") if isinstance(manifest, dict) else None
+    if not query or not isinstance(file_tree, list):
+        return ""
+
+    directory_counts: Counter[str] = Counter()
+    for raw in file_tree:
+        if not isinstance(raw, str):
+            continue
+        parts = [part for part in PurePosixPath(raw).parts[:-1] if part and part != "."]
+        if not parts:
+            continue
+        for idx in range(len(parts)):
+            directory_counts["/".join(parts[: idx + 1])] += 1
+
+    if not directory_counts:
+        return ""
+
+    candidates: List[Tuple[int, int, int, str]] = []
+    for path, count in directory_counts.items():
+        lower_path = path.lower()
+        leaf = PurePosixPath(path).name.lower()
+        if lower_path in query or re.search(rf"(?<![\w./-]){re.escape(leaf)}(?![\w./-])", query):
+            depth = len(PurePosixPath(path).parts)
+            candidates.append((depth, int(count), len(path), path))
+
+    if not candidates:
+        return ""
+    candidates.sort(reverse=True)
+    return candidates[0][3]
+
+
+def _folder_role_hint(name: str, *, lang: str) -> str:
+    key = str(name or "").strip().lower()
+    hints = {
+        "api": (
+            "Suele concentrar endpoints, routers o contratos HTTP.",
+            "It usually concentrates endpoints, routers, or HTTP contracts.",
+        ),
+        "routes": (
+            "Suele definir rutas y handlers expuestos.",
+            "It usually defines exposed routes and handlers.",
+        ),
+        "controllers": (
+            "Suele coordinar la lógica de entrada/salida de la aplicación.",
+            "It usually coordinates application input/output logic.",
+        ),
+        "services": (
+            "Suele contener la lógica de negocio principal.",
+            "It usually contains the main business logic.",
+        ),
+        "repositories": (
+            "Suele encapsular acceso a datos o persistencia.",
+            "It usually encapsulates data access or persistence.",
+        ),
+        "models": (
+            "Suele definir entidades, esquemas o modelos de datos.",
+            "It usually defines entities, schemas, or data models.",
+        ),
+        "schemas": (
+            "Suele definir validación y contratos de datos.",
+            "It usually defines validation and data contracts.",
+        ),
+        "utils": (
+            "Suele agrupar helpers y utilidades compartidas.",
+            "It usually groups shared helpers and utilities.",
+        ),
+        "tests": (
+            "Suele concentrar pruebas automatizadas.",
+            "It usually concentrates automated tests.",
+        ),
+        "infra": (
+            "Suele concentrar despliegue, contenedores o infraestructura.",
+            "It usually concentrates deployment, containers, or infrastructure.",
+        ),
+        "ui": (
+            "Suele concentrar la interfaz o assets del frontend.",
+            "It usually concentrates frontend UI or assets.",
+        ),
+        "frontend": (
+            "Suele concentrar la aplicación cliente.",
+            "It usually concentrates the client application.",
+        ),
+        "backend": (
+            "Suele concentrar la API o servicios del servidor.",
+            "It usually concentrates the API or server services.",
+        ),
+    }
+    hint = hints.get(key)
+    if hint:
+        return hint[0] if (lang or "es").lower().startswith("es") else hint[1]
+    if (lang or "es").lower().startswith("es"):
+        return f"Agrupa archivos relacionados con `{name}`."
+    return f"It groups files related to `{name}`."
+
+
+def summarize_project_folders(manifest: Dict[str, Any], *, lang: str = "es", limit: int = 6) -> str:
+    file_tree = [str(path) for path in (manifest.get("file_tree") or []) if isinstance(path, str)]
+    if not file_tree:
+        return ""
+
+    top_dirs = Counter(path.split("/", 1)[0] for path in file_tree if "/" in path)
+    if not top_dirs:
+        return ""
+
+    es = (lang or "es").lower().startswith("es")
+    lines: List[str] = ["Desglose por carpetas:" if es else "Folder breakdown:"]
+    for dir_name, count in top_dirs.most_common(max(1, limit)):
+        sample_paths = [path for path in file_tree if path.startswith(f"{dir_name}/")][:3]
+        sample_text = ", ".join(sample_paths) or "-"
+        role_hint = _folder_role_hint(dir_name, lang=lang)
+        if es:
+            lines.append(f"- {dir_name}: {count} archivos. {role_hint} Ejemplos: {sample_text}.")
+        else:
+            lines.append(f"- {dir_name}: {count} files. {role_hint} Examples: {sample_text}.")
+    return "\n".join(lines)
+
+
+def build_relation_subset_manifest(
+    manifest: Dict[str, Any],
+    *,
+    max_files: int = 240,
+    include_paths: Optional[Iterable[str]] = None,
+) -> Dict[str, Any]:
+    file_tree = [str(path) for path in (manifest.get("file_tree") or []) if isinstance(path, str)]
+    code_paths = [path for path in file_tree if Path(path).suffix.lower() in CODE_EXTS]
+    if len(code_paths) <= max(1, max_files):
+        subset = dict(manifest)
+        subset["relation_subset"] = False
+        subset["relation_subset_total_code_files"] = len(code_paths)
+        subset["relation_subset_selected_files"] = len(code_paths)
+        return subset
+
+    include_set = {str(path).strip() for path in (include_paths or []) if str(path).strip()}
+    prioritized: List[str] = []
+    seen: set[str] = set()
+
+    def add(path: str) -> None:
+        if path in seen:
+            return
+        if Path(path).suffix.lower() not in CODE_EXTS:
+            return
+        seen.add(path)
+        prioritized.append(path)
+
+    for path in list(include_set):
+        add(path)
+    for path in (manifest.get("entrypoints") or []):
+        if isinstance(path, str):
+            add(path)
+    for path in (manifest.get("key_files") or []):
+        if isinstance(path, str):
+            add(path)
+    for prefix in _RELATION_PRIORITY_DIRS:
+        for path in code_paths:
+            if path.startswith(prefix):
+                add(path)
+            if len(prioritized) >= max_files:
+                break
+        if len(prioritized) >= max_files:
+            break
+    if len(prioritized) < max_files:
+        for path in sorted(code_paths):
+            add(path)
+            if len(prioritized) >= max_files:
+                break
+
+    subset = dict(manifest)
+    subset["file_tree"] = prioritized[: max(1, max_files)]
+    subset["relation_subset"] = True
+    subset["relation_subset_total_code_files"] = len(code_paths)
+    subset["relation_subset_selected_files"] = len(subset["file_tree"])
+    return subset
+
+
 def build_architecture_profile(manifest: Dict[str, Any]) -> Dict[str, Any]:
     file_tree = [str(path) for path in (manifest.get("file_tree") or []) if isinstance(path, str)]
     lower_paths = [path.lower() for path in file_tree]
@@ -385,6 +575,152 @@ def summarize_architecture(profile: Dict[str, Any], *, lang: str = "es") -> str:
             f"Config/infra files: {config_files}",
         ]
     )
+
+
+def summarize_project_architecture_deep(
+    root: Path,
+    manifest: Dict[str, Any],
+    *,
+    lang: str = "es",
+    limit: int = 4,
+) -> str:
+    es = (lang or "es").lower().startswith("es")
+    profile = manifest.get("architecture") if isinstance(manifest.get("architecture"), dict) else build_architecture_profile(manifest)
+    sections: List[str] = [
+        summarize_architecture(profile, lang=lang),
+        summarize_project_folders(manifest, lang=lang, limit=max(3, limit)),
+    ]
+
+    stats = manifest.get("stats") if isinstance(manifest.get("stats"), dict) else {}
+    file_count = int(stats.get("files") or 0)
+    intelligence: Dict[str, Any] = {}
+    analysis_manifest = manifest
+    if root:
+        if file_count > 600:
+            analysis_manifest = build_relation_subset_manifest(manifest, max_files=max(180, limit * 60))
+            if bool(analysis_manifest.get("relation_subset")):
+                total_code = int(analysis_manifest.get("relation_subset_total_code_files") or 0)
+                selected_code = int(analysis_manifest.get("relation_subset_selected_files") or 0)
+                if es:
+                    sections.append(
+                        f"Analisis relacional parcial: {selected_code} archivos de codigo muestreados de {total_code}."
+                    )
+                else:
+                    sections.append(
+                        f"Partial relation analysis: sampled {selected_code} code files out of {total_code}."
+                    )
+        try:
+            intelligence = build_project_intelligence_summary(root, manifest=analysis_manifest, limit=max(3, limit))
+        except Exception:
+            intelligence = {}
+
+    runtime_surfaces = intelligence.get("runtime_surfaces") if isinstance(intelligence.get("runtime_surfaces"), list) else []
+    routes = intelligence.get("routes") if isinstance(intelligence.get("routes"), list) else []
+    hotspots = intelligence.get("hotspots") if isinstance(intelligence.get("hotspots"), list) else []
+    public_api_symbols = intelligence.get("public_api_symbols") if isinstance(intelligence.get("public_api_symbols"), list) else []
+    mutual_edges = intelligence.get("mutual_edges") if isinstance(intelligence.get("mutual_edges"), list) else []
+
+    if runtime_surfaces:
+        lines = ["Superficies runtime:" if es else "Runtime surfaces:"]
+        for row in runtime_surfaces[: max(1, limit)]:
+            path = str(row.get("path") or "").strip() or "-"
+            app_name = str(row.get("app_name") or "").strip() or "app"
+            served = int(row.get("served_route_count") or 0)
+            if es:
+                lines.append(f"- {path} -> {app_name} ({served} rutas servidas)")
+            else:
+                lines.append(f"- {path} -> {app_name} ({served} served routes)")
+        sections.append("\n".join(lines))
+
+    if routes:
+        lines = ["Rutas destacadas:" if es else "Key routes:"]
+        for row in routes[: max(2, limit)]:
+            method = str(row.get("method") or "").strip().upper() or "ROUTE"
+            route = str(row.get("resolved_route") or row.get("route") or "").strip() or "-"
+            path = str(row.get("path") or "").strip() or "-"
+            handler = str(row.get("handler") or "").strip()
+            handler_text = f"::{handler}" if handler else ""
+            lines.append(f"- {method} {route} -> {path}{handler_text}")
+        sections.append("\n".join(lines))
+
+    if hotspots:
+        lines = ["Puntos centrales del código:" if es else "Code hotspots:"]
+        for row in hotspots[: max(2, limit)]:
+            path = str(row.get("path") or "").strip() or "-"
+            inbound = int(row.get("inbound_refs") or 0)
+            outbound = int(row.get("outbound_refs") or 0)
+            if es:
+                lines.append(f"- {path}: {inbound} referencias entrantes, {outbound} salientes.")
+            else:
+                lines.append(f"- {path}: {inbound} inbound references, {outbound} outbound.")
+        sections.append("\n".join(lines))
+
+    if mutual_edges:
+        lines = ["Relaciones entre módulos:" if es else "Module relationships:"]
+        for row in mutual_edges[: max(2, limit)]:
+            left = str(row.get("a") or "").strip() or "-"
+            right = str(row.get("b") or "").strip() or "-"
+            lines.append(f"- {left} <-> {right}")
+        sections.append("\n".join(lines))
+
+    if public_api_symbols:
+        lines = ["Símbolos públicos relevantes:" if es else "Relevant public symbols:"]
+        for row in public_api_symbols[: max(2, limit)]:
+            symbol = str(row.get("symbol") or "").strip() or "-"
+            path = str(row.get("path") or "").strip() or "-"
+            lines.append(f"- {symbol} @ {path}")
+        sections.append("\n".join(lines))
+
+    return "\n\n".join(section for section in sections if str(section or "").strip())
+
+
+def summarize_project_impact_report(report: Dict[str, Any], *, lang: str = "es", limit: int = 4) -> str:
+    es = (lang or "es").lower().startswith("es")
+    matched_files = [str(item).strip() for item in (report.get("matched_files") or []) if str(item).strip()]
+    imported_by = [str((item or {}).get("path") or "").strip() for item in (report.get("imported_by") or []) if str((item or {}).get("path") or "").strip()]
+    imports_to = [str((item or {}).get("path") or "").strip() for item in (report.get("imports_to") or []) if str((item or {}).get("path") or "").strip()]
+    referenced_by = [str((item or {}).get("path") or "").strip() for item in (report.get("referenced_by_files") or []) if str((item or {}).get("path") or "").strip()]
+    routes = [str((item or {}).get("resolved_route") or (item or {}).get("route") or "").strip() for item in (report.get("routes_in_scope") or []) if str((item or {}).get("resolved_route") or (item or {}).get("route") or "").strip()]
+    surfaces = [str((item or {}).get("path") or "").strip() for item in (report.get("runtime_surfaces_in_scope") or []) if str((item or {}).get("path") or "").strip()]
+    public_symbols = [str((item or {}).get("symbol") or "").strip() for item in (report.get("public_api_symbols_in_scope") or []) if str((item or {}).get("symbol") or "").strip()]
+
+    lines: List[str] = ["Impacto dentro del proyecto:" if es else "Project impact:"]
+    if matched_files:
+        lines.append(
+            ("- Archivo objetivo: " if es else "- Target file: ")
+            + ", ".join(matched_files[: max(1, limit)])
+        )
+    if imported_by:
+        lines.append(
+            ("- Lo usan/importan: " if es else "- Imported/used by: ")
+            + ", ".join(imported_by[: max(1, limit)])
+        )
+    if imports_to:
+        lines.append(
+            ("- Depende de: " if es else "- Depends on: ")
+            + ", ".join(imports_to[: max(1, limit)])
+        )
+    if referenced_by:
+        lines.append(
+            ("- Símbolos referenciados desde: " if es else "- Symbols referenced from: ")
+            + ", ".join(referenced_by[: max(1, limit)])
+        )
+    if routes:
+        lines.append(
+            ("- Rutas relacionadas: " if es else "- Related routes: ")
+            + ", ".join(routes[: max(1, limit)])
+        )
+    if surfaces:
+        lines.append(
+            ("- Superficies runtime: " if es else "- Runtime surfaces: ")
+            + ", ".join(surfaces[: max(1, limit)])
+        )
+    if public_symbols:
+        lines.append(
+            ("- Símbolos públicos: " if es else "- Public symbols: ")
+            + ", ".join(public_symbols[: max(1, limit)])
+        )
+    return "\n".join(lines) if len(lines) > 1 else ""
 
 
 def build_project_improvement_ideas(
@@ -1747,6 +2083,27 @@ def build_project_impact_report(
                             "referenced_by_files": [item["path"] for item in refs[:8]],
                         }
                     )
+                for ref in refs[: max(1, limit * 2)]:
+                    ref_path = str(ref.get("path") or "").strip()
+                    if not ref_path:
+                        continue
+                    for route in state["routes"]:
+                        if str(route.get("path") or "").strip() != ref_path:
+                            continue
+                        normalized = {
+                            "path": ref_path,
+                            "method": str(route.get("method") or "").strip(),
+                            "route": str(route.get("route") or "").strip(),
+                            "resolved_route": str(route.get("resolved_route") or route.get("route") or "").strip(),
+                            "handler": str(route.get("handler") or "").strip(),
+                        }
+                        if normalized["route"] and normalized not in routes_in_scope:
+                            routes_in_scope.append(normalized)
+                    for surface in state["runtime_surfaces"]:
+                        route_items = surface.get("routes") or []
+                        route_paths = {str(item.get("path") or "").strip() for item in route_items}
+                        if ref_path in route_paths and surface not in runtime_surfaces_in_scope:
+                            runtime_surfaces_in_scope.append(surface)
         for cluster in state["duplicate_logic_clusters"]:
             if rel in set(cluster.get("paths") or []):
                 if cluster not in duplicate_logic_neighbors:

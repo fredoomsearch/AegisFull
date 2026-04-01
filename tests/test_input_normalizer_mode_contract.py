@@ -27,6 +27,30 @@ def test_split_mode_prefix_extracts_mode_and_payload():
     assert payload == "where is colombia?"
 
 
+def test_split_mode_prefix_extracts_local_mode_and_payload():
+    mode, payload = input_normalizer.split_mode_prefix("  local:   latest python release notes ")
+    assert mode == "local"
+    assert payload == "latest python release notes"
+
+
+def test_normalize_user_input_strips_null_and_control_chars():
+    normalized = input_normalizer.normalize_user_input("hello\x00world\x07\nnext")
+    assert normalized == "hello world next"
+    assert "\x00" not in normalized
+
+
+def test_normalize_for_routing_strips_attachment_context():
+    normalized = input_normalizer.normalize_for_routing(
+        "what u can tell me about active project ?\n\n"
+        "[Attachment context image: trust1.png]\n"
+        "Local visual analysis (no external services):\n"
+        "For programming questions: produce COMPLETE runnable code."
+    )
+    assert "attachment context" not in normalized
+    assert "complete runnable code" not in normalized
+    assert normalized.startswith("what u can tell me about active project")
+
+
 @pytest.mark.parametrize(
     ("mode_value", "expected_source_plan"),
     [
@@ -69,6 +93,19 @@ def test_geography_prompt_variants_route_web_first_in_chat_mode(prompt: str):
         session_state={},
     )
     assert source_plan == "web_only"
+
+
+def test_local_only_request_phrase_forces_local_plan():
+    source_plan = chat_api._decide_source_plan(
+        "responde con local: latest python release notes",
+        mode_value="chat",
+        force_web=False,
+        force_local=False,
+        is_crypto_mode=False,
+        has_active_project=False,
+        session_state={},
+    )
+    assert source_plan == "local_only"
 
 
 def test_validate_turn_inputs_requires_web_query():

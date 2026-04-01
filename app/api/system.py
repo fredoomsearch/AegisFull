@@ -10,6 +10,7 @@ Why this module exists:
 """
 
 import os
+import socket
 import time
 import signal
 import threading
@@ -17,15 +18,19 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from app.api.deps import require_admin_api_key, require_api_key
 from app.api.router_status import snapshot_router_status
 from app.services import crypto_prediction_log, crypto_trade_log, job_manager
+from app.services.durable_memory import snapshot as durable_memory_snapshot
+from app.services.session_state import build_comp_snapshot
 from app.services import health_state, runtime_metrics
 from app.services.capabilities_service import (
     collect_runtime_capabilities,
     summarize_runtime_capabilities,
 )
+from app.models.llm_utils import llm_contract_snapshot
 from app.services.validation_state import snapshot as validation_runtime_snapshot
 from app.utils.runtime_helpers import product_track_default as _product_track_default
 
@@ -33,6 +38,7 @@ router = APIRouter(prefix="/system", tags=["system"], dependencies=[Depends(requ
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 UPLOADS_DIR = Path(os.getenv("FILES_UPLOAD_ROOT", "data/uploads")).resolve()
+PROCESS_START_TS = time.time()
 START_WITH_PREFLIGHT_SCRIPT = PROJECT_ROOT / "app" / "scripts" / "start_with_preflight.py"
 VERIFY_FULL_SCRIPT = PROJECT_ROOT / "app" / "scripts" / "verify_full.py"
 BROWSER_SMOKE_SCRIPT = PROJECT_ROOT / "app" / "scripts" / "browser_smoke.py"
@@ -49,6 +55,56 @@ def _runtime_profile() -> str:
     """Return normalized runtime profile (`standard` or `strict`)."""
     raw = (os.getenv("AEGIS_RUNTIME_PROFILE", "standard") or "standard").strip().lower()
     return "strict" if raw == "strict" else "standard"
+
+
+def _startup_contract_mode() -> str:
+    raw = (os.getenv("AEGIS_START_CONTRACT_MODE", "full") or "full").strip().lower()
+    return raw if raw in {"full", "strict", "none"} else "full"
+
+
+class LLMProviderUpdateRequest(BaseModel):
+    provider: str
+
+
+def _normalize_llm_provider(provider: str) -> str:
+    value = str(provider or '').strip().lower()
+    if value == 'cloud':
+        return 'groq'
+    if value in {'local', 'groq', 'auto'}:
+        return value
+    raise HTTPException(status_code=400, detail='provider must be one of: local, cloud, groq, auto')
+
+
+def _llm_provider_payload(capabilities: Dict[str, Any] | None = None, *, updated: bool = False) -> Dict[str, Any]:
+    caps = capabilities or collect_runtime_capabilities()
+    llm_config = _resources_snapshot(caps).get('llm_config') or {}
+    configured = str(llm_config.get('provider') or '')
+    effective = str(llm_config.get('effective_provider') or '')
+    model = str(llm_config.get('model') or '')
+    remote_ready = bool(llm_config.get('remote_ready'))
+    options = [
+        {
+            'id': 'local',
+            'provider': 'local',
+            'label': 'Local',
+            'description': 'Local GGUF model. Best when you want offline execution and local-only fallback.',
+        },
+        {
+            'id': 'cloud',
+            'provider': 'groq',
+            'label': 'Cloud',
+            'description': 'Groq remote model. Best for faster general chat and stronger reasoning when configured.',
+        },
+    ]
+    return {
+        'ok': True,
+        'updated': bool(updated),
+        'configured_provider': configured,
+        'effective_provider': effective,
+        'model': model,
+        'remote_ready': remote_ready,
+        'options': options,
+    }
 
 
 def _resources_snapshot(capabilities: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -110,6 +166,11 @@ def _resources_snapshot(capabilities: Dict[str, Any] | None = None) -> Dict[str,
             "batch": llm.get("batch"),
             "max_new_tokens": llm.get("max_new_tokens"),
             "model_path": llm.get("model_path"),
+            "model": llm.get("model"),
+            "provider": llm.get("provider"),
+            "effective_provider": llm.get("effective_provider"),
+            "remote_ready": llm.get("remote_ready"),
+            "contract": llm_contract_snapshot(),
         },
     }
 
@@ -265,7 +326,12 @@ def _env_snapshot() -> Dict[str, Any]:
         "AEGIS_DISABLE_DB",
         "AEGIS_DEMO_MODE",
         "AEGIS_FAST_MODE",
+        "AEGIS_START_CONTRACT_MODE",
         "AEGIS_MODEL_PATH",
+        "AEGIS_LLM_PROVIDER",
+        "AEGIS_GROQ_MODEL",
+        "AEGIS_GROQ_BASE_URL",
+        "AEGIS_GROQ_TIMEOUT_SECONDS",
     ]
     out: Dict[str, Any] = {}
     for k in keys:
@@ -273,6 +339,16 @@ def _env_snapshot() -> Dict[str, Any]:
         if v is not None:
             out[k] = v
     return out
+
+
+def _process_snapshot() -> Dict[str, Any]:
+    """Summarize the current backend process identity for UI/status surfaces."""
+    return {
+        "pid": os.getpid(),
+        "ppid": os.getppid(),
+        "hostname": socket.gethostname(),
+        "uptime_s": round(max(0.0, time.time() - PROCESS_START_TS), 1),
+    }
 
 
 def _security_snapshot() -> Dict[str, Any]:
@@ -368,6 +444,7 @@ def _validation_snapshot() -> Dict[str, Any]:
         "browser_smoke_strict_default": strict_browser_default,
         "runtime_profile_default": _runtime_profile(),
         "product_track_default": product_track,
+        "contract_mode_default": _startup_contract_mode(),
         "last_runs": runtime_validation.get("flows", {}),
         "last_updated_ms": runtime_validation.get("last_updated_ms"),
         "scripts": {
@@ -447,12 +524,23 @@ async def system_snapshot() -> Dict[str, Any]:
     health = health_state.snapshot()
     metrics = runtime_metrics.snapshot()
     metrics_alerts = _runtime_metrics_alerts(metrics)
+    durable = durable_memory_snapshot()
+    llm_config = _resources_snapshot(capabilities)["llm_config"]
+    comp = build_comp_snapshot(
+        None,
+        provider=str(llm_config.get("provider") or ""),
+        effective_provider=str(llm_config.get("effective_provider") or ""),
+        durable_memory_subject_count=int(durable.get("subject_count") or 0),
+        durable_memory_summary=str(durable.get("summary") or ""),
+    )
 
     return {
         "ingest_roots": _list_ingest_roots(),
         "jobs": jobs,
-        "resources": _resources_snapshot(capabilities),
+        "process": _process_snapshot(),
+        "resources": {**_resources_snapshot(capabilities), "comp": comp},
         "agent_profile": _agent_profile_snapshot(),
+        "durable_memory": durable,
         "api_surfaces": _api_surfaces_snapshot(),
         **capabilities,
         "runtime_profile": str(summary.get("runtime_profile") or _runtime_profile()),
@@ -470,6 +558,20 @@ async def system_snapshot() -> Dict[str, Any]:
         "runtime_metrics": metrics,
         "runtime_metrics_alerts": metrics_alerts,
     }
+
+
+@router.get("/llm/provider")
+async def llm_provider_state() -> Dict[str, Any]:
+    capabilities = collect_runtime_capabilities()
+    return _llm_provider_payload(capabilities)
+
+
+@router.post("/llm/provider")
+async def set_llm_provider(payload: LLMProviderUpdateRequest) -> Dict[str, Any]:
+    normalized = _normalize_llm_provider(payload.provider)
+    os.environ['AEGIS_LLM_PROVIDER'] = normalized
+    capabilities = collect_runtime_capabilities()
+    return _llm_provider_payload(capabilities, updated=True)
 
 
 @router.get("/readyz")
@@ -505,15 +607,27 @@ async def readyz() -> Dict[str, Any]:
     metrics = runtime_metrics.snapshot(window_seconds=300)
     metrics_alerts = _runtime_metrics_alerts(metrics)
 
+    durable = durable_memory_snapshot()
+    llm_config = _resources_snapshot(capabilities)["llm_config"]
+    comp = build_comp_snapshot(
+        None,
+        provider=str(llm_config.get("provider") or ""),
+        effective_provider=str(llm_config.get("effective_provider") or ""),
+        durable_memory_subject_count=int(durable.get("subject_count") or 0),
+        durable_memory_summary=str(durable.get("summary") or ""),
+    )
+
     return {
         "ready": summary["ready"],
         "status": summary["status"],
         "checks": summary["checks"],
         "degraded_reasons": summary["degraded_reasons"],
+        "process": _process_snapshot(),
         "runtime_profile": str(summary.get("runtime_profile") or _runtime_profile()),
         "product_track": str(summary.get("product_track") or _product_track_default()),
-        "resources": _resources_snapshot(capabilities),
+        "resources": {**_resources_snapshot(capabilities), "comp": comp},
         "agent_profile": _agent_profile_snapshot(),
+        "durable_memory": durable,
         "api_surfaces": _api_surfaces_snapshot(),
         "security": _security_snapshot(),
         "validation": _validation_snapshot(),

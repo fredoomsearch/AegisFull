@@ -25,3 +25,18 @@ def test_web_sources_info_bubble_is_debug_only():
     js = Path("ui/app.js").read_text(encoding="utf-8")
     assert "Found ${results.length} sources. Now answering with context." in js
     assert "if (state.debugTraceEnabled)" in js
+
+
+def test_response_context_trace_chips_are_debug_only():
+    js = Path("ui/app.js").read_text(encoding="utf-8")
+    assert "if (debugMode && context.source_plan)" in js
+    assert "if (debugMode && origins.length)" in js
+    assert "if (debugMode && list.childNodes.length)" in js
+
+
+def test_ui_display_query_is_sanitized():
+    js = Path("ui/app.js").read_text(encoding="utf-8")
+    assert "function formatDisplayQuery" in js
+    assert "stripInlinePromptBlob(raw).text" in js
+    assert "stripInlineTraceBlob(withoutPromptBlob).text" in js
+    assert "displayQuery = formatDisplayQuery(query || context?.web_query || \"\")" in js

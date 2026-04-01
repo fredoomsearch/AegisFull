@@ -1,34 +1,30 @@
 # AEGIS Known Limits
 
-Date: 2026-03-11
+Date: 2026-03-31
 
-This file is customer-facing and should stay explicit.
+## Product Scope
 
-## Product Model
+- The default delivery model is still local-first.
+- Multi-tenant cloud isolation is not the base product assumption.
 
-- Default delivery is single-user local deployment.
-- Multi-tenant cloud isolation is out of scope for the base package.
+## Reliability
 
-## Runtime / Reliability
+- LLM output remains probabilistic.
+- The verification stack reduces risk; it does not eliminate all failure modes.
+- Full strict confidence still depends on host capabilities such as browser runtime and image backend availability.
 
-- LLM outputs are probabilistic; contract gates reduce risk but do not guarantee universal correctness.
-- Full strict reliability depends on host dependencies:
-  - reachable image backend
-  - working browser runtime for strict smoke
-- Web retrieval quality depends on external provider availability.
+## Evidence
 
-## Security Model
+- Local project truth is stronger than web context for internal facts.
+- Web providers can degrade or rate-limit.
+- If evidence is weak, the correct behavior is bounded uncertainty, not invention.
 
-- App-level controls are included, but host hardening remains operator responsibility.
-- Default package assumes trusted local machine usage with strong API keys.
-- Admin actions require `ADMIN_API_KEY` (no fallback to `AEGIS_API_KEY`).
+## Execution
 
-## Performance
+- The system supports bounded execution and approval-aware tool use.
+- It is not designed for uncontrolled autonomous action.
 
-- Model latency and memory usage depend on local hardware and model size.
-- Long-horizon agent runs are bounded but still sensitive to host resource pressure.
+## Quantitative Governance
 
-## Support Boundaries
-
-- Core support target: chat + files/project tools + web retrieval on local host.
-- Full support target: core + image/browser strict dependencies, only when host prerequisites are met.
+- Quantitative routing and crypto gating exist.
+- Automatic long-run model promotion is still limited; current competition metrics are mainly for observation and controlled policy use.

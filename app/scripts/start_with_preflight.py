@@ -102,6 +102,13 @@ STARTUP_GATE_STEPS = [
     "browser-smoke",
 ]
 
+_CONTRACT_MODES = {"full", "strict", "none"}
+
+
+def _contract_mode_default() -> str:
+    raw = (os.getenv("AEGIS_START_CONTRACT_MODE", "full") or "full").strip().lower()
+    return raw if raw in _CONTRACT_MODES else "full"
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     # Kept local intentionally: startup gate script must stay standalone/minimal,
@@ -166,13 +173,29 @@ def _default_browser_smoke_cmd(base_url: str, api_key: str, files_key: str, *, s
         files_key or api_key,
     ]
     if strict:
-        cmd.append("--strict")
+        cmd.extend([
+            "--strict",
+            "--crypto-proof",
+            "--geo-proof",
+            "--memory-speed-proof",
+            "--web-proof",
+        ])
     return " ".join(cmd).strip()
 
 
-def _wait_health(base_url: str, timeout_s: int, child: subprocess.Popen) -> bool:
-    deadline = time.time() + max(5, timeout_s)
+def _wait_health(
+    base_url: str,
+    timeout_s: int,
+    child: subprocess.Popen,
+    *,
+    log_interval_s: int = 10,
+) -> bool:
+    wait_budget = max(5, timeout_s)
+    start_ts = time.time()
+    deadline = start_ts + wait_budget
     health_url = f"{base_url.rstrip('/')}/healthz"
+    next_log_ts = start_ts + max(1, int(log_interval_s or 0))
+    last_error = ""
     while time.time() < deadline:
         if child.poll() is not None:
             return False
@@ -180,8 +203,18 @@ def _wait_health(base_url: str, timeout_s: int, child: subprocess.Popen) -> bool
             r = requests.get(health_url, timeout=3)
             if r.status_code == 200:
                 return True
-        except Exception:
-            pass
+            last_error = f"status={r.status_code}"
+        except Exception as exc:
+            last_error = str(exc)
+        now = time.time()
+        if now >= next_log_ts:
+            elapsed_s = max(0, int(now - start_ts))
+            remaining_s = max(0, int(deadline - now))
+            suffix = f" last_error={last_error}" if last_error else ""
+            print(
+                f"[wait] healthz pending: elapsed={elapsed_s}s remaining={remaining_s}s url={health_url}{suffix}"
+            )
+            next_log_ts = now + max(1, int(log_interval_s or 0))
         time.sleep(1)
     return False
 
@@ -218,6 +251,48 @@ def _check_readyz(
             if status and status not in {"ready", "degraded", "fallback-only"}:
                 return False, f"strict-core-readyz-requires-ready-or-degraded (status={status})", data if isinstance(data, dict) else None
     return True, "readyz ready=true", data if isinstance(data, dict) else None
+
+
+def _readyz_debug_lines(base_url: str, readyz_data: dict | None) -> list[str]:
+    lines = [f"url: {base_url}"]
+    if not isinstance(readyz_data, dict):
+        return lines
+    process = readyz_data.get("process") if isinstance(readyz_data.get("process"), dict) else {}
+    pid = process.get("pid")
+    host = str(process.get("hostname") or "").strip()
+    uptime = process.get("uptime_s")
+    status = str(readyz_data.get("status") or "unknown").strip() or "unknown"
+    if pid or host or uptime is not None:
+        uptime_text = ""
+        try:
+            uptime_f = float(uptime)
+            uptime_text = f" · up {uptime_f:.1f}s"
+        except Exception:
+            if uptime not in (None, ""):
+                uptime_text = f" · up {uptime}"
+        lines.append(f"process: pid={pid or '?'}{f' @ {host}' if host else ''}{uptime_text}")
+    lines.append(f"readyz.status: {status}")
+    for key in ("web_search", "image", "llm"):
+        section = readyz_data.get(key)
+        if isinstance(section, dict):
+            level = str(section.get("status") or "").strip()
+            if level:
+                lines.append(f"{key}: {level}")
+    degraded = readyz_data.get("degraded_reasons")
+    if isinstance(degraded, list) and degraded:
+        joined = ", ".join(str(x) for x in degraded[:6] if str(x).strip())
+        if joined:
+            lines.append(f"degraded_reasons: {joined}")
+    checks = readyz_data.get("checks")
+    if isinstance(checks, dict) and checks:
+        summary = []
+        for key in ("embeddings", "retrieval", "llm", "web_search", "image", "clamav", "project_tools"):
+            value = checks.get(key)
+            if value is not None:
+                summary.append(f"{key}={value}")
+        if summary:
+            lines.append(f"checks: {'; '.join(summary)}")
+    return lines
 
 
 def _security_checks(api_key: str, files_key: str, strict: bool) -> tuple[list[str], list[str]]:
@@ -337,6 +412,12 @@ def parse_args() -> argparse.Namespace:
         default=_product_track_default(),
         help="Product track contract. core keeps optional host deps non-blocking; full enforces all in strict.",
     )
+    p.add_argument(
+        "--contract-mode",
+        choices=["full", "strict", "none"],
+        default=_contract_mode_default(),
+        help="Startup contract gate depth. full=runs full preflight chain, strict=light local gates only, none=boot with minimal checks.",
+    )
     p.add_argument("--app", default="main:app")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
@@ -441,10 +522,15 @@ def main() -> int:
     start_flow("startup_gate", STARTUP_GATE_STEPS)
     runtime_profile = "strict" if str(args.runtime_profile).strip().lower() == "strict" else "standard"
     product_track = "full" if str(getattr(args, "product_track", _product_track_default())).strip().lower() == "full" else "core"
+    contract_mode = str(getattr(args, "contract_mode", _contract_mode_default()) or "full").strip().lower()
+    if contract_mode not in _CONTRACT_MODES:
+        contract_mode = "full"
+    full_contract = contract_mode == "full"
+    no_contract = contract_mode == "none"
     strict_from_profile = runtime_profile == "strict"
-    strict_browser_smoke = bool(args.strict_browser_smoke or (strict_from_profile and product_track == "full"))
+    strict_browser_smoke = bool(args.strict_browser_smoke or (strict_from_profile and product_track == "full" and full_contract))
     strict_security = bool(args.strict_security or strict_from_profile)
-    strict_capabilities = bool(args.strict_capabilities or (strict_from_profile and product_track == "full"))
+    strict_capabilities = bool(args.strict_capabilities or (strict_from_profile and product_track == "full" and full_contract))
     no_loop_runs = max(4, int(getattr(args, "no_loop_runs", 8) or 8))
     no_loop_request_timeout = max(5, int(getattr(args, "no_loop_request_timeout", 45) or 45))
     no_loop_max_seconds_per_run = max(1.0, float(getattr(args, "no_loop_max_seconds_per_run", 35.0) or 35.0))
@@ -470,16 +556,17 @@ def main() -> int:
         env["AEGIS_DISABLE_DB"] = "1"
     env["AEGIS_RUNTIME_PROFILE"] = runtime_profile
     env["AEGIS_PRODUCT_TRACK"] = product_track
+    env["AEGIS_START_CONTRACT_MODE"] = contract_mode
 
-    if strict_browser_smoke and args.skip_browser_smoke:
+    if full_contract and strict_browser_smoke and args.skip_browser_smoke:
         finish_flow("startup_gate", "failed", "browser-smoke-disabled-in-strict")
         print("[fail] Strict profile requires browser smoke. Remove --skip-browser-smoke.")
         return 2
-    if strict_from_profile and args.skip_hard_contract:
+    if full_contract and strict_from_profile and args.skip_hard_contract:
         finish_flow("startup_gate", "failed", "hard-contract-disabled-in-strict")
         print("[fail] Strict profile requires hard-contract gate. Remove --skip-hard-contract.")
         return 2
-    if strict_from_profile and args.skip_no_loop_stress:
+    if full_contract and strict_from_profile and args.skip_no_loop_stress:
         finish_flow("startup_gate", "failed", "no-loop-stress-disabled-in-strict")
         print("[fail] Strict profile requires no-loop stress gate. Remove --skip-no-loop-stress.")
         return 2
@@ -503,7 +590,7 @@ def main() -> int:
         _print_block("security-errors", errs)
         return 2
     print(
-        f"[profile] runtime={runtime_profile} track={product_track} "
+        f"[profile] runtime={runtime_profile} track={product_track} contract={contract_mode} "
         f"strict_security={int(strict_security)} strict_capabilities={int(strict_capabilities)} "
         f"strict_browser_smoke={int(strict_browser_smoke)}"
     )
@@ -524,7 +611,7 @@ def main() -> int:
         print(f"[fail] Missing E2E script at {E2E_SCRIPT}")
         return 2
 
-    if not args.skip_pytest_smoke:
+    if full_contract and not args.skip_pytest_smoke:
         pytest_cmd = _pytest_smoke_cmd(args.pytest_smoke_tests)
         rc = _run_cmd(
             pytest_cmd,
@@ -539,10 +626,11 @@ def main() -> int:
             return rc
         mark_step("startup_gate", "pytest-smoke", "passed", "ok")
     else:
-        mark_step("startup_gate", "pytest-smoke", "skipped", "skip-pytest-smoke")
+        skip_reason = "skip-pytest-smoke" if args.skip_pytest_smoke else f"contract-mode={contract_mode}"
+        mark_step("startup_gate", "pytest-smoke", "skipped", skip_reason)
 
     # Agent evals: deterministic internal heuristics/routing checks (fast).
-    if AGENT_EVAL_SCRIPT.exists():
+    if not no_contract and AGENT_EVAL_SCRIPT.exists():
         rc = _run_cmd(
             [sys.executable, "-m", "app.scripts.agent_eval_check"],
             env=env,
@@ -556,9 +644,10 @@ def main() -> int:
             return rc
         mark_step("startup_gate", "agent-evals", "passed", "ok")
     else:
-        mark_step("startup_gate", "agent-evals", "skipped", "missing-agent-eval-script")
+        reason = "contract-mode=none" if no_contract else "missing-agent-eval-script"
+        mark_step("startup_gate", "agent-evals", "skipped", reason)
 
-    preflight_enabled = not args.skip_preflight
+    preflight_enabled = full_contract and not args.skip_preflight
     # In-process ASGI TestClient smoke can be flaky on some environments; keep it opt-in.
     if (os.getenv("AEGIS_ENABLE_INPROCESS_E2E", "0") or "0").strip().lower() not in {"1", "true", "yes", "on"}:
         preflight_enabled = False
@@ -586,7 +675,10 @@ def main() -> int:
             return rc
         mark_step("startup_gate", "preflight-e2e", "passed", "ok")
     else:
-        reason = "skip-preflight" if args.skip_preflight else "AEGIS_ENABLE_INPROCESS_E2E=0"
+        if not full_contract:
+            reason = f"contract-mode={contract_mode}"
+        else:
+            reason = "skip-preflight" if args.skip_preflight else "AEGIS_ENABLE_INPROCESS_E2E=0"
         mark_step("startup_gate", "preflight-e2e", "skipped", reason)
 
     uvicorn_cmd = [
@@ -637,7 +729,7 @@ def main() -> int:
         )
         return 1
 
-    if not args.skip_post_e2e:
+    if full_contract and not args.skip_post_e2e:
         e2e_cmd = [
             sys.executable,
             str(E2E_SCRIPT),
@@ -675,6 +767,7 @@ def main() -> int:
             mark_step("startup_gate", "readyz", "failed", detail)
             finish_flow("startup_gate", "failed", "readyz")
             print(f"[fail] {detail}")
+            _print_block("readyz-failure", _readyz_debug_lines(base_url, readyz_data))
             _forward_signal(proc, signal.SIGTERM)
             try:
                 proc.wait(timeout=10)
@@ -888,17 +981,69 @@ def main() -> int:
                 return 2
             mark_step("startup_gate", "browser-smoke", "skipped", "no-browser-smoke-cmd")
     else:
-        mark_step("startup_gate", "host-e2e", "skipped", "skip-post-e2e")
-        mark_step("startup_gate", "readyz", "skipped", "skip-post-e2e")
-        mark_step("startup_gate", "ui-contract", "skipped", "skip-post-e2e")
-        mark_step("startup_gate", "hard-contract", "skipped", "skip-post-e2e")
-        mark_step("startup_gate", "no-loop-stress", "skipped", "skip-post-e2e")
-        mark_step("startup_gate", "browser-smoke", "skipped", "skip-post-e2e")
+        post_skip_reason = "skip-post-e2e" if args.skip_post_e2e else f"contract-mode={contract_mode}"
+        mark_step("startup_gate", "host-e2e", "skipped", post_skip_reason)
+
+        if not no_contract:
+            ok, detail, readyz_data = _check_readyz(
+                base_url,
+                api_key,
+                strict=strict_capabilities,
+                product_track=product_track,
+            )
+            if not ok:
+                mark_step("startup_gate", "readyz", "failed", detail)
+                finish_flow("startup_gate", "failed", "readyz")
+                print(f"[fail] {detail}")
+                _print_block("readyz-failure", _readyz_debug_lines(base_url, readyz_data))
+                _forward_signal(proc, signal.SIGTERM)
+                try:
+                    proc.wait(timeout=10)
+                except Exception:
+                    _forward_signal(proc, signal.SIGKILL)
+                return 1
+            mark_step("startup_gate", "readyz", "passed", detail)
+            print(f"[ok] {detail}")
+
+            if not args.skip_ui_contract and UI_CONTRACT_SCRIPT.exists():
+                rc = _run_cmd(
+                    [sys.executable, "-m", "app.scripts.ui_contract_check", "--base-url", base_url],
+                    env=env,
+                    timeout=30,
+                    label="ui-contract",
+                )
+                if rc != 0:
+                    mark_step("startup_gate", "ui-contract", "failed", f"exit={rc}")
+                    finish_flow("startup_gate", "failed", "ui-contract")
+                    print("[fail] UI contract check failed. Stopping server.")
+                    _forward_signal(proc, signal.SIGTERM)
+                    try:
+                        proc.wait(timeout=10)
+                    except Exception:
+                        _forward_signal(proc, signal.SIGKILL)
+                    return rc
+                mark_step("startup_gate", "ui-contract", "passed", "ok")
+            else:
+                mark_step(
+                    "startup_gate",
+                    "ui-contract",
+                    "skipped",
+                    "skip-ui-contract" if args.skip_ui_contract else "missing-ui-contract-script",
+                )
+        else:
+            mark_step("startup_gate", "readyz", "skipped", f"contract-mode={contract_mode}")
+            mark_step("startup_gate", "ui-contract", "skipped", f"contract-mode={contract_mode}")
+
+        mark_step("startup_gate", "hard-contract", "skipped", f"contract-mode={contract_mode}")
+        mark_step("startup_gate", "no-loop-stress", "skipped", f"contract-mode={contract_mode}")
+        mark_step("startup_gate", "browser-smoke", "skipped", f"contract-mode={contract_mode}")
 
     finish_flow("startup_gate", "passed", "startup-gates-passed")
     print("[ok] Startup gates passed. Server is running.")
     try:
         print(f"[hint] Full verification (100% signal): python app/scripts/verify_full.py --base-url {base_url} --api-key <key> --files-api-key <key>")
+        if contract_mode != "full":
+            print(f"[hint] Current startup skipped full contract gates (contract={contract_mode}). Use --contract-mode full for release-grade startup checks.")
     except Exception:
         pass
 

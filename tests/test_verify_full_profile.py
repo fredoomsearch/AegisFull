@@ -50,7 +50,7 @@ def test_verify_full_check_readyz_strict_rejects_degraded(monkeypatch):
             return {"ready": True, "status": "degraded"}
 
     monkeypatch.setattr(verify_full.requests, "get", lambda *_args, **_kwargs: _Resp())
-    ok, detail = verify_full._check_readyz(
+    ok, detail, data = verify_full._check_readyz(
         "http://127.0.0.1:8000",
         "k",
         timeout=5,
@@ -59,6 +59,7 @@ def test_verify_full_check_readyz_strict_rejects_degraded(monkeypatch):
     )
     assert ok is False
     assert "strict-readyz-requires-status-ready" in detail
+    assert isinstance(data, dict)
 
 
 def test_verify_full_check_readyz_strict_accepts_ready(monkeypatch):
@@ -70,7 +71,7 @@ def test_verify_full_check_readyz_strict_accepts_ready(monkeypatch):
             return {"ready": True, "status": "ready"}
 
     monkeypatch.setattr(verify_full.requests, "get", lambda *_args, **_kwargs: _Resp())
-    ok, detail = verify_full._check_readyz(
+    ok, detail, data = verify_full._check_readyz(
         "http://127.0.0.1:8000",
         "k",
         timeout=5,
@@ -79,6 +80,7 @@ def test_verify_full_check_readyz_strict_accepts_ready(monkeypatch):
     )
     assert ok is True
     assert detail == "ok"
+    assert isinstance(data, dict)
 
 
 def test_verify_full_check_readyz_strict_core_accepts_degraded(monkeypatch):
@@ -90,7 +92,7 @@ def test_verify_full_check_readyz_strict_core_accepts_degraded(monkeypatch):
             return {"ready": True, "status": "degraded"}
 
     monkeypatch.setattr(verify_full.requests, "get", lambda *_args, **_kwargs: _Resp())
-    ok, detail = verify_full._check_readyz(
+    ok, detail, data = verify_full._check_readyz(
         "http://127.0.0.1:8000",
         "k",
         timeout=5,
@@ -99,6 +101,23 @@ def test_verify_full_check_readyz_strict_core_accepts_degraded(monkeypatch):
     )
     assert ok is True
     assert detail == "ok"
+    assert isinstance(data, dict)
+
+
+def test_verify_full_readyz_debug_lines_include_process_and_degraded_context():
+    lines = verify_full._readyz_debug_lines(
+        "http://127.0.0.1:8000",
+        {
+            "status": "degraded",
+            "process": {"pid": 123, "hostname": "host-a", "uptime_s": 42.1},
+            "degraded_reasons": ["image:fallback-only", "clamav:missing"],
+            "checks": {"llm": True, "image": False},
+        },
+    )
+    assert any("pid=123" in line for line in lines)
+    assert any("readyz.status: degraded" in line for line in lines)
+    assert any("degraded_reasons: image:fallback-only, clamav:missing" in line for line in lines)
+    assert any("checks:" in line for line in lines)
 
 
 def test_verify_full_strict_requires_base_url(monkeypatch):

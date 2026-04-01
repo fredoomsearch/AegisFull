@@ -164,6 +164,270 @@ def _consensus_metrics(
     }
 
 
+def _crypto_policy_profile() -> Dict[str, Any]:
+    return {
+        "default_buy_threshold": CRYPTO_DEFAULT_BUY_THRESHOLD,
+        "default_sell_threshold": CRYPTO_DEFAULT_SELL_THRESHOLD,
+        "threshold_lookback": CRYPTO_THRESHOLD_LOOKBACK,
+        "threshold_min_trades": CRYPTO_THRESHOLD_MIN_TRADES,
+        "execution_margin": {
+            "trusted": _execution_margin_for_credibility({"status": "trusted"}),
+            "cautious": _execution_margin_for_credibility({"status": "cautious"}),
+            "insufficient_history": _execution_margin_for_credibility({"status": "insufficient_history"}),
+            "unknown": _execution_margin_for_credibility({"status": "unknown"}),
+        },
+        "consensus_requirements": {
+            "trusted": _consensus_requirements_for_credibility({"status": "trusted"}),
+            "cautious": _consensus_requirements_for_credibility({"status": "cautious"}),
+            "insufficient_history": _consensus_requirements_for_credibility({"status": "insufficient_history"}),
+            "unknown": _consensus_requirements_for_credibility({"status": "unknown"}),
+        },
+    }
+
+
+def _crypto_policy_snapshot(
+    *,
+    symbol: str,
+    horizon_minutes: int,
+    regime: Optional[str],
+    prediction_engine: str,
+    model_used: str,
+    model_decision: str,
+    action_decision: str,
+    p_up: float,
+    buy_threshold: float,
+    sell_threshold: float,
+    credibility: Optional[Dict[str, Any]],
+    consensus_metrics: Optional[Dict[str, Any]],
+    threshold_rec: Optional[Dict[str, Any]],
+    require_trained: bool,
+    adaptive_policy: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    confidence = max(0.0, min(1.0, max(p_up, 1.0 - p_up)))
+    if confidence >= 0.8:
+        confidence_bucket = "high"
+    elif confidence >= 0.62:
+        confidence_bucket = "medium"
+    else:
+        confidence_bucket = "low"
+
+    route_mode = "trained" if prediction_engine == "trained" else "demo"
+    route_reason = "trained_model_available" if prediction_engine == "trained" else "demo_fallback"
+    if require_trained and prediction_engine != "trained":
+        route_reason = "trained_required_unavailable"
+    if isinstance(credibility, dict) and bool(credibility.get("should_abstain")):
+        route_reason = "credibility_abstain"
+    elif action_decision in {"BUY", "SELL"} and threshold_rec:
+        route_reason = "threshold_edge_passed"
+    elif action_decision == "HOLD" and model_decision in {"BUY", "SELL"}:
+        route_reason = str((credibility or {}).get("status") or "gated")
+
+    return {
+        "symbol": symbol,
+        "horizon_minutes": horizon_minutes,
+        "regime": regime,
+        "route_mode": route_mode,
+        "route_reason": route_reason,
+        "model_used": model_used,
+        "model_decision": model_decision,
+        "action_decision": action_decision,
+        "actionable": action_decision in {"BUY", "SELL"},
+        "confidence": confidence,
+        "confidence_bucket": confidence_bucket,
+        "thresholds": {
+            "buy": buy_threshold,
+            "sell": sell_threshold,
+            "threshold_strategy": threshold_rec,
+        },
+        "credibility": credibility,
+        "consensus": consensus_metrics,
+        "gates": {
+            "execution_margin": _execution_margin_for_credibility(credibility),
+            "required_support_ratio": (
+                _consensus_requirements_for_credibility(credibility).get("min_support_ratio")
+                if credibility is not None
+                else None
+            ),
+            "required_max_spread": (
+                _consensus_requirements_for_credibility(credibility).get("max_spread")
+                if credibility is not None
+                else None
+            ),
+        },
+        "policy_profile": _crypto_policy_profile(),
+        "adaptive_policy": adaptive_policy,
+    }
+
+
+
+
+def _crypto_default_threshold_strategy() -> Dict[str, Any]:
+    return {
+        "buy_threshold": CRYPTO_DEFAULT_BUY_THRESHOLD,
+        "sell_threshold": CRYPTO_DEFAULT_SELL_THRESHOLD,
+        "count": 0,
+        "trade_count": 0,
+        "hold_count": 0,
+        "hold_rate": None,
+        "precision": None,
+        "gross_expectancy_pct": None,
+        "net_expectancy_pct": None,
+        "positive_net_rate": None,
+        "max_drawdown_pct": None,
+        "round_trip_cost_pct": None,
+        "score": None,
+    }
+
+
+def _best_crypto_leaderboard_candidate(
+    rows: List[Dict[str, Any]],
+    *,
+    symbol: str,
+    horizon_minutes: int,
+    regime: Optional[str],
+) -> tuple[Optional[Dict[str, Any]], str]:
+    if not rows:
+        return None, "none"
+    sym = (symbol or "").strip().upper()
+    horizon = int(horizon_minutes)
+    regime_norm = str(regime or "").strip().lower() or "unknown"
+
+    def _match(candidate: Dict[str, Any], *, require_regime: bool) -> bool:
+        if str(candidate.get("symbol") or "").strip().upper() != sym:
+            return False
+        try:
+            if int(candidate.get("horizon_minutes") or 0) != horizon:
+                return False
+        except Exception:
+            return False
+        if require_regime:
+            cand_regime = str(candidate.get("regime") or "unknown").strip().lower() or "unknown"
+            return cand_regime == regime_norm
+        return True
+
+    exact = [row for row in rows if _match(row, require_regime=True)]
+    if exact:
+        return exact[0], "exact_scope"
+    horizon_match = [row for row in rows if _match(row, require_regime=False)]
+    if horizon_match:
+        return horizon_match[0], "symbol_horizon"
+    symbol_match = [row for row in rows if str(row.get("symbol") or "").strip().upper() == sym]
+    if symbol_match:
+        return symbol_match[0], "symbol_only"
+    return rows[0], "global"
+
+
+def _adaptive_crypto_performance_snapshot(
+    *,
+    symbol: str,
+    horizon_minutes: int,
+    regime: Optional[str],
+    engine: Optional[str],
+    limit: int,
+    fee_bps: float,
+    slippage_bps: float,
+) -> Dict[str, Any]:
+    stats = recent_stats(
+        limit=limit,
+        symbol=symbol,
+        engine=engine,
+        horizon_minutes=horizon_minutes,
+        regime=regime,
+        fee_bps=fee_bps,
+        slippage_bps=slippage_bps,
+    )
+    return {
+        "count": stats.get("count"),
+        "accuracy": stats.get("accuracy"),
+        "trade_count": stats.get("trade_count"),
+        "positive_net_rate": stats.get("positive_net_rate"),
+        "net_expectancy_pct": stats.get("net_expectancy_pct"),
+        "max_drawdown_pct": stats.get("max_drawdown_pct"),
+        "trained_count": stats.get("trained_count"),
+        "demo_count": stats.get("demo_count"),
+        "trained_accuracy": stats.get("trained_accuracy"),
+        "demo_accuracy": stats.get("demo_accuracy"),
+        "engine_filter": stats.get("engine_filter"),
+        "horizon_filter": stats.get("horizon_filter"),
+        "regime_filter": stats.get("regime_filter"),
+    }
+
+
+def _adaptive_crypto_threshold_strategy(
+    *,
+    symbol: str,
+    horizon_minutes: int,
+    regime: Optional[str],
+    limit: int,
+    engine: Optional[str] = "trained",
+    fee_bps: float = 10.0,
+    slippage_bps: float = 5.0,
+    min_trades: int = CRYPTO_THRESHOLD_MIN_TRADES,
+    include_preview: bool = False,
+) -> Dict[str, Any]:
+    recommendation = optimize_thresholds(
+        limit=limit,
+        symbol=symbol,
+        engine=engine,
+        horizon_minutes=horizon_minutes,
+        regime=regime,
+        fee_bps=fee_bps,
+        slippage_bps=slippage_bps,
+        min_trades=min_trades,
+    )
+    leaderboard_preview: List[Dict[str, Any]] = []
+    champion: Optional[Dict[str, Any]] = None
+    champion_scope = "none"
+    strategy_source = "exact_scope" if recommendation is not None else "defaults"
+    fallback_used = recommendation is None
+
+    if include_preview or recommendation is None:
+        leaderboard_preview = scope_leaderboard(
+            limit=limit,
+            engine=engine,
+            fee_bps=fee_bps,
+            slippage_bps=slippage_bps,
+            min_trades=min_trades,
+            top_n=3,
+        )
+        if recommendation is None and leaderboard_preview:
+            champion, champion_scope = _best_crypto_leaderboard_candidate(
+                leaderboard_preview,
+                symbol=symbol,
+                horizon_minutes=horizon_minutes,
+                regime=regime,
+            )
+            if champion is not None:
+                recommendation = dict(champion)
+                strategy_source = f"leaderboard:{champion_scope}"
+                fallback_used = True
+
+    if recommendation is None:
+        recommendation = _crypto_default_threshold_strategy()
+
+    return {
+        "selected_strategy": recommendation,
+        "strategy_source": strategy_source,
+        "fallback_used": fallback_used,
+        "champion": champion,
+        "champion_scope": champion_scope,
+        "leaderboard_preview": leaderboard_preview,
+        "performance": (
+            _adaptive_crypto_performance_snapshot(
+                symbol=symbol,
+                horizon_minutes=horizon_minutes,
+                regime=regime,
+                engine=engine,
+                limit=limit,
+                fee_bps=fee_bps,
+                slippage_bps=slippage_bps,
+            )
+            if include_preview
+            else None
+        ),
+    }
+
+
 def _upsert_news_items(symbol: str, items: List[dict], window_minutes: int = 120) -> int:
     """Persist fetched news into DB store when available (best-effort)."""
     try:
@@ -256,6 +520,7 @@ _BASE_SYMBOL_ALIASES = {
     "PYTHNETWORK": "PYTH",
     "JUPITER": "JUP",
 }
+
 _POPULAR_BINANCE_PAIRS: tuple[str, ...] = (
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "TRXUSDT",
     "LINKUSDT", "LTCUSDT", "ATOMUSDT", "ETCUSDT", "XLMUSDT", "BCHUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "SUIUSDT",
@@ -902,6 +1167,8 @@ def predict(req: PredictRequest) -> PredictResponse:
     price_source = _price_source.get(sym, "demo" if live_price is None else "binance")
     trained_payload = _predict_with_trained_models(sym, req.horizon_minutes, requested_model, live_price)
     prediction_engine = "trained" if trained_payload else "demo"
+    threshold_rec: Optional[Dict[str, Any]] = None
+    adaptive_policy: Optional[Dict[str, Any]] = None
     if require_trained and not trained_payload:
         raise HTTPException(
             status_code=503,
@@ -918,14 +1185,15 @@ def predict(req: PredictRequest) -> PredictResponse:
         predicted = round(float(trained_payload["predicted_price"]), 2)
         regime = trained_payload.get("regime")
         model_used = str(trained_payload.get("model_used") or requested_model)
-        threshold_rec = optimize_thresholds(
-            limit=CRYPTO_THRESHOLD_LOOKBACK,
+        adaptive_policy = _adaptive_crypto_threshold_strategy(
             symbol=sym,
-            engine="trained",
             horizon_minutes=req.horizon_minutes,
             regime=regime,
+            limit=CRYPTO_THRESHOLD_LOOKBACK,
+            engine="trained",
             min_trades=CRYPTO_THRESHOLD_MIN_TRADES,
         )
+        threshold_rec = adaptive_policy["selected_strategy"]
         buy_threshold = float((threshold_rec or {}).get("buy_threshold") or CRYPTO_DEFAULT_BUY_THRESHOLD)
         sell_threshold = float((threshold_rec or {}).get("sell_threshold") or CRYPTO_DEFAULT_SELL_THRESHOLD)
         decision = _decision_from_thresholds(p_up, buy_threshold=buy_threshold, sell_threshold=sell_threshold)
@@ -1066,6 +1334,39 @@ def predict(req: PredictRequest) -> PredictResponse:
             execution_gate_reason = "high_consensus_spread"
     decision = action_decision
     actionable = action_decision in {"BUY", "SELL"}
+    if adaptive_policy is None:
+        adaptive_policy = _adaptive_crypto_threshold_strategy(
+            symbol=sym,
+            horizon_minutes=req.horizon_minutes,
+            regime=regime,
+            limit=CRYPTO_THRESHOLD_LOOKBACK,
+            engine="trained",
+            min_trades=CRYPTO_THRESHOLD_MIN_TRADES,
+            include_preview=False,
+        )
+    policy = _crypto_policy_snapshot(
+        symbol=sym,
+        horizon_minutes=req.horizon_minutes,
+        regime=regime,
+        prediction_engine=prediction_engine,
+        model_used=model_used,
+        model_decision=model_decision,
+        action_decision=action_decision,
+        p_up=p_up,
+        buy_threshold=buy_threshold,
+        sell_threshold=sell_threshold,
+        credibility=credibility,
+        consensus_metrics={
+            **(consensus_metrics or {}),
+            **{
+                "required_support_ratio": (consensus_requirements or {}).get("min_support_ratio"),
+                "max_spread": (consensus_requirements or {}).get("max_spread"),
+            },
+        },
+        threshold_rec=threshold_rec,
+        require_trained=require_trained,
+        adaptive_policy=adaptive_policy,
+    )
     if isinstance(raw, dict):
         raw["model_decision"] = model_decision
         raw["action_decision"] = action_decision
@@ -1081,6 +1382,8 @@ def predict(req: PredictRequest) -> PredictResponse:
                 "max_spread": (consensus_requirements or {}).get("max_spread"),
             },
         }
+        raw["adaptive_policy"] = adaptive_policy
+        raw["policy"] = policy
 
     log_id: Optional[str] = None
     if req.save:
@@ -1095,6 +1398,7 @@ def predict(req: PredictRequest) -> PredictResponse:
                 "model_decision": model_decision,
                 "action_decision": action_decision,
                 "current_price": current,
+                "predicted_price": predicted,
                 "price_source": price_source,
                 "engine": prediction_engine,
                 "news": news_items,
@@ -1200,6 +1504,11 @@ def predict(req: PredictRequest) -> PredictResponse:
             "consensus": (raw or {}).get("consensus"),
             "buy_threshold": (raw or {}).get("buy_threshold"),
             "sell_threshold": (raw or {}).get("sell_threshold"),
+            "policy": policy,
+            "adaptive_policy": adaptive_policy,
+            "route_mode": policy.get("route_mode"),
+            "route_reason": policy.get("route_reason"),
+            "confidence_bucket": policy.get("confidence_bucket"),
         },
         news=news_items,
     )
@@ -1504,6 +1813,72 @@ def prediction_credibility(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error assessing scope credibility: {exc}") from exc
+
+
+@router.get("/policy")
+def crypto_policy(
+    symbol: Optional[str] = Query(None),
+    engine: Optional[str] = Query("trained", description="all | trained | demo"),
+    horizon_minutes: Optional[int] = Query(None, ge=1, le=10080),
+    regime: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    try:
+        scope = _normalized_prediction_scope(
+            symbol=symbol,
+            engine=engine,
+            horizon_minutes=horizon_minutes,
+            regime=regime,
+        )
+        limit = CRYPTO_THRESHOLD_LOOKBACK
+        rec = optimize_thresholds(
+            limit=limit,
+            symbol=scope["symbol"],
+            engine=scope["engine"] or "trained",
+            horizon_minutes=scope["horizon_minutes"],
+            regime=scope["regime"],
+            min_trades=CRYPTO_THRESHOLD_MIN_TRADES,
+        )
+        credibility = assess_scope_credibility(
+            limit=limit,
+            symbol=scope["symbol"],
+            engine=scope["engine"] or "trained",
+            horizon_minutes=scope["horizon_minutes"],
+            regime=scope["regime"],
+            min_trades=CRYPTO_THRESHOLD_MIN_TRADES,
+        )
+        adaptive = _adaptive_crypto_threshold_strategy(
+            symbol=scope["symbol"] or "",
+            horizon_minutes=scope["horizon_minutes"] or 15,
+            regime=scope["regime"],
+            limit=limit,
+            engine=scope["engine"] or "trained",
+            fee_bps=10.0,
+            slippage_bps=5.0,
+            min_trades=CRYPTO_THRESHOLD_MIN_TRADES,
+            include_preview=True,
+        )
+        return {
+            "scope": {
+                "symbol": scope["symbol"],
+                "engine": normalize_engine_filter(scope["engine"]) or "all",
+                "horizon_minutes": scope["horizon_minutes"],
+                "regime": scope["regime"],
+                "limit": limit,
+            },
+            "policy_profile": _crypto_policy_profile(),
+            "recommendation": rec,
+            "credibility": credibility,
+            "adaptive": adaptive,
+            "summary": {
+                "route_mode": "trained" if credibility and credibility.get("status") != "blocked" else "demo",
+                "should_abstain": bool(credibility and credibility.get("should_abstain")),
+                "adaptive_strategy_source": adaptive.get("strategy_source"),
+            },
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error computing crypto policy: {exc}") from exc
 
 
 @router.get("/predictions/leaderboard")

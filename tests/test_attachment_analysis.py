@@ -82,3 +82,178 @@ async def test_analyze_attachment_rejects_too_large_payload(monkeypatch):
         await chat_api.analyze_attachment_endpoint(file=file, lang="en")
     assert exc.value.status_code == 400
     assert "too large" in str(exc.value.detail).lower()
+
+
+def test_attachment_context_response_answers_from_local_image_context():
+    payload = chat_api._maybe_attachment_context_response(
+        (
+            "what is that image?\n\n"
+            "[Attachment context image: cedula.jpg]\n"
+            "Local visual analysis (no external services):\n"
+            "- Resolution: 1200x760.\n"
+            "Detected text (local OCR):\n"
+            "```text\n"
+            "REPUBLICA DE COLOMBIA\n"
+            "CEDULA DE CIUDADANIA\n"
+            "1038418201\n"
+            "```\n"
+        ),
+        "en",
+    )
+    assert payload is not None
+    assert payload["tool_kind"] == "attachment_context"
+    assert "cedula.jpg" in payload["response"]
+    assert "identity-document image" in payload["response"].lower()
+    assert "1038418201" not in payload["response"]
+    assert "1038...01" in payload["response"]
+
+
+def test_attachment_context_response_ignores_project_question_with_attachment_noise():
+    payload = chat_api._maybe_attachment_context_response(
+        (
+            "can u explain me all the tree of active project?\n\n"
+            "[Attachment context image: trust1.png]\n"
+            "Local visual analysis (no external services):\n"
+            "- Resolution: 1200x760.\n"
+        ),
+        "en",
+    )
+    assert payload is None
+
+
+def test_attachment_context_response_summarizes_html_document():
+    payload = chat_api._maybe_attachment_context_response(
+        (
+            "explain attached file\n\n"
+            "[Attachment context document: index.html]\n"
+            "Extracted text from document `index.html`:\n\n"
+            "```text\n"
+            "<!doctype html>\n"
+            "<html lang=\"en\">\n"
+            "<head>\n"
+            "<meta name=\"description\" content=\"Portfolio of Julian Grajales - Full-Stack and Data Developer.\" />\n"
+            "<title>Julian Grajales | Portfolio</title>\n"
+            "</head>\n"
+            "</html>\n"
+            "```\n"
+        ),
+        "en",
+    )
+    assert payload is not None
+    response = payload["response"].lower()
+    assert "html page" in response
+    assert "portfolio" in response
+    assert "julian grajales | portfolio" in response
+
+
+def test_attachment_context_response_summarizes_fastapi_code():
+    payload = chat_api._maybe_attachment_context_response(
+        (
+            "what makes this code exactly?\n\n"
+            "[Attachment context document: main.py]\n"
+            "Extracted text from document `main.py`:\n\n"
+            "```text\n"
+            "from fastapi import FastAPI, Request\n"
+            "from fastapi.middleware.cors import CORSMiddleware\n"
+            "app = FastAPI()\n"
+            "app.add_middleware(CORSMiddleware, allow_origins=['http://localhost:4200'])\n"
+            "app.include_router(api.router)\n"
+            "@app.on_event('startup')\n"
+            "async def startup_event():\n"
+            "    Base.metadata.create_all(bind=engine)\n"
+            "@app.post('/api/payu/notification')\n"
+            "async def payu_notification(request: Request):\n"
+            "    pass\n"
+            "```\n"
+        ),
+        "en",
+    )
+    assert payload is not None
+    response = payload["response"].lower()
+    assert "fastapi backend entrypoint" in response
+    assert "cors" in response
+    assert "/api/payu/notification" in response
+    assert "database" in response
+
+
+def test_attachment_context_response_summarizes_markdown_guide():
+    payload = chat_api._maybe_attachment_context_response(
+        (
+            "explain this file\n\n"
+            "[Attachment context document: architecture_guide.md]\n"
+            "Extracted text from document `architecture_guide.md`:\n\n"
+            "```text\n"
+            "# Aegis Architecture Guide\n"
+            "## API Surface\n"
+            "- chat\n"
+            "- files\n"
+            "- image\n"
+            "```\n"
+        ),
+        "en",
+    )
+    assert payload is not None
+    response = payload["response"].lower()
+    assert "markdown guide" in response
+    assert "aegis architecture guide" in response
+    assert "list items" in response
+
+
+def test_attachment_context_response_summarizes_json_config():
+    payload = chat_api._maybe_attachment_context_response(
+        (
+            "summarize the attached config\n\n"
+            "[Attachment context document: config.json]\n"
+            "Extracted text from document `config.json`:\n\n"
+            "```text\n"
+            "{\"name\":\"aegis\",\"features\":{\"web\":true},\"providers\":[\"groq\",\"local\"]}\n"
+            "```\n"
+        ),
+        "en",
+    )
+    assert payload is not None
+    response = payload["response"].lower()
+    assert "json/config file" in response
+    assert "name" in response
+    assert "features" in response
+    assert "providers" in response
+
+
+def test_attachment_context_response_summarizes_csv_table():
+    payload = chat_api._maybe_attachment_context_response(
+        (
+            "what is in this file?\n\n"
+            "[Attachment context document: prices.csv]\n"
+            "Extracted text from document `prices.csv`:\n\n"
+            "```text\n"
+            "symbol,price,volume\n"
+            "BTCUSDT,68000,120\n"
+            "ETHUSDT,3200,80\n"
+            "```\n"
+        ),
+        "en",
+    )
+    assert payload is not None
+    response = payload["response"].lower()
+    assert "csv or tabular file" in response
+    assert "symbol, price, volume" in response
+    assert "2 data rows" in response
+
+
+def test_attachment_context_response_summarizes_error_log():
+    payload = chat_api._maybe_attachment_context_response(
+        (
+            "explain this log\n\n"
+            "[Attachment context document: server.log]\n"
+            "Extracted text from document `server.log`:\n\n"
+            "```text\n"
+            "Traceback (most recent call last):\n"
+            "ValueError: bad input\n"
+            "```\n"
+        ),
+        "en",
+    )
+    assert payload is not None
+    response = payload["response"].lower()
+    assert "log or error output" in response
+    assert "traceback" in response

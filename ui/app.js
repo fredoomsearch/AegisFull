@@ -31,6 +31,7 @@ const endpoints = {
   chat: "/chat",
   fetchUrl: "/fetch_url",
   conversations: "/chat/list",
+  conversationBundle: (id) => `/chat/${id}/bundle`,
   archiveConversation: (id) => `/chat/${id}/archive`,
   unarchiveConversation: (id) => `/chat/${id}/unarchive`,
   deleteConversation: (id) => `/chat/${id}`,
@@ -57,6 +58,7 @@ const endpoints = {
   adminRefreshLog: "/admin/refresh-log",
   adminCancelAll: "/admin/cancel-all",
   systemSnapshot: "/system/snapshot",
+  systemLlmProvider: "/system/llm/provider",
   systemCapabilities: "/system/capabilities",
   imageGenerate: "/image/generate",
   imageGenerateWithReference: "/image/generate_with_reference",
@@ -160,6 +162,8 @@ const state = {
   lastLatencyMs: null,
   lastReadyz: null,
   readyzTimer: null,
+  llmProviderMenuOpen: false,
+  llmProviderState: null,
 
   // UI / sidebar (input auxiliar; el proyecto activo real vive en activeProjectId)
   manualProjectRoot: String(localStorage.getItem("aegis_project_root") || "").trim(),
@@ -248,6 +252,7 @@ const state = {
   // session modal
   conversationList: [],
   conversationsIncludeArchived: false,
+  lastTranscriptConversationId: "",
 
   // logs
   logPath: null,
@@ -263,6 +268,9 @@ const state = {
   statusNoticeTimes: new Map(),
   uploadedProjects: [],
   projectRecords: [],
+  showProjectList: localStorage.getItem("aegis_show_project_list") === "1",
+  showProjectAdvanced: localStorage.getItem("aegis_show_project_advanced") === "1",
+  showTempProjects: localStorage.getItem("aegis_show_temp_projects") === "1",
   activeProjectId: localStorage.getItem("aegis_active_project_id") || "",
   activeProjectDetail: null,
   activeProjectImpact: null,
@@ -290,6 +298,7 @@ document.addEventListener("DOMContentLoaded", () => {
     wireUI();
     initState();
     updateAllUI();
+    loadLlmProviderState();
     applyAuthState();
     appendBubble(state.lang === LANG.ES ? "AEGIS listo." : "AEGIS ready.", "bot");
     localizeHelp();
@@ -385,8 +394,22 @@ function cacheDom() {
   dom.modeIndicator = document.getElementById("modeIndicator");
   dom.runtimeStatusBadge = document.getElementById("runtimeStatusBadge");
   dom.webStatusBadge = document.getElementById("webStatusBadge");
+  dom.llmProviderShell = document.getElementById("llmProviderShell");
+  dom.llmProviderBtn = document.getElementById("llmProviderBtn");
+  dom.llmProviderBtnText = dom.llmProviderBtn ? dom.llmProviderBtn.querySelector(".llm-provider-btn-text") : null;
+  dom.llmProviderMenu = document.getElementById("llmProviderMenu");
+  dom.llmProviderMenuTitle = document.getElementById("llmProviderMenuTitle");
+  dom.llmProviderSummary = document.getElementById("llmProviderSummary");
+  dom.llmProviderLocalState = document.getElementById("llmProviderLocalState");
+  dom.llmProviderCloudState = document.getElementById("llmProviderCloudState");
+  dom.llmProviderLocalNote = document.getElementById("llmProviderLocalNote");
+  dom.llmProviderCloudNote = document.getElementById("llmProviderCloudNote");
+  dom.llmProviderLocalBtn = document.getElementById("llmProviderLocalBtn");
+  dom.llmProviderCloudBtn = document.getElementById("llmProviderCloudBtn");
   dom.msgInput = document.getElementById("msg");
   dom.stopBtn = document.getElementById("stopBtn");
+  dom.backendStopBtn = document.getElementById("backendStopBtn");
+  dom.backendProcessBadge = document.getElementById("backendProcessBadge");
   dom.sendBtn = document.getElementById("sendBtn");
 
   dom.chatBtn = document.getElementById("chatBtn");
@@ -595,6 +618,9 @@ function initState() {
         : "Auth required. Set API key (🔑)."
     }</li>`;
   }
+  if (state.conversationId && hasAuthForScope("main")) {
+    void restoreConversationTranscript(state.conversationId, { force: true });
+  }
   applyChatSideVisible();
   applyPanelVisibility();
   if (hasAuthForScope("files")) {
@@ -663,6 +689,15 @@ function wireUI() {
     }
     await cancelAllRequests(true);
   });
+  dom.backendStopBtn?.addEventListener("click", async () => {
+    const es = state.lang === LANG.ES;
+    const warn = es
+      ? "Esto intentará apagar el backend AEGIS en esta máquina. ¿Continuar?"
+      : "This will attempt to stop the AEGIS backend on this machine. Continue?";
+    if (!confirm(warn)) return;
+    await cancelAllRequests(true);
+    await shutdownServer(true);
+  });
   dom.msgInput?.addEventListener("input", () => autoSizeTextarea(dom.msgInput));
   dom.msgInput?.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -716,6 +751,34 @@ function wireUI() {
     state.chatAttachmentAutoWeb = !!dom.chatAttachmentAutoWeb?.checked;
     localStorage.setItem("aegis_attachment_auto_web", JSON.stringify(state.chatAttachmentAutoWeb));
     updateChatAttachmentBar();
+  });
+
+  dom.llmProviderBtn?.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleLlmProviderMenu();
+  });
+  dom.llmProviderLocalBtn?.addEventListener("click", async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    await setRuntimeLlmProvider("local");
+  });
+  dom.llmProviderCloudBtn?.addEventListener("click", async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    await setRuntimeLlmProvider("cloud");
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!state.llmProviderMenuOpen) return;
+    const shell = dom.llmProviderShell;
+    if (shell instanceof HTMLElement && !shell.contains(e.target)) {
+      toggleLlmProviderMenu(false);
+    }
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && state.llmProviderMenuOpen) toggleLlmProviderMenu(false);
   });
 
   // language
@@ -1033,7 +1096,10 @@ function wireUI() {
     localStorage.setItem("aegis_crypto_model", state.selectedCryptoModel);
     loadCryptoPrediction({ force: true });
   });
-  dom.cryptoHorizon?.addEventListener("change", () => loadCryptoPrediction({ force: true }));
+  dom.cryptoHorizon?.addEventListener("change", () => {
+    loadCryptoPrediction({ force: true });
+    loadPredictionComparison(dom.chartSymbol?.value || state.chartSymbol, { force: true });
+  });
   dom.chatTradeQty?.addEventListener("change", () => loadCryptoPrediction({ force: true }));
 
   dom.copyConvId?.addEventListener("click", async () => {
@@ -1101,6 +1167,7 @@ function wireUI() {
 }
 
 function updateAllUI() {
+  updateLlmProviderButton();
   // lang buttons
   if (dom.langEs && dom.langEn) {
     dom.langEs.classList.toggle("selected", state.lang === LANG.ES);
@@ -1171,6 +1238,170 @@ function renderTurnsQuickFilters() {
   });
 }
 
+function providerMetaForUi(value, es) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "groq" || normalized === "cloud") {
+    return {
+      id: "cloud",
+      label: es ? "Cloud" : "Cloud",
+      description: es
+        ? "Groq remoto. Mejor para chat general mas rapido y razonamiento mas fuerte."
+        : "Remote Groq model. Better for faster general chat and stronger reasoning.",
+    };
+  }
+  return {
+    id: "local",
+    label: es ? "Local" : "Local",
+    description: es
+      ? "Modelo GGUF local. Mejor para trabajo offline y fallback local."
+      : "Local GGUF model. Better for offline work and local fallback.",
+  };
+}
+
+function syncLlmProviderFromReadyz(data = null) {
+  const payload = data && typeof data === "object" ? data : state.lastReadyz;
+  const llmConfig = (payload && payload.resources && payload.resources.llm_config) || null;
+  if (!llmConfig || typeof llmConfig !== "object") return;
+  state.llmProviderState = {
+    configured_provider: String(llmConfig.provider || "").trim().toLowerCase(),
+    effective_provider: String(llmConfig.effective_provider || "").trim().toLowerCase(),
+    model: String(llmConfig.model || "").trim(),
+    remote_ready: !!llmConfig.remote_ready,
+    options: [
+      { id: "local", provider: "local" },
+      { id: "cloud", provider: "groq" },
+    ],
+  };
+  updateLlmProviderButton();
+}
+
+function updateLlmProviderButton() {
+  if (!dom.llmProviderBtn) return;
+  const es = state.lang === LANG.ES;
+  const providerState = state.llmProviderState || {};
+  const hasProviderState = !!String(providerState.effective_provider || providerState.configured_provider || "").trim();
+  if (!hasProviderState) {
+    if (dom.llmProviderBtnText) dom.llmProviderBtnText.textContent = `${es ? "Models" : "Models"}: --`;
+    else dom.llmProviderBtn.textContent = `${es ? "Models" : "Models"}: --`;
+    dom.llmProviderBtn.title = es
+      ? "Esperando confirmacion del runtime LLM. Revisa auth o readyz."
+      : "Waiting for runtime LLM confirmation. Check auth or readyz.";
+    dom.llmProviderBtn.classList.add("llm-provider-btn-pending");
+    dom.llmProviderBtn.classList.remove("active-local", "active-cloud");
+    if (dom.llmProviderLocalState) dom.llmProviderLocalState.textContent = es ? "Listo" : "Ready";
+    if (dom.llmProviderCloudState) dom.llmProviderCloudState.textContent = es ? "Listo" : "Ready";
+    return;
+  }
+  const effective = String(providerState.effective_provider || providerState.configured_provider || "local").trim().toLowerCase();
+  const meta = providerMetaForUi(effective, es);
+  const model = String(providerState.model || "").trim();
+  if (dom.llmProviderBtnText) dom.llmProviderBtnText.textContent = `${es ? "Models" : "Models"}: ${meta.label}`;
+  else dom.llmProviderBtn.textContent = `${es ? "Models" : "Models"}: ${meta.label}`;
+  dom.llmProviderBtn.title = model ? `${meta.description} (${model})` : meta.description;
+  dom.llmProviderBtn.classList.remove("llm-provider-btn-pending");
+  dom.llmProviderBtn.classList.toggle("active-local", meta.id === "local");
+  dom.llmProviderBtn.classList.toggle("active-cloud", meta.id === "cloud");
+
+  if (dom.llmProviderMenuTitle) dom.llmProviderMenuTitle.textContent = es ? "Models" : "Models";
+  if (dom.llmProviderSummary) {
+    dom.llmProviderSummary.textContent = model
+      ? `${meta.description} ${es ? "Activo" : "Active"}: ${model}`
+      : meta.description;
+  }
+  if (dom.llmProviderLocalBtn) {
+    dom.llmProviderLocalBtn.title = es
+      ? "Modelo GGUF local. Menor dependencia de red."
+      : "Local GGUF model. Lower network dependency.";
+    dom.llmProviderLocalBtn.classList.toggle("active-local", meta.id === "local");
+  }
+  if (dom.llmProviderLocalState) dom.llmProviderLocalState.textContent = meta.id === "local" ? (es ? "Activo" : "Active") : (es ? "Listo" : "Ready");
+  if (dom.llmProviderLocalNote) dom.llmProviderLocalNote.textContent = es
+    ? "Ejecuta el modelo GGUF en esta maquina. Mejor para fallback local y trabajo offline."
+    : "Runs the GGUF model on this machine. Better for local fallback and offline work.";
+  if (dom.llmProviderCloudBtn) {
+    dom.llmProviderCloudBtn.title = es
+      ? "Groq remoto. Mejor para respuestas rapidas y razonamiento general."
+      : "Remote Groq model. Better for fast answers and general reasoning.";
+    dom.llmProviderCloudBtn.classList.toggle("active-cloud", meta.id === "cloud");
+  }
+  if (dom.llmProviderCloudState) dom.llmProviderCloudState.textContent = meta.id === "cloud" ? (es ? "Activo" : "Active") : (es ? "Listo" : "Ready");
+  if (dom.llmProviderCloudNote) dom.llmProviderCloudNote.textContent = es
+    ? "Usa Groq en la nube. Mejor para chat general mas rapido y mejor razonamiento."
+    : "Uses Groq in the cloud. Better for faster general chat and stronger reasoning.";
+}
+
+function toggleLlmProviderMenu(force = null) {
+  if (!dom.llmProviderMenu) return;
+  const next = typeof force === "boolean" ? force : !state.llmProviderMenuOpen;
+  state.llmProviderMenuOpen = next;
+  dom.llmProviderMenu.classList.toggle("hidden", !next);
+  dom.llmProviderMenu.setAttribute("aria-hidden", next ? "false" : "true");
+}
+
+async function loadLlmProviderState() {
+  if (!hasAuthForScope("main")) {
+    updateLlmProviderButton();
+    return;
+  }
+  try {
+    const res = await fetchWithTimeout(
+      endpoints.systemLlmProvider,
+      { headers: { Accept: "application/json" } },
+      { timeout: 7000, retries: 0 }
+    );
+    const data = await safeJson(res);
+    if (res.ok && data && typeof data === "object") {
+      state.llmProviderState = data;
+      updateLlmProviderButton();
+    }
+  } catch (err) {
+    console.error("llm-provider-load", err);
+  }
+}
+
+async function setRuntimeLlmProvider(provider) {
+  const es = state.lang === LANG.ES;
+  const target = provider === "cloud" ? "cloud" : "local";
+  try {
+    const res = await fetchWithTimeout(
+      endpoints.systemLlmProvider,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ provider: target }),
+      },
+      { timeout: 10000, retries: 0 }
+    );
+    const data = await safeJson(res);
+    if (!res.ok) {
+      const detail = data && data.detail ? String(data.detail) : `${res.status}`;
+      throw new Error(detail);
+    }
+    state.llmProviderState = data && typeof data === "object" ? data : state.llmProviderState;
+    if (state.lastReadyz && state.lastReadyz.resources && state.lastReadyz.resources.llm_config) {
+      state.lastReadyz.resources.llm_config.provider = String(state.llmProviderState.configured_provider || "");
+      state.lastReadyz.resources.llm_config.effective_provider = String(state.llmProviderState.effective_provider || "");
+      state.lastReadyz.resources.llm_config.model = String(state.llmProviderState.model || "");
+      state.lastReadyz.resources.llm_config.remote_ready = !!state.llmProviderState.remote_ready;
+    }
+    updateLlmProviderButton();
+    updateStatusCenter();
+    toggleLlmProviderMenu(false);
+    appendBubble(
+      target === "cloud"
+        ? (es ? "Modelo activo cambiado a Cloud (Groq)." : "Active model changed to Cloud (Groq).")
+        : (es ? "Modelo activo cambiado a Local." : "Active model changed to Local."),
+      "bot"
+    );
+  } catch (err) {
+    console.error("llm-provider-set", err);
+    appendBubble(
+      es ? "No pude cambiar el modelo activo." : "Could not change the active model.",
+      "error"
+    );
+  }
+}
+
 function updateStatusCenter() {
   if (!dom.statusList) return;
   const es = state.lang === LANG.ES;
@@ -1180,15 +1411,22 @@ function updateStatusCenter() {
   try {
     const readyz = state.lastReadyz || state.lastSnapshot?.readyz || {};
     const snap = state.lastSnapshot?.snapshot || {};
+    const process = readyz.process || snap.process || {};
     const status = String(readyz.status || snap.status || "").trim() || "unknown";
     const webStatus = String((readyz.web_search && readyz.web_search.status) || "").trim();
-    const webProviders = Number((readyz.web_search && readyz.web_search.provider_count) || 0) || 0;
+    const webSummary = getWebProviderSummary((readyz.web_search && readyz.web_search) || {}, es);
     const imgStatus = String((readyz.image && readyz.image.status) || "").trim();
     const llmStatus = String((readyz.llm && readyz.llm.status) || "").trim() || (readyz.checks?.llm ? "ready" : "");
+    const llmConfig = (readyz.resources && readyz.resources.llm_config)
+      || (snap.resources && snap.resources.llm_config)
+      || {};
+    const llmProvider = String(llmConfig.provider || "").trim();
+    const llmEffective = String(llmConfig.effective_provider || "").trim();
+    const llmModel = String(llmConfig.model || "").trim();
 
     const noteParts = [];
     noteParts.push(`readyz:${status}`);
-    if (webStatus) noteParts.push(`web:${webStatus}${webProviders ? `(${webProviders})` : ""}`);
+    if (webStatus) noteParts.push(`web:${webStatus}${webSummary.configured ? `(${webSummary.ready}/${webSummary.available}/${webSummary.configured})` : ""}`);
     if (imgStatus) noteParts.push(`image:${imgStatus}`);
     if (llmStatus) noteParts.push(`llm:${llmStatus}`);
     const note = noteParts.join(" ");
@@ -1199,6 +1437,44 @@ function updateStatusCenter() {
       note,
       status: level,
     });
+
+    const pid = Number(process?.pid || 0) || 0;
+    const host = String(process?.hostname || "").trim();
+    const uptime = Number(process?.uptime_s || 0) || 0;
+    const backendNote = `${pid ? `pid:${pid}` : "pid:?"}${host ? ` @ ${host}` : ""}${uptime ? ` · up ${uptime >= 60 ? `${Math.floor(uptime / 60)}m ${Math.round(uptime % 60)}s` : `${Math.round(uptime)}s`}` : ""}`;
+    if (dom.backendProcessBadge) {
+      dom.backendProcessBadge.textContent = pid || host || uptime
+        ? `${es ? "Backend" : "Backend"}: ${backendNote}`
+        : `${es ? "Backend" : "Backend"}: ?`;
+      dom.backendProcessBadge.title = pid || host || uptime
+        ? (es ? `Proceso backend actual (${backendNote})` : `Current backend process (${backendNote})`)
+        : (es ? "Proceso backend actual" : "Current backend process");
+    }
+    if (dom.backendStopBtn) {
+      dom.backendStopBtn.title = pid || host || uptime
+        ? (es ? `Detener backend actual (${backendNote})` : `Stop current backend (${backendNote})`)
+        : (es ? "Detener backend de AEGIS" : "Stop AEGIS backend");
+    }
+    if (pid || host || uptime) {
+      items.push({
+        label: es ? "Backend" : "Backend",
+        note: backendNote,
+        status: "on",
+      });
+    }
+    if (llmProvider || llmEffective || llmModel) {
+      const providerBits = [];
+      if (llmProvider) providerBits.push("provider:" + llmProvider);
+      if (llmEffective && llmEffective !== llmProvider) providerBits.push("effective:" + llmEffective);
+      if (llmModel) providerBits.push("model:" + llmModel);
+      const providerNote = providerBits.length ? providerBits.join(" · ") : (es ? "Desconocido" : "Unknown");
+      const providerStatus = (llmEffective || llmProvider) === "groq" ? "on" : "off";
+      items.push({
+        label: es ? "LLM proveedor" : "LLM provider",
+        note: providerNote,
+        status: providerStatus,
+      });
+    }
   } catch {}
 
   items.push({
@@ -1494,6 +1770,33 @@ function updateRuntimeStatusBadge() {
     : (es ? "Estado runtime" : "Runtime status");
 }
 
+function getWebProviderSummary(web, es = state.lang === LANG.ES) {
+  const configured = Number(web?.provider_count || 0) || 0;
+  const available = Number(web?.available_provider_count || 0) || 0;
+  const ready = Number(web?.ready_provider_count || 0) || 0;
+  const cooling = Number(web?.cooling_provider_count || 0) || 0;
+  const reasons = Array.isArray(web?.unavailable_reasons) ? web.unavailable_reasons : [];
+  const countsText = configured
+    ? `${ready}/${available}/${configured} ${es ? "listas/disponibles/configuradas" : "ready/available/configured"}`
+    : (es ? "sin providers configurados" : "no providers configured");
+  const parts = [countsText];
+  if (cooling) {
+    parts.push(es ? `${cooling} en cooldown` : `${cooling} cooling down`);
+  }
+  if (reasons.length) {
+    parts.push(`${es ? "sin disp." : "unavailable"}: ${reasons.slice(0, 2).join(", ")}`);
+  }
+  return {
+    configured,
+    available,
+    ready,
+    cooling,
+    reasons,
+    countsText,
+    summaryText: parts.join(" • "),
+  };
+}
+
 function updateWebStatusBadge() {
   if (!dom.webStatusBadge) return;
   const es = state.lang === LANG.ES;
@@ -1501,6 +1804,7 @@ function updateWebStatusBadge() {
   const ctx = state.lastChatContext && typeof state.lastChatContext === "object" ? state.lastChatContext : {};
   const readyz = state.lastReadyz && typeof state.lastReadyz === "object" ? state.lastReadyz : {};
   const readyzWeb = readyz.web_search && typeof readyz.web_search === "object" ? readyz.web_search : {};
+  const providerSummary = getWebProviderSummary(readyzWeb, es);
 
   let label = es ? "WEB: —" : "WEB: —";
   let title = es
@@ -1523,16 +1827,21 @@ function updateWebStatusBadge() {
     if (status === "ready") {
       label = es ? "WEB: listo" : "WEB: ready";
       cls = "success";
+      title = es
+        ? `Web disponible (${providerSummary.summaryText}).`
+        : `Web available (${providerSummary.summaryText}).`;
     } else if (status === "cooldown") {
       label = es ? "WEB: cooldown" : "WEB: cooldown";
       cls = "warn";
-      title = es ? "Proveedor en cooldown; usando local/caché." : "Provider in cooldown; using local/cache.";
+      title = es
+        ? `Providers en cooldown; usando local/caché (${providerSummary.summaryText}).`
+        : `Providers cooling down; using local/cache (${providerSummary.summaryText}).`;
     } else if (status === "unavailable" || status === "error") {
       label = es ? "WEB: no disp." : "WEB: unavailable";
       cls = "muted";
       title = es
-        ? "Web no disponible en este momento; respondiendo en local. El contexto web sigue en automático."
-        : "Web is unavailable right now; answering locally. Web context remains automatic.";
+        ? `Web no disponible; respondiendo en local. ${providerSummary.summaryText}.`
+        : `Web is unavailable; answering locally. ${providerSummary.summaryText}.`;
     } else if (status === "not-used") {
       label = es ? "WEB: auto/local" : "WEB: auto/local";
       cls = "muted";
@@ -2105,7 +2414,8 @@ function localizeUI() {
     help_item_image_label: es ? "Imagen" : "Image",
     help_item_image_desc: es ? "sube una imagen y conversa en chat usando su contexto visual." : "upload an image and chat using its visual context.",
     attach_mode_title: es ? "Adjuntar imagen/documento para chat" : "Attach image/document for chat",
-    image_upload_chat_title: es ? "Subir imagen para contexto" : "Upload image for context",
+    attachment_button_title: es ? "Adjuntar archivo, documento o imagen al chat" : "Attach file, document, or image to chat",
+    image_upload_chat_title: es ? "Subir imagen de referencia para analizar" : "Upload reference image for analysis",
     attachment_auto_web: es ? "Enriquecer con web (si hace falta)" : "Enrich with web (if needed)",
     attachment_clear_title: es ? "Quitar adjunto" : "Clear attachment",
     help_item_crypto_label: es ? "Cripto (señal + horizonte)" : "Crypto (signal + horizon)",
@@ -2434,12 +2744,12 @@ async function cancelBackendProcesses() {
   }
 }
 
-async function shutdownServer() {
+async function shutdownServer(skipConfirm = false) {
   const es = state.lang === LANG.ES;
   const warn = es
     ? "Esto intentará apagar el servidor AEGIS en esta máquina. ¿Continuar?"
     : "This will attempt to shut down the AEGIS server on this machine. Continue?";
-  if (!confirm(warn)) return;
+  if (!skipConfirm && !confirm(warn)) return;
 
   try {
     const res = await fetchWithTimeout(
@@ -2586,6 +2896,18 @@ async function executeConversationTool(
   }
   if (title) renderSimpleList(first.data, title);
   return first.data;
+}
+
+function withJsonHeaders(headers = {}, scope = "main") {
+  const normalizedScope = scope === "files" ? "files" : "main";
+  const keyToUse = cleanKey(normalizedScope === "files" ? (state.filesApiKey || state.apiKey) : state.apiKey);
+  return {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+    ...(headers || {}),
+    ...(keyToUse ? { "X-API-Key": keyToUse } : {}),
+    ...(state.accessToken ? { Authorization: `Bearer ${state.accessToken}` } : {}),
+  };
 }
 
 async function fetchWithTimeout(url, opts = {}, { timeout = CHAT_MAX_TIMEOUT_MS, retries = 0 } = {}) {
@@ -2903,9 +3225,11 @@ async function ensureAccessToken() {
 async function refreshAuthedPanels() {
   if (hasAuthForScope("main")) {
     await ensureAccessToken();
+    await loadLlmProviderState();
     await loadConversationList(state.conversationsIncludeArchived);
     if (state.conversationId) {
       await syncConversationState(state.conversationId);
+      await restoreConversationTranscript(state.conversationId);
       startConversationEventsPolling();
     }
   }
@@ -2977,6 +3301,34 @@ function getEffectiveProjectRoot() {
   return String(state.manualProjectRoot || "").trim();
 }
 
+function resolveProjectSelectionState() {
+  const activeProjectId = String(state.activeProjectId || "").trim();
+  const detailProjectId = String(
+    state.activeProjectDetail?.project?.project_id
+    || state.activeProjectDetail?.project_id
+    || state.activeProjectDetail?.id
+    || ""
+  ).trim();
+  const projectId = activeProjectId || detailProjectId;
+  const detailRoot = String(
+    state.activeProjectDetail?.project?.root_path
+    || state.activeProjectDetail?.root_path
+    || ""
+  ).trim();
+  const recordRoot = String(getActiveProjectRecord()?.root_path || "").trim();
+  const manualRoot = String(state.manualProjectRoot || "").trim();
+  const rootPath = detailRoot || recordRoot || (!projectId ? manualRoot : "");
+  return {
+    projectId,
+    rootPath,
+    activeProjectId,
+    detailProjectId,
+    detailRoot,
+    recordRoot,
+    manualRoot,
+  };
+}
+
 function addUploadedProject(path, projectId = null) {
   if (!path) return;
   if (!state.uploadedProjects.includes(path)) {
@@ -3033,7 +3385,7 @@ function renderActiveProjectSelect() {
   state.projectRecords.forEach((project) => {
     const opt = document.createElement("option");
     opt.value = String(project.project_id || "");
-    opt.textContent = `${project.project_id} • ${project.status || "uploaded"}`;
+    opt.textContent = `${project.project_id} • ${project.ready_state || project.status || "uploaded"}`;
     dom.activeProjectSelect.appendChild(opt);
   });
   dom.activeProjectSelect.value = current;
@@ -3068,6 +3420,128 @@ function updateManualRootControlState() {
     : (es ? "Root manual (fallback): úsalo solo si no hay proyecto activo." : "Manual root (fallback): use only when no active project is selected.");
 }
 
+function persistUiToggle(key, value) {
+  try {
+    localStorage.setItem(key, value ? "1" : "0");
+  } catch {}
+}
+
+function isEphemeralProjectRecord(project) {
+  const id = String(project?.project_id || "").trim();
+  const rootPath = String(project?.root_path || "").trim();
+  return (
+    rootPath.startsWith("/tmp/pytest-")
+    || rootPath.includes("/tmp/pytest-of-")
+    || (id.startsWith("proj_") && rootPath.startsWith("/tmp/"))
+  );
+}
+
+function getProjectRecordCounts() {
+  const records = Array.isArray(state.projectRecords) ? state.projectRecords : [];
+  let hiddenTemp = 0;
+  let visible = 0;
+  records.forEach((project) => {
+    const id = String(project?.project_id || "").trim();
+    const hiddenByTemp = !state.showTempProjects && isEphemeralProjectRecord(project) && id !== String(state.activeProjectId || "");
+    if (hiddenByTemp) hiddenTemp += 1;
+    else visible += 1;
+  });
+  return {
+    total: records.length,
+    visible,
+    hiddenTemp,
+  };
+}
+
+function getVisibleProjectRecords() {
+  const records = Array.isArray(state.projectRecords) ? state.projectRecords : [];
+  return records.filter((project) => {
+    const id = String(project?.project_id || "").trim();
+    if (id === String(state.activeProjectId || "")) return true;
+    if (state.showTempProjects) return true;
+    return !isEphemeralProjectRecord(project);
+  });
+}
+
+function updateProjectListVisibility() {
+  if (!dom.projectList) return;
+  dom.projectList.hidden = !state.showProjectList;
+}
+
+function toggleProjectListVisibility() {
+  state.showProjectList = !state.showProjectList;
+  persistUiToggle("aegis_show_project_list", state.showProjectList);
+  renderProjectMeta();
+  renderProjectList();
+}
+
+function toggleProjectAdvancedVisibility() {
+  state.showProjectAdvanced = !state.showProjectAdvanced;
+  persistUiToggle("aegis_show_project_advanced", state.showProjectAdvanced);
+  renderProjectMeta();
+}
+
+function toggleTempProjectsVisibility() {
+  state.showTempProjects = !state.showTempProjects;
+  persistUiToggle("aegis_show_temp_projects", state.showTempProjects);
+  renderProjectMeta();
+  renderProjectList();
+}
+
+function getLatestProjectJob(projectId = String(state.activeProjectId || "")) {
+  const jobs = Array.isArray(state.lastSnapshot?.snapshot?.jobs) ? state.lastSnapshot.snapshot.jobs : [];
+  const target = String(projectId || "").trim();
+  const matching = jobs.filter((job) => {
+    const metaProjectId = String(job?.meta?.project_id || job?.result?.project_id || "").trim();
+    if (!target) return true;
+    return metaProjectId === target;
+  });
+  const pool = matching.length ? matching : jobs;
+  return pool
+    .slice()
+    .sort((a, b) => Number(b?.updated_at || b?.created_at || 0) - Number(a?.updated_at || a?.created_at || 0))[0] || null;
+}
+
+function getWebRotationPreview(es = state.lang === LANG.ES) {
+  const readyz = state.lastReadyz && typeof state.lastReadyz === "object"
+    ? state.lastReadyz
+    : (state.lastSnapshot?.readyz && typeof state.lastSnapshot.readyz === "object" ? state.lastSnapshot.readyz : {});
+  const web = readyz?.web_search && typeof readyz.web_search === "object"
+    ? readyz.web_search
+    : (state.lastSnapshot?.snapshot?.web_search && typeof state.lastSnapshot.snapshot.web_search === "object" ? state.lastSnapshot.snapshot.web_search : {});
+  const order = Array.isArray(web?.effective_provider_order) ? web.effective_provider_order.map((item) => String(item || "").trim()).filter(Boolean) : [];
+  const mode = String(web?.rotation_mode || "auto").trim();
+  const lastProvider = String(state.lastChatContext?.web_provider || "").trim();
+  const summary = getWebProviderSummary(web, es);
+  return {
+    mode,
+    order,
+    orderText: order.length ? order.slice(0, 4).join(" → ") : (es ? "sin orden expuesto" : "no exposed order"),
+    lastProvider,
+    summary,
+  };
+}
+
+function openRelevantProjectLog() {
+  const latestJob = getLatestProjectJob();
+  if (!state.logJobId && !state.ingestJobId && latestJob?.id) {
+    state.logJobId = String(latestJob.id);
+    state.logIsAdmin = false;
+    state.logPath = null;
+  }
+  const jobId = state.ingestJobId || state.logJobId;
+  if (!jobId && !state.logPath) {
+    appendBubble(
+      state.lang === LANG.ES ? "No hay log activo para abrir todavía." : "There is no active log to open yet.",
+      "error"
+    );
+    return;
+  }
+  if (dom.logsLiveToggle) dom.logsLiveToggle.checked = true;
+  startLogsPolling();
+  dom.filesLogContent?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
 function getRuntimeCapabilityItems() {
   const snap = state.lastSnapshot?.snapshot || null;
   if (!snap || typeof snap !== "object") return [];
@@ -3080,9 +3554,10 @@ function getRuntimeCapabilityItems() {
   const llm = snap?.llm || {};
   const clamav = snap?.clamav || {};
   const browserRuntime = snap?.browser_runtime || {};
+  const webSummary = getWebProviderSummary(web, false);
   return [
     { label: "LLM", value: llm.status || "unknown", ok: !!checks.llm, level: levels.llm || llm.status || "unknown" },
-    { label: "Web", value: web.status || "unknown", ok: !!checks.web_search, level: levels.web_search || web.status || "unknown" },
+    { label: "Web", value: `${web.status || "unknown"}${webSummary.configured ? ` • ${webSummary.ready}/${webSummary.available}/${webSummary.configured}` : ""}`, ok: !!checks.web_search, level: levels.web_search || web.status || "unknown" },
     { label: "Image", value: image.status || "unknown", ok: !!checks.image_backend, level: levels.image || image.status || "unknown" },
     { label: "Browser", value: browserRuntime.status || "unknown", ok: !!checks.browser_runtime, level: levels.browser_runtime || browserRuntime.status || "unknown" },
     { label: "ClamAV", value: clamav.status || "unknown", ok: !!checks.clamav, level: levels.clamav || clamav.status || "unknown" },
@@ -3106,6 +3581,7 @@ function getValidationItems() {
     verifyFull: Array.isArray(validation.verify_full) ? validation.verify_full : [],
     browserSmokeDefault: !!validation.browser_smoke_default,
     browserSmokeStrictDefault: !!validation.browser_smoke_strict_default,
+    contractModeDefault: String(validation.contract_mode_default || "full"),
     lastRuns: validation.last_runs && typeof validation.last_runs === "object" ? validation.last_runs : {},
     lastUpdatedMs: Number(validation.last_updated_ms || 0),
     scripts: validation.scripts && typeof validation.scripts === "object" ? validation.scripts : {},
@@ -3152,7 +3628,156 @@ function renderProjectMeta() {
   const capabilityItems = getRuntimeCapabilityItems();
   const validationItems = getValidationItems();
   const context = state.lastChatContext && typeof state.lastChatContext === "object" ? state.lastChatContext : null;
+  const projectCounts = getProjectRecordCounts();
   dom.projectMeta.innerHTML = "";
+
+  const buildProjectControls = () => {
+    const latestJob = getLatestProjectJob();
+    const logLabel = state.ingestJobId
+      ? (es ? `Log activo: ${String(state.ingestJobId).slice(0, 8)}` : `Active log: ${String(state.ingestJobId).slice(0, 8)}`)
+      : state.logJobId
+        ? (es ? `Log seleccionado: ${String(state.logJobId).slice(0, 8)}` : `Selected log: ${String(state.logJobId).slice(0, 8)}`)
+        : latestJob?.id
+          ? (es ? `Último log: ${String(latestJob.id).slice(0, 8)}` : `Last log: ${String(latestJob.id).slice(0, 8)}`)
+          : (es ? "Sin log activo" : "No active log");
+    const bar = el("div", { class: "project-panel-toolbar" });
+
+    const logBtn = el("button", {
+      class: "action-btn",
+      text: logLabel,
+      attrs: { type: "button", title: es ? "Abrir log de trabajo actual" : "Open current work log" },
+    });
+    logBtn.addEventListener("click", openRelevantProjectLog);
+    bar.appendChild(logBtn);
+
+    const listBtn = el("button", {
+      class: `action-btn ${state.showProjectList ? "active" : ""}`.trim(),
+      text: state.showProjectList
+        ? (es ? `Ocultar proyectos (${projectCounts.visible}/${projectCounts.total})` : `Hide projects (${projectCounts.visible}/${projectCounts.total})`)
+        : (es ? `Proyectos (${projectCounts.visible}/${projectCounts.total})` : `Projects (${projectCounts.visible}/${projectCounts.total})`),
+      attrs: { type: "button" },
+    });
+    listBtn.addEventListener("click", toggleProjectListVisibility);
+    bar.appendChild(listBtn);
+
+    if (projectCounts.hiddenTemp || state.showTempProjects) {
+      const tempBtn = el("button", {
+        class: `action-btn ${state.showTempProjects ? "active" : ""}`.trim(),
+        text: state.showTempProjects
+          ? (es ? "Ocultar temporales" : "Hide temp")
+          : (es ? `Mostrar temporales (${projectCounts.hiddenTemp})` : `Show temp (${projectCounts.hiddenTemp})`),
+        attrs: { type: "button" },
+      });
+      tempBtn.addEventListener("click", toggleTempProjectsVisibility);
+      bar.appendChild(tempBtn);
+    }
+
+    const advancedBtn = el("button", {
+      class: `action-btn ${state.showProjectAdvanced ? "active" : ""}`.trim(),
+      text: state.showProjectAdvanced
+        ? (es ? "Ocultar paneles" : "Hide panels")
+        : (es ? "Más paneles" : "More panels"),
+      attrs: { type: "button" },
+    });
+    advancedBtn.addEventListener("click", toggleProjectAdvancedVisibility);
+    bar.appendChild(advancedBtn);
+    return bar;
+  };
+
+  const buildProjectActivityCard = () => {
+    const latestJob = getLatestProjectJob();
+    const webRotation = getWebRotationPreview(es);
+    const card = el("div", { class: "project-meta-card project-activity-card" });
+    card.appendChild(el("strong", { text: es ? "Actividad / runtime" : "Activity / runtime" }));
+    const chips = el("div", { class: "mini-list" });
+
+    const logSource = state.ingestJobId || state.logJobId || latestJob?.id || "";
+    chips.appendChild(
+      el("span", {
+        class: `mini-chip ${logSource ? "" : "warn"}`.trim(),
+        text: logSource
+          ? `${es ? "Log" : "Log"}: ${String(logSource).slice(0, 12)}`
+          : `${es ? "Log" : "Log"}: ${es ? "ninguno" : "none"}`,
+      })
+    );
+
+    if (latestJob?.status) {
+      chips.appendChild(
+        el("span", {
+          class: `mini-chip ${String(latestJob.status).toLowerCase() === "failed" ? "danger" : String(latestJob.status).toLowerCase() === "running" ? "warn" : ""}`.trim(),
+          text: `${es ? "Job" : "Job"}: ${latestJob.kind || "ingest"} • ${latestJob.status}`,
+        })
+      );
+    }
+    chips.appendChild(
+      el("span", {
+        class: "mini-chip",
+        text: `${es ? "Rotación web" : "Web rotation"}: ${webRotation.mode || "auto"}`,
+      })
+    );
+    chips.appendChild(
+      el("span", {
+        class: "mini-chip",
+        text: `${es ? "Providers" : "Providers"}: ${webRotation.summary.ready}/${webRotation.summary.available}/${webRotation.summary.configured}`,
+      })
+    );
+    if (webRotation.lastProvider) {
+      chips.appendChild(
+        el("span", {
+          class: "mini-chip",
+          text: `${es ? "Último provider" : "Last provider"}: ${webRotation.lastProvider}`,
+        })
+      );
+    }
+    card.appendChild(chips);
+
+    card.appendChild(
+      el("div", {
+        class: "project-summary-text subtle",
+        text: `${es ? "Orden efectivo" : "Effective order"}: ${webRotation.orderText}`,
+      })
+    );
+    if (webRotation.summary.reasons.length) {
+      card.appendChild(
+        el("div", {
+          class: "project-summary-text",
+          text: `${es ? "No disponibles" : "Unavailable"}: ${webRotation.summary.reasons.slice(0, 2).join(" | ")}`,
+        })
+      );
+    }
+    if (latestJob?.meta?.stages?.length) {
+      const lastStage = latestJob.meta.stages[latestJob.meta.stages.length - 1];
+      card.appendChild(
+        el("div", {
+          class: "project-summary-text",
+          text: `${es ? "Etapa" : "Stage"}: ${lastStage?.name || "—"}${lastStage?.status ? ` (${lastStage.status})` : ""}`,
+        })
+      );
+    }
+
+    const actions = el("div", { class: "mini-actions" });
+    const openLogBtn = el("button", {
+      class: "action-btn",
+      text: es ? "Abrir log" : "Open log",
+      attrs: { type: "button" },
+    });
+    openLogBtn.addEventListener("click", openRelevantProjectLog);
+    actions.appendChild(openLogBtn);
+
+    const jobsBtn = el("button", {
+      class: "action-btn",
+      text: es ? "Ir a trabajos" : "Go to jobs",
+      attrs: { type: "button" },
+    });
+    jobsBtn.addEventListener("click", () => {
+      dom.ingestJobsList?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    actions.appendChild(jobsBtn);
+    card.appendChild(actions);
+    return card;
+  };
+
+  dom.projectMeta.appendChild(buildProjectControls());
 
   const buildPlannerCard = () => {
     if (!context) return null;
@@ -3313,7 +3938,8 @@ function renderProjectMeta() {
       })
     );
     wrap.appendChild(infoCard);
-    if (capabilityItems.length) {
+    wrap.appendChild(buildProjectActivityCard());
+    if (state.showProjectAdvanced && capabilityItems.length) {
       const capCard = el("div", { class: "project-meta-card" });
       capCard.appendChild(el("strong", { text: es ? "Capabilities" : "Capabilities" }));
       const list = el("div", { class: "mini-list" });
@@ -3323,7 +3949,7 @@ function renderProjectMeta() {
       capCard.appendChild(list);
       wrap.appendChild(capCard);
     }
-    if (validationItems) {
+    if (state.showProjectAdvanced && validationItems) {
       const validationCard = el("div", { class: "project-meta-card" });
       validationCard.appendChild(el("strong", { text: es ? "Validación" : "Validation" }));
       const list = el("div", { class: "mini-list" });
@@ -3331,6 +3957,12 @@ function renderProjectMeta() {
         el("span", {
           class: `mini-chip ${validationItems.browserSmokeStrictDefault ? "" : "warn"}`,
           text: `${es ? "Browser gate" : "Browser gate"}: ${validationItems.browserSmokeStrictDefault ? "strict" : "soft"}`,
+        })
+      );
+      list.appendChild(
+        el("span", {
+          class: `mini-chip ${validationItems.contractModeDefault === "full" ? "" : "warn"}`,
+          text: `${es ? "Contrato startup" : "Startup contract"}: ${validationItems.contractModeDefault}`,
         })
       );
       if (validationItems.startupGate.length) {
@@ -3382,9 +4014,10 @@ function renderProjectMeta() {
     );
   }
   grid.appendChild(summaryCard);
+  grid.appendChild(buildProjectActivityCard());
 
   const ideaRows = Array.isArray(detail.ideas) ? detail.ideas : [];
-  if (ideaRows.length) {
+  if (state.showProjectAdvanced && ideaRows.length) {
     const ideasCard = el("div", { class: "project-meta-card" });
     ideasCard.appendChild(el("strong", { text: es ? "Ideas de mejora" : "Improvement ideas" }));
     ideaRows.slice(0, 6).forEach((item) => {
@@ -3413,7 +4046,7 @@ function renderProjectMeta() {
   }
 
   const intelligence = detail.intelligence && typeof detail.intelligence === "object" ? detail.intelligence : null;
-  if (intelligence) {
+  if (state.showProjectAdvanced && intelligence) {
     const intelligenceCard = el("div", { class: "project-meta-card" });
     intelligenceCard.appendChild(el("strong", { text: es ? "Inteligencia del proyecto" : "Project intelligence" }));
     const list = el("div", { class: "mini-list" });
@@ -3686,7 +4319,7 @@ function renderProjectMeta() {
   }
 
   const impact = state.activeProjectImpact && typeof state.activeProjectImpact === "object" ? state.activeProjectImpact : null;
-  if (impact && String(impact.query || "").trim()) {
+  if (state.showProjectAdvanced && impact && String(impact.query || "").trim()) {
     const impactCard = el("div", { class: "project-meta-card" });
     impactCard.appendChild(el("strong", { text: es ? "Impacto del foco actual" : "Current focus impact" }));
     impactCard.appendChild(
@@ -3867,21 +4500,18 @@ function renderProjectMeta() {
     { label: es ? "Dependencias" : "Dependencies", items: detail.dependencies || [] },
     { label: es ? "Configs" : "Configs", items: detail.configs || [] },
   ];
-  sections.forEach((section) => {
+  if (state.showProjectAdvanced) sections.forEach((section) => {
+    const rows = Array.isArray(section.items) ? section.items : [];
+    if (!rows.length) return;
     const card = el("div", { class: "project-meta-card" });
     card.appendChild(el("strong", { text: section.label }));
     const list = el("div", { class: "mini-list" });
-    const rows = Array.isArray(section.items) ? section.items : [];
-    if (!rows.length) {
-      list.appendChild(el("span", { class: "mini-chip", text: "—" }));
-    } else {
-      rows.slice(0, 8).forEach((item) => list.appendChild(el("span", { class: "mini-chip", text: String(item) })));
-    }
+    rows.slice(0, 8).forEach((item) => list.appendChild(el("span", { class: "mini-chip", text: String(item) })));
     card.appendChild(list);
     grid.appendChild(card);
   });
 
-  if (capabilityItems.length) {
+  if (state.showProjectAdvanced && capabilityItems.length) {
     const capCard = el("div", { class: "project-meta-card" });
     capCard.appendChild(el("strong", { text: es ? "Capabilities" : "Capabilities" }));
     const list = el("div", { class: "mini-list" });
@@ -3892,7 +4522,7 @@ function renderProjectMeta() {
     grid.appendChild(capCard);
   }
 
-  if (validationItems) {
+  if (state.showProjectAdvanced && validationItems) {
     const validationCard = el("div", { class: "project-meta-card" });
     validationCard.appendChild(el("strong", { text: es ? "Validación" : "Validation" }));
     const list = el("div", { class: "mini-list" });
@@ -4127,15 +4757,28 @@ function renderProjectList() {
   if (!dom.projectList) return;
   dom.projectList.innerHTML = "";
   const es = state.lang === LANG.ES;
+  const counts = getProjectRecordCounts();
+  const visibleProjects = getVisibleProjectRecords();
 
   if (!state.projectRecords.length) {
     dom.projectList.textContent = es ? "Sin proyectos cargados." : "No projects loaded.";
+    updateProjectListVisibility();
     renderActiveProjectBadge();
     renderProjectMeta();
     return;
   }
 
-  state.projectRecords.forEach((project) => {
+  if (!visibleProjects.length) {
+    dom.projectList.textContent = counts.hiddenTemp
+      ? (es ? `No hay proyectos visibles. ${counts.hiddenTemp} temporales/test están ocultos.` : `No visible projects. ${counts.hiddenTemp} temp/test projects are hidden.`)
+      : (es ? "Sin proyectos visibles." : "No visible projects.");
+    updateProjectListVisibility();
+    renderActiveProjectBadge();
+    renderProjectMeta();
+    return;
+  }
+
+  visibleProjects.forEach((project) => {
     const id = String(project.project_id || "");
     const rootPath = String(project.root_path || "");
     const card = el("div", { class: `project-list-card ${id === state.activeProjectId ? "active" : ""}` });
@@ -4143,7 +4786,7 @@ function renderProjectList() {
 
     const head = el("div", { class: "project-list-head" });
     head.appendChild(el("div", { class: "project-list-id", text: id || "project" }));
-    const status = el("span", { class: "origin-pill local", text: String(project.status || "uploaded") });
+    const status = el("span", { class: "origin-pill local", text: String(project.ready_state || project.status || "uploaded") });
     head.appendChild(status);
     card.appendChild(head);
 
@@ -4157,6 +4800,7 @@ function renderProjectList() {
     }
     dom.projectList.appendChild(card);
   });
+  updateProjectListVisibility();
   renderActiveProjectBadge();
   renderProjectMeta();
 }
@@ -4221,6 +4865,12 @@ async function ensureCurrentRootRegistered() {
       loadDetail: true,
     });
   }
+  if (syncAutoIngestJob(data?.auto_ingest || data)) {
+    appendBubble(
+      state.lang === LANG.ES ? `Indexando proyecto en background (job ${state.ingestJobId}).` : `Project indexing in background (job ${state.ingestJobId}).`,
+      "bot"
+    );
+  }
   return data;
 }
 
@@ -4249,6 +4899,53 @@ async function syncConversationState(convId) {
   }
 }
 
+function clearChatTranscript() {
+  if (dom.chat) dom.chat.innerHTML = "";
+}
+
+async function restoreConversationTranscript(convId, { force = false } = {}) {
+  const targetConvId = String(convId || "").trim();
+  if (!targetConvId) return false;
+  if (!force && state.lastTranscriptConversationId === targetConvId) return true;
+  if (!hasAuthForScope("main")) return false;
+
+  try {
+    const url = new URL(endpoints.conversationBundle(targetConvId), location.origin);
+    url.searchParams.set("limit", "200");
+    const res = await fetchWithTimeout(url.toString(), { headers: { Accept: "application/json" } }, { timeout: 12000, retries: 0 });
+    const data = await safeJson(res);
+    if (!res.ok) {
+      if (res.status === 404) {
+        state.lastTranscriptConversationId = "";
+      }
+      throw new Error(data?.detail || `HTTP ${res.status}`);
+    }
+
+    const turns = Array.isArray(data?.turns) ? data.turns : [];
+    if (!turns.length) {
+      state.lastTranscriptConversationId = targetConvId;
+      return false;
+    }
+
+    clearChatTranscript();
+    turns.forEach((turn) => {
+      const userMessage = String(turn?.user_message || "").trim();
+      const assistantMessage = String(turn?.assistant_message || "").trim();
+      if (userMessage) appendBubble(userMessage, "user");
+      if (assistantMessage) appendBubble(assistantMessage, "bot", true, turn?.response_context || null);
+    });
+
+    state.lastTranscriptConversationId = targetConvId;
+    try {
+      localStorage.setItem("aegis_last_transcript_conv", targetConvId);
+    } catch {}
+    return true;
+  } catch (err) {
+    console.error("conversation-transcript-restore-error", err);
+    return false;
+  }
+}
+
 async function loadActiveProjectDetail(projectId) {
   if (!projectId) {
     state.activeProjectDetail = null;
@@ -4271,9 +4968,10 @@ async function loadActiveProjectDetail(projectId) {
     const detailData = await safeJson(detailRes);
     if (!detailRes.ok) throw new Error(detailData?.detail || "detail failed");
 
-    const projectStatus = String(detailData?.project?.status || "").trim().toLowerCase();
+    const projectStatus = String(detailData?.ready_state || detailData?.project?.ready_state || detailData?.project?.status || "").trim().toLowerCase();
     const manifestReady =
       ["ingested", "ready", "indexed"].includes(projectStatus)
+      || !!detailData?.manifest_ready
       || !!(detailData?.manifest && typeof detailData.manifest === "object");
 
     let entryData = { items: [] };
@@ -4387,10 +5085,13 @@ function updateChatAttachmentBar() {
   }
   const kind = String(a.kind || "attachment").trim();
   const name = String(a.name || "attachment").trim();
+  const kindLabel = kind === "image"
+    ? (es ? "imagen" : "image")
+    : (es ? "archivo" : "file");
   dom.chatAttachmentBar.hidden = false;
   dom.chatAttachmentLabel.textContent = es
-    ? `Adjunto ${kind}: ${name}`
-    : `Attached ${kind}: ${name}`;
+    ? `Adjunto ${kindLabel}: ${name}`
+    : `Attached ${kindLabel}: ${name}`;
   if (dom.chatAttachmentAutoWeb) dom.chatAttachmentAutoWeb.checked = !!state.chatAttachmentAutoWeb;
 }
 
@@ -4433,12 +5134,74 @@ function updateImageQuickBar() {
   const show = state.mode === MODES.IMAGE;
   dom.imageQuickBar.hidden = !show;
   if (dom.imageModeGuide) dom.imageModeGuide.hidden = !show;
-  if (dom.attachBtn) {
-    dom.attachBtn.hidden = !show;
-    dom.attachBtn.setAttribute("aria-hidden", String(!show));
-    dom.attachBtn.setAttribute("aria-pressed", String(show));
-    dom.attachBtn.classList.toggle("active", show);
+  updateAttachmentButtonUI();
+}
+
+function updateAttachmentButtonUI() {
+  if (!dom.attachBtn) return;
+  const es = state.lang === LANG.ES;
+  const imageMode = state.mode === MODES.IMAGE;
+  dom.attachBtn.hidden = false;
+  dom.attachBtn.setAttribute("aria-hidden", "false");
+  dom.attachBtn.setAttribute("aria-pressed", String(imageMode));
+  dom.attachBtn.classList.toggle("active", imageMode);
+  dom.attachBtn.title = imageMode
+    ? (es ? "Subir imagen de referencia para analizar" : "Upload reference image for analysis")
+    : (es ? "Adjuntar archivo, documento o imagen al chat" : "Attach file, document, or image to chat");
+  dom.attachBtn.setAttribute("aria-label", dom.attachBtn.title);
+}
+
+function normalizeCryptoScopeSymbol(raw) {
+  const token = String(raw || "").trim().toUpperCase();
+  if (!token) return "";
+  if (CRYPTO_SEARCH_SYMBOLS.includes(token)) return token;
+  if (/^[A-Z]{2,10}USD$/.test(token)) return `${token.slice(0, -3)}USDT`;
+  if (/^[A-Z]{2,10}(USDT|USDC|BUSD|FDUSD|TUSD|BTC|ETH)$/.test(token)) return token;
+  const base = token.replace(/[^A-Z]/g, "");
+  if (!base) return "";
+  if (CRYPTO_SEARCH_SYMBOLS.includes(`${base}USDT`)) return `${base}USDT`;
+  if (["BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOGE", "AVAX", "DOT", "TRX"].includes(base)) return `${base}USDT`;
+  return "";
+}
+
+function extractCryptoSymbolFromText(text) {
+  const raw = String(text || "");
+  const pair = raw.match(/\b([A-Za-z]{2,10})(?:\/)?(USDT|USD|USDC|BUSD|FDUSD|TUSD|BTC|ETH)\b/i);
+  if (pair) return normalizeCryptoScopeSymbol(`${pair[1]}${pair[2]}`);
+  const lone = raw.match(/\b([A-Za-z]{2,10})\b/i);
+  if (!lone) return "";
+  return normalizeCryptoScopeSymbol(lone[1]);
+}
+
+function extractCryptoHorizonFromText(text) {
+  const raw = String(text || "");
+  const patterns = [
+    /\b(?:h|horizon)\s*[:=]?\s*(\d{1,5})\s*m\b/i,
+    /\b(?:next|for the next|for next)\s+(\d{1,5})\s*(?:m|min|mins|minute|minutes)\b/i,
+    /\b(?:proximos|próximos|proximo|próximo)\s+(\d{1,5})\s*(?:m|min|mins|minuto|minutos)\b/i,
+    /\b(\d{1,5})\s*(?:m|min|mins|minute|minutes|minuto|minutos)\b/i,
+  ];
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    if (!match) continue;
+    const value = parseInt(match[1], 10);
+    if (Number.isFinite(value) && value >= 1 && value <= 10080) return value;
   }
+  return null;
+}
+
+function buildCryptoScopedMessage(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return raw;
+  const explicitSymbol = extractCryptoSymbolFromText(raw);
+  const explicitHorizon = extractCryptoHorizonFromText(raw);
+  const panelSymbol = normalizeCryptoScopeSymbol(dom.chartSymbol?.value || state.chartSymbol || "BTCUSDT") || "BTCUSDT";
+  const panelHorizon = parseInt(dom.cryptoHorizon?.value || state.lastPrediction?.horizon || "15", 10);
+  const prefix = [];
+  if (!explicitSymbol && panelSymbol) prefix.push(panelSymbol);
+  if (!explicitHorizon && Number.isFinite(panelHorizon) && panelHorizon > 0) prefix.push(`H=${panelHorizon}m`);
+  if (!prefix.length) return raw;
+  return `${prefix.join(" ")} ${raw}`.trim();
 }
 
 /* ------------------------- SEND / CHAT ------------------------- */
@@ -4448,6 +5211,8 @@ async function onSend() {
   if (!ensureApiKeyOrPrompt({ action: "chat" })) return;
   const raw = (dom.msgInput?.value || "").trim();
   if (!raw) return;
+  const explicitWebPrefix = /^web:\s*/i.test(raw);
+  const explicitLocalPrefix = /^local:\s*/i.test(raw);
 
   // auto prefix routing
   let modeForThis = state.mode;
@@ -4455,6 +5220,7 @@ async function onSend() {
 
   if (/^web:\s*/i.test(raw)) { modeForThis = MODES.WEB; text = raw.replace(/^web:\s*/i, "").trim(); }
   if (/^url:\s*/i.test(raw)) { modeForThis = MODES.URL; text = raw.replace(/^url:\s*/i, "").trim(); }
+  if (/^local:\s*/i.test(raw)) { modeForThis = MODES.CHAT; text = raw.replace(/^local:\s*/i, "").trim(); }
 
   // image generation shortcut in any mode
   if (await tryHandleImageCommand(raw)) {
@@ -4480,7 +5246,11 @@ async function onSend() {
   const t0 = performance.now();
   try {
     if (modeForThis === MODES.WEB) {
-      await handleWeb(text);
+      if ((!explicitWebPrefix || explicitLocalPrefix) && shouldKeepLocalInWebMode(text, "web")) {
+        await handleChat(text, { mode: "general" });
+      } else {
+        await handleWeb(text);
+      }
     } else if (modeForThis === MODES.URL) {
       await handleUrl(text);
     } else if (modeForThis === MODES.CRYPTO) {
@@ -4509,6 +5279,10 @@ function formatNetworkError(err) {
     }
   })();
   if (err?.name === "AbortError") {
+    if (state.cancelledByUser) {
+      state.cancelledByUser = false;
+      return es ? "Solicitud cancelada." : "Request cancelled.";
+    }
     return es ? "Timeout: la petición tardó demasiado." : "Timeout: request took too long.";
   }
   if (msg.includes("failed to fetch") || msg.includes("networkerror")) {
@@ -4531,8 +5305,16 @@ function looksProjectScopedMessage(text) {
     "ingest",
     "file",
     "files",
+    "folder",
+    "folders",
+    "directory",
+    "directories",
     "archivo",
     "archivos",
+    "carpeta",
+    "carpetas",
+    "directorio",
+    "directorios",
     "path",
     "ruta",
     "symbol",
@@ -4550,12 +5332,157 @@ function looksProjectScopedMessage(text) {
   ].some((kw) => lower.includes(kw));
 }
 
+function looksExplicitLocalOnlyMessage(text) {
+  const lower = String(text || "").trim().toLowerCase();
+  if (!lower) return false;
+  if (/^local:\s*/i.test(lower)) return true;
+  return [
+    "local only",
+    "solo local",
+    "sin web",
+    "without web",
+    "use local",
+    "usa local",
+    "responde con local",
+    "respuesta local",
+    "reply with local",
+    "reply locally",
+    "no uses web",
+    "no usar web",
+    "do not use web",
+    "dont use web",
+    "don't use web",
+    "no necesitas web",
+  ].some((kw) => lower.includes(kw));
+}
+
+function looksLocalSocialMessage(text) {
+  const lower = String(text || "").trim().toLowerCase();
+  if (!lower) return false;
+  const normalized = lower.replace(/[!?.,;:]+/g, " ").replace(/\s+/g, " ").trim();
+  if (["ok", "okay", "okey", "thanks", "thank you", "ok thanks", "thanks ok", "gracias", "vale", "dale", "cool", "nice"].includes(normalized)) {
+    return true;
+  }
+  return [
+    "hello",
+    "hi",
+    "hey",
+    "hola",
+    "buenas",
+    "how are you",
+    "who are you",
+    "what are you",
+    "what is your name",
+    "what's your name",
+    "whats your name",
+    "what can you do",
+    "what u can do",
+    "how can you help",
+    "access to internet",
+    "internet access",
+    "browse the internet",
+    "browse internet",
+    "browse the web",
+    "browse web",
+    "can you browse",
+    "can u browse",
+    "do you have access",
+    "u have access to internet",
+    "you have access to internet",
+    "quien eres",
+    "quién eres",
+    "como estas",
+    "cómo estás",
+    "que puedes hacer",
+    "qué puedes hacer",
+    "tienes acceso a internet",
+    "tienes acceso al internet",
+    "puedes navegar en internet",
+    "puedes navegar por internet",
+  ].some((kw) => lower.includes(kw));
+}
+
+function messageNeedsFreshWeb(text) {
+  const lower = String(text || "").trim().toLowerCase();
+  if (!lower) return false;
+  return [
+    "latest",
+    "current",
+    "today",
+    "news",
+    "release notes",
+    "source",
+    "sources",
+    "link",
+    "links",
+    "docs",
+    "documentation",
+    "recent",
+    "fresh",
+    "fuente",
+    "fuentes",
+    "enlace",
+    "enlaces",
+    "documentacion",
+    "documentación",
+    "reciente",
+    "actual",
+  ].some((kw) => lower.includes(kw));
+}
+
+function attachmentKeepsLocalRouting(text, mode = "general") {
+  const modeValue = String(mode || "").trim().toLowerCase();
+  if (modeValue === "crypto" || modeValue === "url") return false;
+  const attachment = state.chatAttachment && typeof state.chatAttachment === "object" ? state.chatAttachment : null;
+  if (!attachment) return false;
+  const lower = String(text || "").toLowerCase();
+  const kind = String(attachment.kind || "").trim().toLowerCase();
+  if (looksProjectScopedMessage(text)) return true;
+  if (kind === "image") return true;
+  if (messageNeedsFreshWeb(text)) return false;
+  return [
+    "attachment",
+    "attached",
+    "adjunto",
+    "image",
+    "imagen",
+    "file",
+    "archivo",
+    "document",
+    "documento",
+    "ocr",
+    "screenshot",
+    "screen",
+    "what is that",
+    "what's that",
+    "whats that",
+    "explain",
+    "describe",
+    "summarize",
+    "analiza",
+    "analyze",
+  ].some((kw) => lower.includes(kw));
+}
+
+function projectKeepsLocalRouting(text, mode = "general") {
+  const modeValue = String(mode || "").trim().toLowerCase();
+  if (modeValue === "crypto" || modeValue === "url") return false;
+  if (!looksProjectScopedMessage(text)) return false;
+  return !messageNeedsFreshWeb(text);
+}
+
+function shouldKeepLocalInWebMode(text, mode = "general") {
+  return looksExplicitLocalOnlyMessage(text) || looksLocalSocialMessage(text) || projectKeepsLocalRouting(text, mode) || attachmentKeepsLocalRouting(text, mode);
+}
+
 function shouldAutoUseWebForMessage(text, mode = "general") {
   const modeValue = String(mode || "").trim().toLowerCase();
   if (modeValue === "crypto" || modeValue === "url") return false;
-  if (modeValue === "web") return true;
   const raw = String(text || "").trim();
   if (!raw) return false;
+  if (looksExplicitLocalOnlyMessage(raw)) return false;
+  if (modeValue === "web") return !looksLocalSocialMessage(raw);
+  if (looksLocalSocialMessage(raw)) return false;
   // Keep project-introspection turns local-first to avoid forcing web-only
   // when the user is clearly asking about the active repo/files/symbols.
   if (looksProjectScopedMessage(raw)) return false;
@@ -4655,6 +5582,16 @@ function stripInlineTraceBlob(text) {
     return { text: src.slice(0, Math.max(0, first)).replace(/[ \t\r\n\-:;]+$/g, ""), stripped: true };
   }
   return { text: src, stripped: false };
+}
+
+function formatDisplayQuery(text) {
+  const raw = String(text || "").replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  if (!raw) return "";
+  const withoutPromptBlob = stripInlinePromptBlob(raw).text;
+  const withoutTraceBlob = stripInlineTraceBlob(withoutPromptBlob).text;
+  const attachmentSplit = withoutTraceBlob.split(/\n\s*\[(?:attachment|adjunto)\s+context[^\]]*\]/i)[0].trim();
+  const compact = attachmentSplit.replace(/\s+/g, " ").trim();
+  return compact.length > 240 ? `${compact.slice(0, 240)}…` : compact;
 }
 
 function sanitizeAssistantAnswerText(rawText) {
@@ -4814,16 +5751,22 @@ async function handleAgentContinue({ useWeb = false, synthesize = true } = {}) {
 
 async function handleChat(text, { mode = "general" } = {}) {
   const modeValue = String(mode || "general").trim().toLowerCase();
-  const autoByMessage = shouldAutoUseWebForMessage(text, modeValue);
+  const scopedText = modeValue === "crypto" ? buildCryptoScopedMessage(text) : text;
+  const autoByMessage = shouldAutoUseWebForMessage(scopedText, modeValue);
+  const localFirstTurn = shouldKeepLocalInWebMode(scopedText, modeValue);
   const attachmentPrefersWeb = !!(
     state.chatAttachment
     && state.chatAttachmentAutoWeb
     && modeValue !== "url"
     && modeValue !== "crypto"
+    && !localFirstTurn
+    && messageNeedsFreshWeb(scopedText)
   );
-  const autoUseWeb = autoByMessage || attachmentPrefersWeb;
-  const effectiveMode = autoByMessage ? "web" : modeValue;
-  const messageForBackend = buildMessageWithAttachment(text, effectiveMode);
+  const autoUseWeb = !localFirstTurn && (modeValue === "web" || autoByMessage || attachmentPrefersWeb);
+  const effectiveMode = localFirstTurn
+    ? "general"
+    : ((modeValue === "web" || autoByMessage) ? "web" : modeValue);
+  const messageForBackend = buildMessageWithAttachment(scopedText, effectiveMode);
   const payload = {
     message: messageForBackend,
     lang: state.lang,
@@ -4880,11 +5823,11 @@ async function handleChat(text, { mode = "general" } = {}) {
 
   // if backend returns sources, show them
   const sources = normalizeWebResults(data?.sources || data?.results || data?.web_results || data?.items || null);
-  renderResponseSources(text, sources, context, data);
+  renderResponseSources(scopedText, sources, context, data);
 
   // crypto side-effects
-  if (state.mode === MODES.CRYPTO) {
-    loadPredictionComparison(state.chartSymbol, { force: false });
+  if (effectiveMode === "crypto") {
+    loadPredictionComparison(state.chartSymbol, { force: true });
   }
 }
 
@@ -5080,20 +6023,6 @@ async function handleWeb(query) {
         "bot"
       );
     }
-  } else if (String(ctx.web_status || "") === "unavailable" || String(ctx.web_status || "") === "error") {
-    appendBubble(
-      state.lang === LANG.ES
-        ? "Web no disponible ahora mismo; continúo con datos locales/caché."
-        : "Web is unavailable right now; continuing with local/cache data.",
-      "bot"
-    );
-  } else if (String(ctx.web_status || "") === "cooldown") {
-    appendBubble(
-      state.lang === LANG.ES
-        ? "Web en cooldown; continúo con datos locales/caché."
-        : "Web is in cooldown; continuing with local/cache data.",
-      "bot"
-    );
   }
   // Then ask backend chat in web mode (so it can answer)
   await handleChat(query, { mode: "web" });
@@ -5358,7 +6287,10 @@ function renderSourceOriginBar(context = null) {
     }
   }
   if (debugMode && context.web_query) {
-    dom.sourceOriginBar.appendChild(el("div", { class: "origin-query", text: `${es ? "Query" : "Query"}: ${context.web_query}` }));
+    const displayQuery = formatDisplayQuery(context.web_query);
+    if (displayQuery) {
+      dom.sourceOriginBar.appendChild(el("div", { class: "origin-query", text: `${es ? "Query" : "Query"}: ${displayQuery}` }));
+    }
   }
 }
 
@@ -5414,8 +6346,9 @@ function renderResponseSources(query, results, context = null, raw = null) {
   dom.sourcesContent.innerHTML = "";
 
   const es = state.lang === LANG.ES;
+  const displayQuery = formatDisplayQuery(query || context?.web_query || "");
   const label = rows.length
-    ? (es ? `Fuentes para: "${query}"` : `Sources for: "${query}"`)
+    ? (es ? `Fuentes para: "${displayQuery}"` : `Sources for: "${displayQuery}"`)
     : (es ? "Contexto de respuesta" : "Response context");
   const header = el("div", { text: label });
   header.style.marginBottom = "6px";
@@ -5459,11 +6392,11 @@ function renderResponseSources(query, results, context = null, raw = null) {
     }
     evidenceCard.appendChild(evidenceHead);
     const list = el("div", { class: "mini-list" });
-    if (context.source_plan) {
+    if (debugMode && context.source_plan) {
       list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Plan" : "Plan"}: ${prettySourcePlan(context.source_plan)}` }));
     }
     const origins = Array.isArray(context.source_origin) ? context.source_origin : [];
-    if (origins.length) {
+    if (debugMode && origins.length) {
       list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Origen" : "Origin"}: ${origins.map(prettyOriginLabel).join(", ")}` }));
     }
     if (debugMode && context.web_provider) {
@@ -5496,7 +6429,7 @@ function renderResponseSources(query, results, context = null, raw = null) {
     } else if (debugMode && context.llm_required === true) {
       list.appendChild(el("span", { class: "mini-chip", text: "LLM: required" }));
     }
-    if (list.childNodes.length) {
+    if (debugMode && list.childNodes.length) {
       evidenceCard.appendChild(list);
     }
     if (debugMode && context.next_step) {
@@ -5905,9 +6838,26 @@ async function analyzeAttachment(file, { showPreview = false } = {}) {
     ).trim() || JSON.stringify(data, null, 2);
 
     const kind = String(data?.kind || (String(file.type || "").startsWith("image/") ? "image" : "document")).trim();
+    const isImage = kind === "image";
+    const isImageMode = state.mode === MODES.IMAGE;
 
-    if (kind === "image") {
+    if (isImage && isImageMode) {
       state.imageReferenceFile = file;
+      if (showPreview) {
+        appendImageBubble({
+          localFile: file,
+          caption: es
+            ? `Imagen de referencia${filename ? `: ${filename}` : ""}`
+            : `Reference image${filename ? `: ${filename}` : ""}`,
+        });
+      }
+      appendBubble(
+        es
+          ? `Imagen de referencia lista: ${filename}. La usaré en modo imagen.`
+          : `Reference image ready: ${filename}. I’ll use it in image mode.`,
+        "bot"
+      );
+      return;
     }
 
     setChatAttachment({
@@ -5916,19 +6866,19 @@ async function analyzeAttachment(file, { showPreview = false } = {}) {
       analysis: description,
     });
 
-    if (showPreview && kind === "image") {
+    if (showPreview && isImage) {
       appendImageBubble({
         localFile: file,
         caption: es
-          ? `Imagen de referencia${filename ? `: ${filename}` : ""}`
-          : `Reference image${filename ? `: ${filename}` : ""}`,
+          ? `Imagen adjunta${filename ? `: ${filename}` : ""}`
+          : `Attached image${filename ? `: ${filename}` : ""}`,
       });
     }
 
     appendBubble(
       es
-        ? `Adjunto listo: ${filename}. Lo usaré como contexto en chat.`
-        : `Attachment ready: ${filename}. I will use it as chat context.`,
+        ? `Archivo adjunto: ${filename}. Lo usare como contexto en chat. Puedes preguntar "que es esta imagen?", "explica este archivo" o "resume el texto".`
+        : `File attached: ${filename}. I will use it as chat context. You can ask "what is this image?", "explain this file", or "summarize the text".`,
       "bot"
     );
   } finally {
@@ -6826,6 +7776,7 @@ async function loadCryptoPrediction(options = {}) {
       px,
       context,
     });
+    loadPredictionComparison(symbol, { force: true });
   } catch {
   } finally {
     state.cryptoPredictionInFlight = false;
@@ -7246,8 +8197,12 @@ function formatTimeLabel(ts, { withDate = false, withSeconds = false } = {}) {
 async function loadPredictionComparison(symbolInput, { force = false } = {}) {
   if (!dom.predictionCompareBody) return;
   const symbol = (symbolInput || state.chartSymbol || "").trim().toUpperCase();
+  const horizon = parseInt(dom.cryptoHorizon?.value || state.lastPrediction?.horizon || "15", 10);
   const title = state.lang === LANG.ES ? "Comparación post-horizonte" : "Post-horizon comparison";
-  if (dom.predictionCompareTitle) dom.predictionCompareTitle.textContent = symbol ? `${title} • ${symbol}` : title;
+  const titleScope = symbol
+    ? `${title} • ${symbol}${Number.isFinite(horizon) && horizon > 0 ? ` • H=${horizon}m` : ""}`
+    : title;
+  if (dom.predictionCompareTitle) dom.predictionCompareTitle.textContent = titleScope;
 
   dom.predictionCompareBody.textContent = state.lang === LANG.ES ? "Cargando..." : "Loading...";
 
@@ -7255,10 +8210,12 @@ async function loadPredictionComparison(symbolInput, { force = false } = {}) {
   const predsUrl = new URL("/crypto/predictions", location.origin);
   predsUrl.searchParams.set("limit", "20");
   if (symbol) predsUrl.searchParams.set("symbol", symbol);
+  if (Number.isFinite(horizon) && horizon > 0) predsUrl.searchParams.set("horizon_minutes", String(horizon));
 
   const outsUrl = new URL("/crypto/predictions/outcomes", location.origin);
   outsUrl.searchParams.set("limit", "40");
   if (symbol) outsUrl.searchParams.set("symbol", symbol);
+  if (Number.isFinite(horizon) && horizon > 0) outsUrl.searchParams.set("horizon_minutes", String(horizon));
 
   try {
     const [pRes, oRes] = await Promise.all([
@@ -7435,6 +8392,7 @@ function startReadyzPolling() {
       const data = await safeJson(res);
       if (res.ok && data && typeof data === "object") {
         state.lastReadyz = data;
+        syncLlmProviderFromReadyz(data);
       } else if (res.status === 401 || res.status === 403) {
         state.lastReadyz = null;
       }
@@ -7747,6 +8705,7 @@ function renderSnapshotPanel(data, health, readyz = null) {
   const snap = data && typeof data === "object" ? data : {};
   const roots = Array.isArray(data?.ingest_roots) ? data.ingest_roots : [];
   const jobs = Array.isArray(data?.jobs) ? data.jobs : [];
+  const process = data?.process || readyz?.process || {};
   const emb = data?.embeddings || { status: "unknown" };
   const llm = data?.llm || { status: "unknown" };
   const web = data?.web_search || { status: "unknown" };
@@ -7885,6 +8844,16 @@ function renderSnapshotPanel(data, health, readyz = null) {
   llmCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Estado" : "Status"}: ${llm.status || "?"} ${llm.loaded ? "✓" : ""}` }));
   wrap.appendChild(llmCard);
 
+  const processCard = el("div", { class: "kpi-card" });
+  processCard.appendChild(el("div", { class: "kpi-title", text: es ? "Proceso backend" : "Backend process" }));
+  processCard.appendChild(el("div", { class: "kpi-item", text: `PID: ${process?.pid || "?"}` }));
+  processCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Host" : "Host"}: ${process?.hostname || "?"}` }));
+  if (Number.isFinite(Number(process?.uptime_s))) {
+    const uptime = Number(process.uptime_s) || 0;
+    processCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Uptime" : "Uptime"}: ${uptime.toFixed(1)}s` }));
+  }
+  wrap.appendChild(processCard);
+
   if (!SNAPSHOT_MINIMAL_VIEW) {
     // Resources + agent internals stay available in debug snapshot mode.
     const resources = snap?.resources || {};
@@ -7931,9 +8900,18 @@ function renderSnapshotPanel(data, health, readyz = null) {
   }
 
   const webCard = el("div", { class: "kpi-card" });
+  const webSummary = getWebProviderSummary(web, es);
   webCard.appendChild(el("div", { class: "kpi-title", text: es ? "Web search" : "Web search" }));
   webCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Estado" : "Status"}: ${web.status || "?"}` }));
   webCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Providers" : "Providers"}: ${web.provider_count ?? 0}` }));
+  webCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Disponibles" : "Available"}: ${webSummary.available}` }));
+  webCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Listos" : "Ready"}: ${webSummary.ready}` }));
+  if (webSummary.cooling) {
+    webCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Cooldown" : "Cooldown"}: ${webSummary.cooling}` }));
+  }
+  if (webSummary.reasons.length) {
+    webCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "No disponibles" : "Unavailable"}: ${webSummary.reasons.slice(0, 2).join(" | ")}` }));
+  }
   if (web.probe_enabled) webCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Probe" : "Probe"}: ${web.probe_ok ? "ok" : "fail"}` }));
   wrap.appendChild(webCard);
 
@@ -7971,6 +8949,12 @@ function renderSnapshotPanel(data, health, readyz = null) {
     el("div", {
       class: "kpi-item",
       text: `${es ? "Browser gate" : "Browser gate"}: ${validation.browser_smoke_strict_default ? "strict" : validation.browser_smoke_default ? "soft" : "off"}`,
+    })
+  );
+  validationCard.appendChild(
+    el("div", {
+      class: "kpi-item",
+      text: `${es ? "Contrato startup" : "Startup contract"}: ${validation.contract_mode_default || "full"}`,
     })
   );
   if (startupGate.length) {
@@ -8803,6 +9787,7 @@ async function selectConversation(convId) {
   localStorage.setItem("aegis_use_existing", "1");
   updateConversationIndicators(convId);
   await syncConversationState(convId);
+  await restoreConversationTranscript(convId, { force: true });
   appendBubble(state.lang === LANG.ES ? `Sesión ${convId} activada.` : `Conversation ${convId} selected.`, "bot");
   closeSessionsModal();
 }
@@ -10140,33 +11125,76 @@ async function copyFileViewer() {
   }
 }
 
-async function uploadZipProject() {
-  const f = dom.projectUploadInput?.files?.[0];
-  dom.projectUploadInput.value = "";
-  if (!f) return;
-
-  appendBubble(state.lang === LANG.ES ? "Subiendo ZIP..." : "Uploading ZIP...", "bot");
-  const fd = new FormData();
-  fd.append("file", f);
-
-  try {
-    const res = await fetchWithTimeout(endpoints.filesUploadZip, { method: "POST", body: fd }, { timeout: 120000, retries: 0 });
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || "upload failed");
-    appendBubble(state.lang === LANG.ES ? "ZIP subido." : "ZIP uploaded.", "bot");
-    if (data?.path) addUploadedProject(data.path, data?.project_id || null);
-    if (data?.project_id) {
-      await setActiveProject(String(data.project_id), {
-        rootPath: data?.path || null,
-        bindConversation: false,
-      });
-    }
-    await loadRegisteredProjects();
-    loadProjectTree();
-  } catch (err) {
-    console.error(err);
-    appendBubble(state.lang === LANG.ES ? "No se pudo subir el ZIP." : "Could not upload ZIP.", "error");
+function syncAutoIngestJob(autoIngest = null) {
+  const payload = autoIngest && typeof autoIngest === "object" ? autoIngest : null;
+  const jobId = String(payload?.job_id || "").trim();
+  if (!jobId) return false;
+  state.ingestJobId = jobId;
+  if (state.ingestPollTimer) {
+    clearInterval(state.ingestPollTimer);
+    state.ingestPollTimer = null;
   }
+  state.logJobId = jobId;
+  state.logPath = null;
+  state.logIsAdmin = false;
+  pollIngestStatus();
+  loadIngestJobs();
+  return true;
+}
+
+async function uploadZipProject() {
+  const files = Array.from(dom.projectUploadInput?.files || []);
+  dom.projectUploadInput.value = "";
+  if (!files.length) return;
+
+  appendBubble(
+    files.length > 1
+      ? (state.lang === LANG.ES ? `Subiendo ${files.length} ZIPs...` : `Uploading ${files.length} ZIPs...`)
+      : (state.lang === LANG.ES ? "Subiendo ZIP..." : "Uploading ZIP..."),
+    "bot"
+  );
+
+  for (const f of files) {
+    const fd = new FormData();
+    fd.append("file", f);
+
+    try {
+      const res = await fetchWithTimeout(endpoints.filesUploadZip, { method: "POST", body: fd }, { timeout: 120000, retries: 0 });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data?.detail || "upload failed");
+      appendBubble(
+        files.length > 1
+          ? (state.lang === LANG.ES ? `ZIP subido: ${f.name}` : `ZIP uploaded: ${f.name}`)
+          : (state.lang === LANG.ES ? "ZIP subido." : "ZIP uploaded."),
+        "bot"
+      );
+      if (data?.path) addUploadedProject(data.path, data?.project_id || null);
+      if (data?.project_id) {
+        await setActiveProject(String(data.project_id), {
+          rootPath: data?.path || null,
+          bindConversation: false,
+        });
+      }
+      if (syncAutoIngestJob(data?.auto_ingest || data)) {
+        appendBubble(
+          state.lang === LANG.ES ? `Indexando proyecto en background (job ${state.ingestJobId}).` : `Project indexing in background (job ${state.ingestJobId}).`,
+          "bot"
+        );
+      }
+    } catch (err) {
+      console.error(err);
+      const detail = String(err?.message || "").trim();
+      const suffix = detail ? ` ${detail}` : "";
+      appendBubble(
+        files.length > 1
+          ? (state.lang === LANG.ES ? `No se pudo subir ${f.name}.${suffix}` : `Could not upload ${f.name}.${suffix}`)
+          : (state.lang === LANG.ES ? `No se pudo subir el ZIP.${suffix}` : `Could not upload ZIP.${suffix}`),
+        "error"
+      );
+    }
+  }
+  await loadRegisteredProjects();
+  loadProjectTree();
 }
 
 async function cloneRepo() {
@@ -10191,6 +11219,12 @@ async function cloneRepo() {
         rootPath: data?.path || null,
         bindConversation: false,
       });
+    }
+    if (syncAutoIngestJob(data?.auto_ingest || data)) {
+      appendBubble(
+        state.lang === LANG.ES ? `Indexando proyecto en background (job ${state.ingestJobId}).` : `Project indexing in background (job ${state.ingestJobId}).`,
+        "bot"
+      );
     }
     await loadRegisteredProjects();
     loadProjectTree();
@@ -10276,22 +11310,37 @@ async function deleteProject() {
 
 async function startIngest() {
   appendBubble(state.lang === LANG.ES ? "Ingestando..." : "Ingesting...", "bot");
-  const effectiveRoot = getEffectiveProjectRoot();
-  if (!state.activeProjectId && !effectiveRoot) {
-    appendBubble(state.lang === LANG.ES ? "Selecciona un proyecto válido." : "Select a valid project first.", "error");
+  const selection = resolveProjectSelectionState();
+  const effectiveRoot = selection.rootPath || getEffectiveProjectRoot();
+  const effectiveProjectId = selection.projectId || "";
+  if (!effectiveProjectId && !effectiveRoot) {
+    appendBubble(
+      state.lang === LANG.ES
+        ? "Selecciona un proyecto activo, o sube/registra un root válido primero."
+        : "Select an active project, or upload/register a valid root first.",
+      "error"
+    );
     return;
   }
   try {
-    if (!state.activeProjectId) {
+    if (effectiveProjectId && effectiveProjectId !== state.activeProjectId) {
+      await setActiveProject(effectiveProjectId, {
+        rootPath: effectiveRoot || null,
+        bindConversation: false,
+        loadDetail: false,
+      });
+    } else if (!state.activeProjectId) {
       await ensureCurrentRootRegistered();
     }
+    const targetProjectId = String(state.activeProjectId || selection.projectId || "").trim();
+    const targetRoot = targetProjectId ? "" : (effectiveRoot || "");
     const res = await fetchWithTimeout(endpoints.filesIngest, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({
-        path: state.activeProjectId ? undefined : (effectiveRoot || undefined),
+        path: targetProjectId ? undefined : (targetRoot || undefined),
         background: true,
-        project_id: state.activeProjectId || undefined,
+        project_id: targetProjectId || undefined,
       }),
     }, { timeout: 0, retries: 0 });
 
@@ -10299,7 +11348,7 @@ async function startIngest() {
     if (!res.ok) throw new Error(data?.detail || "ingest failed");
     if (data?.project_id) {
       await setActiveProject(String(data.project_id), {
-        rootPath: effectiveRoot || null,
+        rootPath: targetRoot || effectiveRoot || null,
         bindConversation: false,
         loadDetail: false,
       });
@@ -10326,7 +11375,14 @@ async function startIngest() {
     await loadRegisteredProjects();
     updateStatusCenter();
   } catch {
-    appendBubble(state.lang === LANG.ES ? "No se pudo iniciar ingesta." : "Could not start ingest.", "error");
+    const currentSelection = resolveProjectSelectionState();
+    const projectLabel = currentSelection.projectId || currentSelection.rootPath || (state.lang === LANG.ES ? "sin selección" : "no selection");
+    appendBubble(
+      state.lang === LANG.ES
+        ? `No se pudo iniciar ingesta (${projectLabel}).`
+        : `Could not start ingest (${projectLabel}).`,
+      "error"
+    );
   }
 }
 

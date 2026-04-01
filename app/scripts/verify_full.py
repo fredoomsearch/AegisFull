@@ -86,35 +86,77 @@ def _check_readyz(
     *,
     strict: bool = False,
     product_track: str = "core",
-) -> tuple[bool, str]:
+) -> tuple[bool, str, dict | None]:
     # NOTE: kept local (instead of shared with start_with_preflight.py) because
     # verify-full returns compact CLI-oriented status tokens.
     target = str(base_url or "").strip()
     if not target:
-        return False, "missing-base-url"
+        return False, "missing-base-url", None
     url = f"{target.rstrip('/')}/system/readyz"
     headers = {"X-API-Key": api_key} if api_key else {}
     try:
         r = requests.get(url, headers=headers, timeout=max(3, timeout))
     except Exception as exc:  # noqa: BLE001
-        return False, f"readyz-request-failed:{exc}"
+        return False, f"readyz-request-failed:{exc}", None
     if r.status_code != 200:
-        return False, f"readyz-status:{r.status_code}"
+        return False, f"readyz-status:{r.status_code}", None
     try:
         data = r.json()
     except Exception:
-        return False, "readyz-non-json"
+        return False, "readyz-non-json", None
     if not bool(data.get("ready")):
-        return False, f"readyz-not-ready:{data}"
+        return False, f"readyz-not-ready:{data}", data if isinstance(data, dict) else None
     if strict:
         status = str(data.get("status") or "").strip().lower()
         if product_track == "full":
             if status and status != "ready":
-                return False, f"strict-readyz-requires-status-ready:{status}"
+                return False, f"strict-readyz-requires-status-ready:{status}", data if isinstance(data, dict) else None
         else:
             if status and status not in {"ready", "degraded", "fallback-only"}:
-                return False, f"strict-core-readyz-requires-ready-or-degraded:{status}"
-    return True, "ok"
+                return False, f"strict-core-readyz-requires-ready-or-degraded:{status}", data if isinstance(data, dict) else None
+    return True, "ok", data if isinstance(data, dict) else None
+
+
+def _readyz_debug_lines(base_url: str, readyz_data: dict | None) -> list[str]:
+    lines = [f"url: {base_url}"]
+    if not isinstance(readyz_data, dict):
+        return lines
+    process = readyz_data.get("process") if isinstance(readyz_data.get("process"), dict) else {}
+    pid = process.get("pid")
+    host = str(process.get("hostname") or "").strip()
+    uptime = process.get("uptime_s")
+    status = str(readyz_data.get("status") or "unknown").strip() or "unknown"
+    if pid or host or uptime is not None:
+        uptime_text = ""
+        try:
+            uptime_f = float(uptime)
+            uptime_text = f" · up {uptime_f:.1f}s"
+        except Exception:
+            if uptime not in (None, ""):
+                uptime_text = f" · up {uptime}"
+        lines.append(f"process: pid={pid or '?'}{f' @ {host}' if host else ''}{uptime_text}")
+    lines.append(f"readyz.status: {status}")
+    for key in ("web_search", "image", "llm"):
+        section = readyz_data.get(key)
+        if isinstance(section, dict):
+            level = str(section.get("status") or "").strip()
+            if level:
+                lines.append(f"{key}: {level}")
+    degraded = readyz_data.get("degraded_reasons")
+    if isinstance(degraded, list) and degraded:
+        joined = ", ".join(str(x) for x in degraded[:6] if str(x).strip())
+        if joined:
+            lines.append(f"degraded_reasons: {joined}")
+    checks = readyz_data.get("checks")
+    if isinstance(checks, dict) and checks:
+        summary = []
+        for key in ("embeddings", "retrieval", "llm", "web_search", "image", "clamav", "project_tools"):
+            value = checks.get(key)
+            if value is not None:
+                summary.append(f"{key}={value}")
+        if summary:
+            lines.append(f"checks: {'; '.join(summary)}")
+    return lines
 
 
 def parse_args() -> argparse.Namespace:
@@ -324,17 +366,25 @@ def main() -> int:
         mark_step("verify_full", "e2e-strict", "skipped", "skip-e2e-or-missing-base-url")
 
     if args.base_url:
-        ok, detail = _check_readyz(
+        readyz_result = _check_readyz(
             args.base_url,
             args.api_key,
             args.health_timeout,
             strict=strict_from_profile,
             product_track=product_track,
         )
+        if isinstance(readyz_result, tuple) and len(readyz_result) >= 3:
+            ok, detail, readyz_data = readyz_result[:3]
+        else:
+            ok, detail = readyz_result  # type: ignore[misc]
+            readyz_data = None
         if not ok:
             mark_step("verify_full", "readyz", "failed", detail)
             finish_flow("verify_full", "failed", "readyz")
             print(f"[fail] readyz verification failed: {detail}")
+            print("\n[readyz-failure]")
+            for line in _readyz_debug_lines(args.base_url, readyz_data):
+                print(f"- {line}")
             return 2
         mark_step("verify_full", "readyz", "passed", "ok")
     else:

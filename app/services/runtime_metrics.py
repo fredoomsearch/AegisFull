@@ -139,6 +139,36 @@ def record_safety_fallback(kind: str = "generic") -> None:
     _record_event(f"safety_fallback:{normalized}")
 
 
+def record_model_competition(
+    *,
+    champion: str,
+    challenger: str,
+    route_mode: str = "",
+    route_reason: str = "",
+    confidence_bucket: str = "unknown",
+    gate: str = "",
+) -> None:
+    champion_name = str(champion or "local").strip().lower() or "local"
+    challenger_name = str(challenger or "local").strip().lower() or "local"
+    mode = str(route_mode or "general").strip().lower() or "general"
+    reason = str(route_reason or "").strip()[:120]
+    bucket = str(confidence_bucket or "unknown").strip().lower() or "unknown"
+    route_gate = str(gate or "").strip().lower() or "unknown"
+    tags = {
+        "champion": champion_name,
+        "challenger": challenger_name,
+        "route_mode": mode,
+        "route_reason": reason,
+        "confidence_bucket": bucket,
+        "gate": route_gate,
+    }
+    _record_event("model_competition", tags=tags)
+    _record_event(f"model_champion:{champion_name}")
+    _record_event(f"model_challenger:{challenger_name}")
+    _record_event(f"model_competition_mode:{mode}")
+    _record_event(f"model_competition_bucket:{bucket}")
+
+
 def record_chat_source(
     *,
     source_plan: str,
@@ -252,6 +282,18 @@ def snapshot(window_seconds: int = 900) -> Dict[str, Any]:
         "low": int(window.get("route_confidence_bucket:low") or 0),
         "unknown": int(window.get("route_confidence_bucket:unknown") or 0),
     }
+    model_competition_distribution = {
+        "champion_local": int(window.get("model_champion:local") or 0),
+        "champion_groq": int(window.get("model_champion:groq") or 0),
+        "challenger_local": int(window.get("model_challenger:local") or 0),
+        "challenger_groq": int(window.get("model_challenger:groq") or 0),
+        "mode_code": int(window.get("model_competition_mode:code") or 0),
+        "mode_crypto": int(window.get("model_competition_mode:crypto") or 0),
+        "mode_chat": int(window.get("model_competition_mode:chat") or 0),
+        "bucket_high": int(window.get("model_competition_bucket:high") or 0),
+        "bucket_medium": int(window.get("model_competition_bucket:medium") or 0),
+        "bucket_low": int(window.get("model_competition_bucket:low") or 0),
+    }
 
     return {
         "window_seconds": int(window_seconds),
@@ -265,4 +307,5 @@ def snapshot(window_seconds: int = 900) -> Dict[str, Any]:
         },
         "source_distribution_window": source_distribution,
         "route_confidence_distribution_window": route_confidence_distribution,
+        "model_competition_distribution_window": model_competition_distribution,
     }
