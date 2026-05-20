@@ -183,6 +183,24 @@ def _error_payload(detail: object, status_code: int, trace_id: Optional[str]) ->
     }
 
 
+def _content_security_policy() -> str:
+    return "; ".join(
+        [
+            "default-src 'self'",
+            "base-uri 'self'",
+            "object-src 'none'",
+            "frame-ancestors 'none'",
+            "form-action 'self'",
+            "script-src 'self' https://cdn.jsdelivr.net",
+            "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com",
+            "font-src 'self' data: https://cdnjs.cloudflare.com https://fonts.gstatic.com",
+            "img-src 'self' data: blob: https:",
+            "connect-src 'self' ws: wss:",
+            "media-src 'self' data: blob:",
+        ]
+    )
+
+
 @app.middleware("http")
 async def add_trace_and_rate_limit(request: Request, call_next):
     trace_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
@@ -217,6 +235,7 @@ async def add_trace_and_rate_limit(request: Request, call_next):
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
+        response.headers.setdefault("Content-Security-Policy", _content_security_policy())
 
     if HSTS_SECONDS > 0:
         req_scheme = request.url.scheme
@@ -385,6 +404,15 @@ def _run_startup_boot() -> None:
 
     if not DEMO_MODE:
         start_background_warmup()
+    if _env_bool("AEGIS_CRYPTO_RECONCILER", False):
+        try:
+            from app.api import crypto as crypto_api
+            from app.services.crypto_runtime import start_background_reconciler
+
+            started = start_background_reconciler(price_lookup=crypto_api._binance_spot_price)
+            logger.info("[main] Crypto reconciler %s.", "started" if started else "already running")
+        except Exception:
+            logger.warning("[main] Crypto reconciler skipped (crypto backend not ready).", exc_info=True)
 
 
 @asynccontextmanager
@@ -393,9 +421,11 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        from app.services.crypto_runtime import stop_background_reconciler
         from app.services.job_manager import wait_for_jobs
         from app.services.web_search import stop_background_warmup
 
+        stop_background_reconciler(timeout_s=2.0)
         warmup_stopped = stop_background_warmup(timeout_s=2.0)
         pending_jobs = wait_for_jobs(timeout_s=1.0)
         if not warmup_stopped:

@@ -121,6 +121,32 @@ def test_attachment_context_response_ignores_project_question_with_attachment_no
     assert payload is None
 
 
+def test_attachment_context_response_yields_to_active_project_file_focus(monkeypatch):
+    monkeypatch.setattr(
+        chat_api,
+        "_load_active_project_manifest",
+        lambda _state: {"file_tree": ["src/app/app.routes.ts", "src/app/app.module.ts"]},
+    )
+    payload = chat_api._maybe_attachment_context_response(
+        (
+            "app.routes.ts que es este archivo ?\n\n"
+            "[Attachment context document: 10928234.pdf]\n"
+            "Extracted text from document `10928234.pdf`:\n\n"
+            "```text\n"
+            "CERTIFICATE\n"
+            "This is to certify that Julian Grajales...\n"
+            "```\n"
+        ),
+        "es",
+        {
+            "active_project_id": "demo-project",
+            "next_tool": "project_manifest",
+            "current_task": "explica el proyecto activo",
+        },
+    )
+    assert payload is None
+
+
 def test_attachment_context_response_summarizes_html_document():
     payload = chat_api._maybe_attachment_context_response(
         (

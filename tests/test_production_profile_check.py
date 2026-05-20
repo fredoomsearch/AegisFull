@@ -5,6 +5,8 @@ from app.scripts import production_profile_check as ppc
 
 def test_run_checks_strict_profile_happy_path(monkeypatch):
     monkeypatch.setenv("AEGIS_RUNTIME_PROFILE", "strict")
+    monkeypatch.setenv("AEGIS_PRODUCT_TRACK", "full")
+    monkeypatch.setenv("AEGIS_START_CONTRACT_MODE", "full")
     monkeypatch.setenv("AEGIS_AUTH_MODE", "on")
     monkeypatch.setenv("AEGIS_API_KEY", "A" * 32)
     monkeypatch.setenv("FILES_API_KEY", "B" * 32)
@@ -23,6 +25,8 @@ def test_run_checks_strict_profile_happy_path(monkeypatch):
 
 def test_run_checks_detects_security_issues(monkeypatch):
     monkeypatch.setenv("AEGIS_RUNTIME_PROFILE", "standard")
+    monkeypatch.setenv("AEGIS_PRODUCT_TRACK", "core")
+    monkeypatch.setenv("AEGIS_START_CONTRACT_MODE", "strict")
     monkeypatch.setenv("AEGIS_AUTH_MODE", "off")
     monkeypatch.setenv("AEGIS_API_KEY", "my-secret-key")
     monkeypatch.setenv("FILES_API_KEY", "short")
@@ -37,6 +41,8 @@ def test_run_checks_detects_security_issues(monkeypatch):
     assert out["ok"] is False
     names = {row["name"] for row in out["checks"] if not row["ok"]}
     assert "runtime_profile" in names
+    assert "product_track" in names
+    assert "start_contract_mode" in names
     assert "auth_mode" in names
     assert "AEGIS_API_KEY" in names
     assert "cors_origins" in names
@@ -44,4 +50,3 @@ def test_run_checks_detects_security_issues(monkeypatch):
     assert "av_fail_open" in names
     assert "browser_binary" in names
     assert "image_endpoint" in names
-

@@ -205,3 +205,91 @@ def test_output_quality_guard_blocks_off_topic_code_for_geography_prompt():
     assert "colombia is" in guarded.lower()
     assert "flask" not in guarded.lower()
     assert "off-topic" in guarded.lower()
+
+
+def test_output_quality_guard_blocks_generic_greeting_for_release_notes_query():
+    guarded = chat_api._apply_output_quality_guard(
+        user_message="latest python 3.12 release notes",
+        response_text="Hello, I'm AEGIS. What can I help you with today?",
+        lang="en",
+        source_plan="web_only",
+        web_meta={"status": "live", "source": "live"},
+    )
+
+    assert "random answer" in guarded.lower()
+    assert "hello, i'm aegis" not in guarded.lower()
+
+
+def test_output_quality_guard_blocks_unrelated_short_world_question():
+    guarded = chat_api._apply_output_quality_guard(
+        user_message="latest python 3.12 release notes",
+        response_text="What is the capital of Japan?",
+        lang="en",
+        source_plan="web_only",
+        web_meta={"status": "live", "source": "live"},
+    )
+
+    assert "random answer" in guarded.lower()
+    assert "capital of japan" not in guarded.lower()
+
+
+def test_output_quality_guard_keeps_legitimate_capital_answer_when_on_topic():
+    guarded = chat_api._apply_output_quality_guard(
+        user_message="what is the capital of japan?",
+        response_text="The capital of Japan is Tokyo.",
+        lang="en",
+        source_plan="local_only",
+        web_meta={"status": "not-used", "source": "none"},
+    )
+
+    assert guarded == "The capital of Japan is Tokyo."
+
+
+def test_output_quality_guard_blocks_project_summary_leak_for_release_notes_query():
+    guarded = chat_api._apply_output_quality_guard(
+        user_message="latest python 3.12 release notes",
+        response_text=(
+            "Project summary: detected layers api/ui. "
+            "Entrypoints: app/main.py. Config files: Dockerfile, render.yml."
+        ),
+        lang="en",
+        source_plan="web_only",
+        web_meta={"status": "live", "source": "live"},
+    )
+
+    assert "local repo context" in guarded.lower()
+    assert "app/main.py" not in guarded.lower()
+
+
+def test_output_quality_guard_blocks_file_excerpt_leak_for_general_prompt():
+    guarded = chat_api._apply_output_quality_guard(
+        user_message="hello",
+        response_text=(
+            "File app/service.py:\n"
+            "def login():\n"
+            "    return 'ok'\n\n"
+            "Project impact: /auth/login"
+        ),
+        lang="en",
+        source_plan="local_only",
+        web_meta={"status": "not-used", "source": "none"},
+    )
+
+    assert "local repo context" in guarded.lower()
+    assert "file app/service.py" not in guarded.lower()
+
+
+def test_output_quality_guard_keeps_project_summary_when_project_was_requested():
+    response = (
+        "Project summary: detected layers api/ui. "
+        "Entrypoints: app/main.py. Config files: Dockerfile, render.yml."
+    )
+    guarded = chat_api._apply_output_quality_guard(
+        user_message="what can you tell me about this repo?",
+        response_text=response,
+        lang="en",
+        source_plan="local_only",
+        web_meta={"status": "not-used", "source": "none"},
+    )
+
+    assert guarded == response

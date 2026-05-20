@@ -12,4 +12,4 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-exec ./verify_full.sh --product-track full --strict-browser-smoke "$@"
+exec ./verify_full.sh --runtime-profile strict --product-track full --strict-browser-smoke "$@"

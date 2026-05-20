@@ -6,16 +6,24 @@ Auth token exchange endpoints.
 Why this module exists:
 - Exchange API-key trust into short-lived JWT tokens.
 - Support access/refresh flow for UI and automation clients.
+- Set those JWTs as HttpOnly cookies so the browser does not keep raw tokens.
 """
 
 import time
 import os
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from app.api.deps import JWT_ALG, JWT_SECRET, _decode_jwt_token, require_api_key
+from app.api.deps import (
+    ACCESS_COOKIE_NAME,
+    JWT_ALG,
+    JWT_SECRET,
+    REFRESH_COOKIE_NAME,
+    _decode_jwt_token,
+    require_api_key,
+)
 
 try:
     import jwt
@@ -23,11 +31,15 @@ except Exception:  # pragma: no cover - PyJWT optional at import time
     jwt = None
 
 
-router = APIRouter(prefix="/auth", tags=["auth"], dependencies=[Depends(require_api_key)])
+router = APIRouter(prefix="/auth", tags=["auth"])
 
 DEFAULT_ACCESS_SECS = int(os.getenv("AEGIS_JWT_EXPIRES", "1800"))  # 30m
 DEFAULT_REFRESH_SECS = int(os.getenv("AEGIS_JWT_REFRESH_EXPIRES", "86400"))  # 24h
 FORBIDDEN_SELF_SCOPES = {"admin"}
+AUTH_COOKIE_SECURE = (os.getenv("AEGIS_AUTH_COOKIE_SECURE", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+AUTH_COOKIE_SAMESITE = (os.getenv("AEGIS_AUTH_COOKIE_SAMESITE", "lax") or "lax").strip().lower()
+AUTH_COOKIE_DOMAIN = (os.getenv("AEGIS_AUTH_COOKIE_DOMAIN") or "").strip() or None
+AUTH_COOKIE_PATH = (os.getenv("AEGIS_AUTH_COOKIE_PATH") or "/").strip() or "/"
 
 
 def _parse_scope_env(name: str, default: str = "") -> list[str]:
@@ -68,16 +80,15 @@ class TokenRequest(BaseModel):
 
 
 class TokenResponse(BaseModel):
-    access_token: str
     token_type: str = "bearer"
     expires_in: int
-    refresh_token: Optional[str] = None
     refresh_expires_in: Optional[int] = None
     scopes: List[str] = Field(default_factory=list)
+    cookie_auth: bool = True
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str
+    refresh_token: Optional[str] = None
 
 
 def _sanitize_self_scopes(values: list[str] | None) -> list[str]:
@@ -112,8 +123,70 @@ def _issue_token(sub: str, scopes: list[str], ttl_seconds: int, token_type: str)
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
 
-@router.post("/token", response_model=TokenResponse)
-async def issue_token(req: TokenRequest) -> TokenResponse:
+def _cookie_kwargs(max_age: int) -> dict:
+    same_site = AUTH_COOKIE_SAMESITE if AUTH_COOKIE_SAMESITE in {"lax", "strict", "none"} else "lax"
+    return {
+        "httponly": True,
+        "samesite": same_site,
+        "path": AUTH_COOKIE_PATH,
+        "domain": AUTH_COOKIE_DOMAIN,
+        "max_age": max(0, int(max_age or 0)),
+    }
+
+
+def _cookie_secure_for_request(request: Optional[Request]) -> bool:
+    if AUTH_COOKIE_SECURE:
+        return True
+    try:
+        scheme = str(getattr(getattr(request, "url", None), "scheme", "") or "").strip().lower()
+    except Exception:
+        scheme = ""
+    if scheme == "https":
+        return True
+    try:
+        proto = str(request.headers.get("x-forwarded-proto", "") or "").split(",")[0].strip().lower() if request else ""
+    except Exception:
+        proto = ""
+    return proto == "https"
+
+
+def _set_auth_cookies(request: Optional[Request], response: Response, access_token: str, refresh_token: Optional[str], access_ttl: int, refresh_ttl: Optional[int]) -> None:
+    access_cookie_kwargs = dict(_cookie_kwargs(access_ttl))
+    refresh_cookie_kwargs = dict(_cookie_kwargs(refresh_ttl or DEFAULT_REFRESH_SECS))
+    access_cookie_kwargs["secure"] = _cookie_secure_for_request(request)
+    refresh_cookie_kwargs["secure"] = _cookie_secure_for_request(request)
+    response.set_cookie(ACCESS_COOKIE_NAME, access_token, **access_cookie_kwargs)
+    if refresh_token:
+        response.set_cookie(REFRESH_COOKIE_NAME, refresh_token, **refresh_cookie_kwargs)
+
+
+def _clear_auth_cookies(response: Response) -> None:
+    response.delete_cookie(ACCESS_COOKIE_NAME, path=AUTH_COOKIE_PATH, domain=AUTH_COOKIE_DOMAIN)
+    response.delete_cookie(REFRESH_COOKIE_NAME, path=AUTH_COOKIE_PATH, domain=AUTH_COOKIE_DOMAIN)
+
+
+async def require_refresh_permission(
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+) -> None:
+    """
+    Refresh endpoint guard.
+
+    Accepts:
+    - valid refresh cookie
+    - valid access cookie / bearer token / API key via normal auth guard
+    """
+    refresh_cookie = str(request.cookies.get(REFRESH_COOKIE_NAME, "") or "").strip()
+    if refresh_cookie:
+        payload = _decode_jwt_token(refresh_cookie, required_scope=None)
+        if payload and payload.get("type") == "refresh":
+            return
+    await require_api_key(request, x_api_key=x_api_key, authorization=authorization)
+
+
+@router.post("/token", response_model=TokenResponse, response_model_exclude_none=True, dependencies=[Depends(require_api_key)])
+async def issue_token(req: TokenRequest, request: Request, response: Response) -> TokenResponse:
     """
     Exchange an API key for a short-lived access token (and optional refresh token).
     """
@@ -131,21 +204,26 @@ async def issue_token(req: TokenRequest) -> TokenResponse:
         refresh_token = _issue_token(req.sub or "user", scopes, refresh_ttl, token_type="refresh")
         refresh_expires_in = refresh_ttl
 
+    _set_auth_cookies(request, response, access_token, refresh_token, access_ttl, refresh_expires_in)
+    response.headers["Cache-Control"] = "no-store"
+
     return TokenResponse(
-        access_token=access_token,
         expires_in=access_ttl,
-        refresh_token=refresh_token,
         refresh_expires_in=refresh_expires_in,
         scopes=scopes,
+        cookie_auth=True,
     )
 
 
-@router.post("/refresh", response_model=TokenResponse)
-async def refresh_token(req: RefreshRequest) -> TokenResponse:
+@router.post("/refresh", response_model=TokenResponse, response_model_exclude_none=True, dependencies=[Depends(require_refresh_permission)])
+async def refresh_token(req: RefreshRequest, request: Request, response: Response) -> TokenResponse:
     """
     Refresh an access token using a valid refresh token.
     """
-    payload = _decode_jwt_token(req.refresh_token, required_scope=None)
+    refresh_token_raw = str(req.refresh_token or "").strip()
+    if not refresh_token_raw:
+        refresh_token_raw = str(request.cookies.get(REFRESH_COOKIE_NAME, "") or "").strip()
+    payload = _decode_jwt_token(refresh_token_raw, required_scope=None)
     if not payload or payload.get("type") != "refresh":
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
@@ -164,11 +242,20 @@ async def refresh_token(req: RefreshRequest) -> TokenResponse:
 
     access_token = _issue_token(sub, scopes, access_ttl, token_type="access")
     refresh_token = _issue_token(sub, scopes, refresh_ttl, token_type="refresh")
+    _set_auth_cookies(request, response, access_token, refresh_token, access_ttl, refresh_ttl)
+    response.headers["Cache-Control"] = "no-store"
 
     return TokenResponse(
-        access_token=access_token,
         expires_in=access_ttl,
-        refresh_token=refresh_token,
         refresh_expires_in=refresh_ttl,
         scopes=scopes,
+        cookie_auth=True,
     )
+
+
+@router.post("/logout")
+async def logout(response: Response) -> dict:
+    """Clear auth cookies for the current browser session."""
+    _clear_auth_cookies(response)
+    response.headers["Cache-Control"] = "no-store"
+    return {"ok": True, "cookie_auth": False}

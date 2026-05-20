@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import sys
 
 from app.scripts import verify_full
@@ -102,6 +103,15 @@ def test_verify_full_check_readyz_strict_core_accepts_degraded(monkeypatch):
     assert ok is True
     assert detail == "ok"
     assert isinstance(data, dict)
+
+
+def test_verify_full_strict_wrapper_pins_runtime_profile_and_track():
+    target = Path(__file__).resolve().parents[1] / "verify_full_strict.sh"
+    src = target.read_text(encoding="utf-8")
+
+    assert "--runtime-profile strict" in src
+    assert "--product-track full" in src
+    assert "--strict-browser-smoke" in src
 
 
 def test_verify_full_readyz_debug_lines_include_process_and_degraded_context():

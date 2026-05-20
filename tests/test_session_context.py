@@ -255,6 +255,56 @@ def test_session_state_tracks_missing_evidence_for_project_questions():
     assert "active_project" in state["missing_evidence"]
 
 
+def test_session_state_tracks_missing_evidence_for_imperative_project_request():
+    state = update_session_state(
+        None,
+        "explain the active project",
+        "",
+        mode="chat",
+        active_project_id=None,
+    )
+    assert "active_project" in state["missing_evidence"]
+
+
+def test_turn_plan_fail_closes_imperative_project_request_without_active_project():
+    state = update_session_state(
+        None,
+        "explain the active project",
+        "",
+        mode="chat",
+        active_project_id=None,
+    )
+    plan = chat_api._build_turn_plan(
+        message="explain the active project",
+        mode_value="chat",
+        source_plan="local_only",
+        has_active_project=False,
+        force_web=False,
+        session_state=state,
+    )
+    assert "active_project" in plan["missing_evidence"]
+    assert plan["llm_required"] is False
+
+
+def test_missing_evidence_response_handles_imperative_project_request():
+    state = update_session_state(
+        None,
+        "explain the active project",
+        "",
+        mode="chat",
+        active_project_id=None,
+    )
+    payload = chat_api._maybe_missing_evidence_response(
+        "explain the active project",
+        "en",
+        state,
+        source_plan="local_only",
+    )
+    assert payload is not None
+    assert payload["tool_kind"] == "missing_evidence"
+    assert "active project" in payload["response"].lower()
+
+
 def test_session_state_does_not_require_project_for_generic_login_definition():
     state = update_session_state(
         None,
@@ -553,6 +603,34 @@ def test_response_context_exposes_planner_and_artifact_fields():
     assert context["recent_tool_failures"] == ["web_search:unavailable"]
     assert context["tool_candidates"] == ["project_manifest", "project_excerpt"]
     assert context["llm_required"] is False
+
+
+def test_response_context_exposes_crypto_prediction_reference():
+    context = chat_api._build_response_context(
+        source_plan="local_only",
+        active_project_id=None,
+        lang="en",
+        session_state={"current_symbol_focus": "BTCUSDT"},
+        used_local=True,
+        effective_tool="crypto_explain",
+        effective_tool_status="ok",
+        crypto_prediction_ref={
+            "log_id": "pred_1234567890",
+            "symbol": "btcusdt",
+            "horizon_minutes": 2,
+            "ts": 1712000000,
+            "source": "history",
+            "decision": "hold",
+        },
+    )
+    assert context["crypto_prediction_ref"] == {
+        "log_id": "pred_1234567890",
+        "symbol": "BTCUSDT",
+        "horizon_minutes": 2,
+        "ts": 1712000000,
+        "source": "history",
+        "decision": "HOLD",
+    }
 
 
 def test_replan_session_state_switches_from_failed_web_to_local_project():

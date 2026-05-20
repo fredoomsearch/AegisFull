@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from app.api.deps import require_admin_api_key, require_api_key
 from app.api.router_status import snapshot_router_status
 from app.services import crypto_prediction_log, crypto_trade_log, job_manager
+from app.services.crypto_runtime import build_crypto_state_snapshot
 from app.services.durable_memory import snapshot as durable_memory_snapshot
 from app.services.session_state import build_comp_snapshot
 from app.services import health_state, runtime_metrics
@@ -521,6 +522,7 @@ async def system_snapshot() -> Dict[str, Any]:
     preds = crypto_prediction_log.pair_predictions_with_outcomes(limit=10)
     stats = crypto_prediction_log.recent_stats(limit=200)
     pnl = _pnl_snapshot()
+    crypto_state = build_crypto_state_snapshot(limit=10, trade_limit=50, leaderboard_limit=6)
     health = health_state.snapshot()
     metrics = runtime_metrics.snapshot()
     metrics_alerts = _runtime_metrics_alerts(metrics)
@@ -553,6 +555,7 @@ async def system_snapshot() -> Dict[str, Any]:
         "predictions": preds,
         "stats": stats,
         "pnl": pnl,
+        "crypto_state": crypto_state,
         "env": _env_snapshot(),
         "health": health,
         "runtime_metrics": metrics,
@@ -609,6 +612,7 @@ async def readyz() -> Dict[str, Any]:
 
     durable = durable_memory_snapshot()
     llm_config = _resources_snapshot(capabilities)["llm_config"]
+    crypto_state = build_crypto_state_snapshot(limit=10, trade_limit=50, leaderboard_limit=6)
     comp = build_comp_snapshot(
         None,
         provider=str(llm_config.get("provider") or ""),
@@ -631,6 +635,7 @@ async def readyz() -> Dict[str, Any]:
         "api_surfaces": _api_surfaces_snapshot(),
         "security": _security_snapshot(),
         "validation": _validation_snapshot(),
+        "crypto_state": crypto_state,
         **capabilities,
         "jobs": jobs,
         "runtime_metrics": {

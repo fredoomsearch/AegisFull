@@ -18,6 +18,14 @@ OUT_ROOT="${AEGIS_EVIDENCE_DIR:-artifacts/release_evidence}"
 WINDOW_SECONDS="${AEGIS_CONTRACT_WINDOW_SECONDS:-900}"
 DOCTOR_TIMEOUT_SECONDS="${AEGIS_DOCTOR_TIMEOUT_SECONDS:-20}"
 DOCTOR_ATTEMPTS="${AEGIS_DOCTOR_ATTEMPTS:-2}"
+RUN_CRYPTO_TESTNET_REHEARSAL="${AEGIS_RUN_CRYPTO_TESTNET_REHEARSAL:-0}"
+CRYPTO_REHEARSAL_SUBMIT="${AEGIS_CRYPTO_REHEARSAL_SUBMIT:-0}"
+CRYPTO_REHEARSAL_SYMBOL="${AEGIS_CRYPTO_REHEARSAL_SYMBOL:-BTCUSDT}"
+CRYPTO_REHEARSAL_SIDE="${AEGIS_CRYPTO_REHEARSAL_SIDE:-BUY}"
+CRYPTO_REHEARSAL_QTY="${AEGIS_CRYPTO_REHEARSAL_QTY:-0.001}"
+CRYPTO_REHEARSAL_HORIZON="${AEGIS_CRYPTO_REHEARSAL_HORIZON:-15}"
+CRYPTO_REHEARSAL_REGIME="${AEGIS_CRYPTO_REHEARSAL_REGIME:-}"
+SYNC_RELEASE_BOARD="${AEGIS_SYNC_RELEASE_BOARD:-0}"
 SKIP_DOCTOR=0
 PRECHECK_ONLY=0
 
@@ -38,6 +46,18 @@ while [[ $# -gt 0 ]]; do
     --window-seconds)
       WINDOW_SECONDS="$2"
       shift 2
+      ;;
+    --run-crypto-testnet-rehearsal)
+      RUN_CRYPTO_TESTNET_REHEARSAL=1
+      shift
+      ;;
+    --crypto-rehearsal-submit)
+      CRYPTO_REHEARSAL_SUBMIT=1
+      shift
+      ;;
+    --sync-release-board)
+      SYNC_RELEASE_BOARD=1
+      shift
       ;;
     --skip-doctor)
       SKIP_DOCTOR=1
@@ -89,6 +109,8 @@ echo "  skip_doctor=${SKIP_DOCTOR}"
 echo "  precheck_only=${PRECHECK_ONLY}"
 echo "  doctor_timeout_seconds=${DOCTOR_TIMEOUT_SECONDS}"
 echo "  doctor_attempts=${DOCTOR_ATTEMPTS}"
+echo "  run_crypto_testnet_rehearsal=${RUN_CRYPTO_TESTNET_REHEARSAL}"
+echo "  sync_release_board=${SYNC_RELEASE_BOARD}"
 
 if [[ "$SKIP_DOCTOR" != "1" ]]; then
   echo "[run] doctor (full/fail-fast)"
@@ -198,11 +220,41 @@ curl -fsS -H "X-API-Key: ${API_KEY}" "${BASE_URL}/system/snapshot" > "${OUT_DIR}
 curl -fsS -H "X-API-Key: ${API_KEY}" "${BASE_URL}/system/metrics?window_seconds=${WINDOW_SECONDS}" > "${OUT_DIR}/system_metrics.json"
 curl -fsS -H "X-API-Key: ${API_KEY}" "${BASE_URL}/system/readyz" > "${OUT_DIR}/system_readyz.json"
 
+if [[ "$RUN_CRYPTO_TESTNET_REHEARSAL" == "1" ]]; then
+  echo "[run] crypto_testnet_rehearsal"
+  CRYPTO_REHEARSAL_CMD=(
+    "$PYTHON_BIN" app/scripts/crypto_testnet_rehearsal.py
+    --base-url "$BASE_URL"
+    --api-key "$API_KEY"
+    --files-api-key "$FILES_KEY"
+    --symbol "$CRYPTO_REHEARSAL_SYMBOL"
+    --side "$CRYPTO_REHEARSAL_SIDE"
+    --quantity "$CRYPTO_REHEARSAL_QTY"
+    --horizon-minutes "$CRYPTO_REHEARSAL_HORIZON"
+    --execution-mode testnet
+    --out-dir "${OUT_DIR}/crypto_testnet_rehearsal"
+  )
+  if [[ -n "$CRYPTO_REHEARSAL_REGIME" ]]; then
+    CRYPTO_REHEARSAL_CMD+=(--regime "$CRYPTO_REHEARSAL_REGIME")
+  fi
+  if [[ "$CRYPTO_REHEARSAL_SUBMIT" == "1" ]]; then
+    CRYPTO_REHEARSAL_CMD+=(--submit-if-allowed)
+  fi
+  "${CRYPTO_REHEARSAL_CMD[@]}" | tee "${OUT_DIR}/crypto_testnet_rehearsal.log"
+fi
+
 echo "[run] release evidence summary"
 "$PYTHON_BIN" -m app.scripts.release_evidence_summary \
   --bundle-dir "${OUT_DIR}" \
   --json \
   | tee "${OUT_DIR}/release_summary.json"
+
+if [[ "$SYNC_RELEASE_BOARD" == "1" ]]; then
+  echo "[run] release_board_sync"
+  "$PYTHON_BIN" -m app.scripts.release_board_sync \
+    --board-path "${ROOT_DIR}/docs/release_board.md" \
+    --evidence-root "${OUT_ROOT}"
+fi
 
 cat > "${OUT_DIR}/run_meta.txt" <<EOF
 timestamp=${TS}
@@ -211,6 +263,9 @@ runtime_profile=strict
 product_track=full
 duration_hours=${DURATION_HOURS}
 window_seconds=${WINDOW_SECONDS}
+run_crypto_testnet_rehearsal=${RUN_CRYPTO_TESTNET_REHEARSAL}
+crypto_rehearsal_submit=${CRYPTO_REHEARSAL_SUBMIT}
+sync_release_board=${SYNC_RELEASE_BOARD}
 EOF
 
 echo "[ok] evidence bundle ready: ${OUT_DIR}"

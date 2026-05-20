@@ -9,6 +9,7 @@ Why this module exists:
 """
 
 import hashlib
+import asyncio
 import hmac
 import io
 import json
@@ -25,7 +26,8 @@ from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urlencode
 
 import requests
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.api.deps import require_api_key
@@ -44,12 +46,15 @@ from app.services.crypto_prediction_log import (
     recent_stats,
     scope_leaderboard,
 )
+from app.services.crypto_runtime import _optional_float, _risk_snapshot, build_crypto_state_snapshot, reconcile_due_predictions
 from app.services.crypto_trade_log import clear_trades, compute_pnl, list_trades, log_trade
 from app.utils.ml_helpers import sentiment_score as _sentiment_score
 
 _pd = None
 _meta_module = None
 _trained_bundle_cache: Dict[str, Dict[str, Any]] = {}
+_artifact_sha_cache: Dict[str, tuple[int, int, str]] = {}
+_artifact_sha_lock = threading.Lock()
 CRYPTO_USE_TRAINED_MODELS = (os.getenv("AEGIS_CRYPTO_USE_TRAINED_MODELS", "1") or "1").strip().lower() in {
     "1",
     "true",
@@ -86,6 +91,16 @@ def _optional_query_text(value: Any) -> Optional[str]:
     raw = _query_default_value(value)
     text = str(raw or "").strip()
     return text or None
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.getenv(name) or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
 
 
 def _normalized_prediction_scope(
@@ -131,6 +146,72 @@ def _consensus_requirements_for_credibility(credibility: Optional[Dict[str, Any]
     if status == "insufficient_history":
         return {"min_support_ratio": 0.8, "max_spread": 0.18}
     return {"min_support_ratio": 1.0, "max_spread": 0.12}
+
+
+def _operator_guidance_status(operator_guidance: Optional[Dict[str, Any]]) -> str:
+    return str((operator_guidance or {}).get("status") or "").strip().lower()
+
+
+def _scope_operator_guidance(
+    *,
+    symbol: Optional[str],
+    horizon_minutes: Optional[int],
+    regime: Optional[str],
+    limit: int,
+) -> Optional[Dict[str, Any]]:
+    try:
+        stats = recent_stats(
+            limit=limit,
+            symbol=symbol,
+            engine="trained",
+            horizon_minutes=horizon_minutes,
+            regime=regime,
+        )
+    except Exception:
+        logger.debug("Failed to compute crypto operator guidance", exc_info=True)
+        return None
+    guidance = stats.get("operator_guidance") if isinstance(stats, dict) else None
+    return guidance if isinstance(guidance, dict) else None
+
+
+def _calibration_margin_for_operator_guidance(operator_guidance: Optional[Dict[str, Any]]) -> float:
+    status = _operator_guidance_status(operator_guidance)
+    if status == "downgrade":
+        return 0.03
+    return 0.0
+
+
+def _effective_execution_margin(
+    credibility: Optional[Dict[str, Any]],
+    operator_guidance: Optional[Dict[str, Any]],
+) -> float:
+    return _execution_margin_for_credibility(credibility) + _calibration_margin_for_operator_guidance(operator_guidance)
+
+
+def _effective_consensus_requirements(
+    credibility: Optional[Dict[str, Any]],
+    operator_guidance: Optional[Dict[str, Any]],
+) -> Dict[str, float]:
+    requirements = dict(_consensus_requirements_for_credibility(credibility))
+    status = _operator_guidance_status(operator_guidance)
+    if status == "downgrade":
+        requirements["min_support_ratio"] = max(float(requirements.get("min_support_ratio") or 0.0), 0.9)
+        requirements["max_spread"] = min(float(requirements.get("max_spread") or 1.0), 0.18)
+    elif status == "abstain":
+        requirements["min_support_ratio"] = 1.0
+        requirements["max_spread"] = min(float(requirements.get("max_spread") or 1.0), 0.12)
+    return requirements
+
+
+def _should_calibration_abstain(operator_guidance: Optional[Dict[str, Any]]) -> bool:
+    return _operator_guidance_status(operator_guidance) == "abstain"
+
+
+def _effective_should_abstain(
+    credibility: Optional[Dict[str, Any]],
+    operator_guidance: Optional[Dict[str, Any]],
+) -> bool:
+    return bool((credibility or {}).get("should_abstain")) or _should_calibration_abstain(operator_guidance)
 
 
 def _consensus_metrics(
@@ -182,6 +263,683 @@ def _crypto_policy_profile() -> Dict[str, Any]:
             "insufficient_history": _consensus_requirements_for_credibility({"status": "insufficient_history"}),
             "unknown": _consensus_requirements_for_credibility({"status": "unknown"}),
         },
+        "calibration_guidance": {
+            "downgrade": {
+                "margin_add": _calibration_margin_for_operator_guidance({"status": "downgrade"}),
+                "min_support_ratio": 0.9,
+                "max_spread": 0.18,
+            },
+            "abstain": {
+                "blocks_execution": True,
+                "route_reason": "calibration_abstain",
+            },
+        },
+    }
+
+
+def _crypto_execution_snapshot(*, requested_mode: Optional[str] = None) -> Dict[str, Any]:
+    mode = str(requested_mode or os.getenv("BINANCE_EXECUTION_MODE", "simulated") or "simulated").strip().lower()
+    if mode not in {"simulated", "testnet", "live"}:
+        mode = "simulated"
+    api_key = (os.getenv("BINANCE_API_KEY") or "").strip()
+    api_secret = (os.getenv("BINANCE_API_SECRET") or "").strip()
+    live_trading_enabled = (os.getenv("BINANCE_LIVE_TRADING", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+    return {
+        "mode": mode,
+        "requested_mode": str(requested_mode or "").strip().lower() or None,
+        "credentials_present": bool(api_key and api_secret),
+        "live_trading_enabled": live_trading_enabled,
+        "testnet_enabled": mode == "testnet",
+        "live_enabled": mode == "live" and live_trading_enabled,
+        "simulated": mode == "simulated",
+    }
+
+
+def _crypto_state_signature(snapshot: Dict[str, Any] | None) -> str:
+    if not isinstance(snapshot, dict):
+        return ""
+    scope = snapshot.get("scope") if isinstance(snapshot.get("scope"), dict) else {}
+    execution = snapshot.get("execution") if isinstance(snapshot.get("execution"), dict) else {}
+    summary = snapshot.get("summary") if isinstance(snapshot.get("summary"), dict) else {}
+    latest_prediction_ref = snapshot.get("latest_prediction_ref") if isinstance(snapshot.get("latest_prediction_ref"), dict) else {}
+    latest_outcome_ref = snapshot.get("latest_outcome_ref") if isinstance(snapshot.get("latest_outcome_ref"), dict) else {}
+    latest_trade_ref = snapshot.get("latest_trade_ref") if isinstance(snapshot.get("latest_trade_ref"), dict) else {}
+    order_book = snapshot.get("order_book") if isinstance(snapshot.get("order_book"), dict) else {}
+    risk = snapshot.get("risk") if isinstance(snapshot.get("risk"), dict) else {}
+    payload = {
+        "scope": {
+            "symbol": str(scope.get("symbol") or "").upper() or None,
+            "engine": str(scope.get("engine") or "").strip().lower() or None,
+            "horizon_minutes": _optional_float(scope.get("horizon_minutes")),
+            "regime": str(scope.get("regime") or "").strip().lower() or None,
+        },
+        "execution": {
+            "mode": str(execution.get("mode") or "").strip().lower() or None,
+            "requested_mode": str(execution.get("requested_mode") or "").strip().lower() or None,
+            "live_enabled": bool(execution.get("live_enabled")),
+            "testnet_enabled": bool(execution.get("testnet_enabled")),
+            "simulated": bool(execution.get("simulated")),
+        },
+        "summary": {
+            "predictions_count": int(summary.get("predictions_count") or 0),
+            "outcomes_count": int(summary.get("outcomes_count") or 0),
+            "trades_count": int(summary.get("trades_count") or 0),
+            "has_order_book": bool(summary.get("has_order_book")),
+            "has_price": bool(summary.get("has_price")),
+            "has_prediction": bool(summary.get("has_prediction")),
+            "has_outcome": bool(summary.get("has_outcome")),
+            "has_risk": bool(summary.get("has_risk")),
+        },
+        "current_price": _optional_float(snapshot.get("current_price")),
+        "latest_prediction": {
+            "log_id": str(latest_prediction_ref.get("log_id") or "").strip() or None,
+            "ts": _optional_float(latest_prediction_ref.get("ts")),
+            "decision": str(latest_prediction_ref.get("decision") or "").strip().upper() or None,
+        },
+        "latest_outcome": {
+            "log_id": str(latest_outcome_ref.get("log_id") or "").strip() or None,
+            "ts": _optional_float(latest_outcome_ref.get("ts")),
+            "decision": str(latest_outcome_ref.get("decision") or "").strip().upper() or None,
+        },
+        "latest_trade": {
+            "id": str(latest_trade_ref.get("id") or "").strip() or None,
+            "ts": _optional_float(latest_trade_ref.get("ts")),
+            "side": str(latest_trade_ref.get("side") or "").strip().upper() or None,
+        },
+        "order_book": {
+            "best_bid": _optional_float(order_book.get("best_bid")),
+            "best_ask": _optional_float(order_book.get("best_ask")),
+            "spread_bps": _optional_float(order_book.get("spread_bps")),
+            "imbalance": _optional_float(order_book.get("imbalance")),
+            "bid_notional": _optional_float(order_book.get("bid_notional")),
+            "ask_notional": _optional_float(order_book.get("ask_notional")),
+            "liquidity_bucket": str(order_book.get("liquidity_bucket") or "").strip() or None,
+        },
+        "risk": {
+            "decision": str(risk.get("decision") or "").strip().upper() or None,
+            "entry_price": _optional_float(risk.get("entry_price")),
+            "target_price": _optional_float(risk.get("target_price")),
+            "stop_price": _optional_float(risk.get("stop_price")),
+            "risk_reward": _optional_float(risk.get("risk_reward")),
+            "order_size_pct": _optional_float(risk.get("order_size_pct")),
+            "book_consumption_pct": _optional_float(risk.get("book_consumption_pct")),
+            "impact_score": _optional_float(risk.get("impact_score")),
+            "remaining_liquidity": _optional_float(risk.get("remaining_liquidity")),
+        },
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return digest
+
+
+def _crypto_state_snapshot_payload(
+    *,
+    symbol: Optional[str] = None,
+    engine: Optional[str] = None,
+    horizon_minutes: Optional[int] = None,
+    regime: Optional[str] = None,
+    execution_mode: Optional[Literal["simulated", "testnet", "live"]] = None,
+    limit: int = 20,
+    trade_limit: int = 100,
+    leaderboard_limit: int = 10,
+) -> Dict[str, Any]:
+    scope = _normalized_prediction_scope(
+        symbol=symbol,
+        engine=engine,
+        horizon_minutes=horizon_minutes,
+        regime=regime,
+    )
+    limit_value = max(1, int(limit))
+    trade_limit_value = max(1, int(trade_limit))
+    leaderboard_limit_value = max(1, int(leaderboard_limit))
+    return build_crypto_state_snapshot(
+        symbol=scope["symbol"],
+        engine=scope["engine"],
+        horizon_minutes=scope["horizon_minutes"],
+        regime=scope["regime"],
+        limit=limit_value,
+        trade_limit=trade_limit_value,
+        leaderboard_limit=leaderboard_limit_value,
+        price_lookup=_binance_spot_price,
+        order_book_lookup=lambda sym: _binance_order_book(sym, limit=10),
+        execution_snapshot=_crypto_execution_snapshot(requested_mode=execution_mode),
+    )
+
+
+def _liquidity_bucket_for_notional(notional: float) -> str:
+    amount = max(0.0, float(notional or 0.0))
+    if amount < 250:
+        return "micro"
+    if amount < 2500:
+        return "small"
+    if amount < 25000:
+        return "medium"
+    if amount < 100000:
+        return "large"
+    return "whale"
+
+
+def _execution_profile(
+    *,
+    symbol_pair: str,
+    side: str,
+    quantity: float,
+    mid_price: float,
+    execution_mode: str,
+) -> Dict[str, Any]:
+    """
+    Build a deterministic, demo-friendly execution profile.
+
+    The goal is to make the simulated path feel closer to a real market:
+    spread, slippage and market impact grow with notional size and less liquid
+    symbols, while staying fully deterministic and safe.
+    """
+    base_asset = _base_symbol_from_pair(symbol_pair)
+    mode = str(execution_mode or "simulated").strip().lower()
+    if mode not in {"simulated", "testnet", "live"}:
+        mode = "simulated"
+
+    notional = max(0.0, float(quantity) * float(mid_price))
+    liquidity_bucket = _liquidity_bucket_for_notional(notional)
+    base_spread_bps = (
+        4.0
+        if base_asset in {"BTC", "ETH"}
+        else 7.0
+        if base_asset in {"BNB", "SOL", "XRP", "ADA", "DOGE", "LINK", "AVAX", "MATIC", "TRX"}
+        else 11.0
+    )
+    mode_spread_bias = {"simulated": 4.0, "testnet": 2.0, "live": 1.0}[mode]
+    bucket_impact = {
+        "micro": 1.5,
+        "small": 3.0,
+        "medium": 6.0,
+        "large": 12.0,
+        "whale": 20.0,
+    }[liquidity_bucket]
+    size_impact = min(28.0, math.log10(max(notional, 1.0) + 1.0) * 2.4)
+    spread_bps = round(base_spread_bps + mode_spread_bias, 2)
+    impact_bps = round(bucket_impact + size_impact, 2)
+    slippage_bps = round(spread_bps / 2.0 + impact_bps, 2)
+    signed_slippage_bps = slippage_bps if side.upper() == "BUY" else -slippage_bps
+    fill_price = round(float(mid_price) * (1.0 + signed_slippage_bps / 10000.0), 2)
+    execution_note = (
+        f"{liquidity_bucket} liquidity • STP/ECN-style fill • "
+        f"spread {spread_bps:.1f}bps • slippage {slippage_bps:.1f}bps • "
+        f"impact {impact_bps:.1f}bps"
+    )
+    return {
+        "mid_price": round(float(mid_price), 2),
+        "fill_price": fill_price,
+        "spread_bps": spread_bps,
+        "slippage_bps": slippage_bps,
+        "impact_bps": impact_bps,
+        "liquidity_bucket": liquidity_bucket,
+        "notional": round(notional, 2),
+        "execution_note": execution_note,
+        "signed_slippage_bps": signed_slippage_bps,
+    }
+
+
+def _crypto_risk_policy(order: TradeRequest) -> Dict[str, float]:
+    def _pick(value: Optional[float], env_name: str, default: float) -> float:
+        if value is not None and float(value) > 0:
+            return float(value)
+        return _env_float(env_name, default)
+
+    return {
+        "max_order_notional": _pick(order.max_order_notional, "AEGIS_CRYPTO_MAX_ORDER_NOTIONAL", 15000.0),
+        "max_exposure_quote": _pick(order.max_exposure_quote, "AEGIS_CRYPTO_MAX_EXPOSURE_QUOTE", 50000.0),
+        "max_order_size_pct": _pick(order.max_order_size_pct, "AEGIS_CRYPTO_MAX_ORDER_SIZE_PCT", 35.0),
+        "max_impact_score": _pick(order.max_impact_score, "AEGIS_CRYPTO_MAX_IMPACT_SCORE", 70.0),
+        "min_risk_reward": _pick(order.min_risk_reward, "AEGIS_CRYPTO_MIN_RISK_REWARD", 1.05),
+        "max_spread_bps": _pick(order.max_spread_bps, "AEGIS_CRYPTO_MAX_SPREAD_BPS", 30.0),
+        "max_book_consumption_pct": _pick(order.max_book_consumption_pct, "AEGIS_CRYPTO_MAX_BOOK_CONSUMPTION_PCT", 45.0),
+        "max_execution_drag_pct": _pick(None, "AEGIS_CRYPTO_MAX_EXECUTION_DRAG_PCT", 0.015),
+    }
+
+
+def _position_snapshot_from_pnl(
+    *,
+    symbol_pair: str,
+    current_price: Optional[float],
+    pnl: Optional[Dict[str, Any]],
+    trades_count: int = 0,
+) -> Dict[str, Any]:
+    per_symbol = (pnl or {}).get("per_symbol") if isinstance(pnl, dict) else {}
+    symbol_key = str(symbol_pair or "").upper()
+    sym_pnl = per_symbol.get(symbol_key) if isinstance(per_symbol, dict) else {}
+    position = _optional_float((sym_pnl or {}).get("position")) or 0.0
+    avg_price = _optional_float((sym_pnl or {}).get("avg_price"))
+    base_price = _optional_float(current_price)
+    exposure_quote = abs(position) * (base_price if base_price and base_price > 0 else (avg_price or 0.0))
+    return {
+        "position": position,
+        "avg_price": avg_price,
+        "exposure_quote": round(exposure_quote, 2),
+        "trades_count": int(trades_count or 0),
+    }
+
+
+def _prediction_operator_guidance(latest_prediction: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(latest_prediction, dict):
+        return None
+    direct = latest_prediction.get("operator_guidance")
+    if isinstance(direct, dict):
+        return direct
+    policy = latest_prediction.get("policy")
+    if isinstance(policy, dict):
+        nested = policy.get("operator_guidance")
+        if isinstance(nested, dict):
+            return nested
+    return None
+
+
+def _trade_calibration_controls(operator_guidance: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(operator_guidance, dict):
+        return None
+    status = _operator_guidance_status(operator_guidance)
+    controls: Dict[str, Any] = {
+        "status": status or None,
+        "action": str(operator_guidance.get("action") or "").strip().lower() or None,
+        "reasons": [
+            str(reason).strip().lower()
+            for reason in (operator_guidance.get("reasons") or [])
+            if str(reason).strip()
+        ],
+    }
+    if status == "downgrade":
+        controls["max_order_size_pct"] = 15.0
+    return controls
+
+
+def _evaluate_trade_risk_gate(
+    *,
+    symbol_pair: str,
+    side: str,
+    quantity: float,
+    current_price: Optional[float],
+    latest_prediction: Optional[Dict[str, Any]],
+    risk: Optional[Dict[str, Any]],
+    position_snapshot: Optional[Dict[str, Any]],
+    policy: Optional[Dict[str, float]] = None,
+    enforce_book_checks: bool = True,
+    enforce_signal_gate: bool = True,
+) -> Dict[str, Any]:
+    policy = dict(policy or {})
+    decision = str((risk or {}).get("decision") or (latest_prediction or {}).get("action_decision") or (latest_prediction or {}).get("decision") or "HOLD").strip().upper() or "HOLD"
+    signal_tradeable = bool((risk or {}).get("tradeable")) if risk is not None else decision in {"BUY", "SELL"}
+    side_norm = str(side or "").strip().upper()
+    qty = max(0.0, float(quantity or 0.0))
+    current_px = max(0.0, float(_optional_float(current_price) or 0.0))
+    position = float((position_snapshot or {}).get("position") or 0.0)
+    avg_price = _optional_float((position_snapshot or {}).get("avg_price"))
+    exposure_basis = current_px if current_px > 0 else max(0.0, avg_price or 0.0)
+    current_exposure_quote = max(0.0, abs(position) * exposure_basis)
+    order_notional = _optional_float((risk or {}).get("order_notional")) or (qty * exposure_basis if exposure_basis > 0 else 0.0)
+    order_size_pct = _optional_float((risk or {}).get("order_size_pct")) or 0.0
+    visible_liquidity_notional = _optional_float((risk or {}).get("visible_liquidity_notional")) or 0.0
+    sign = 1.0 if side_norm == "BUY" else -1.0
+    post_position = position + sign * qty
+    post_exposure_quote = max(0.0, abs(post_position) * exposure_basis)
+    risk_reducing = bool(position and abs(post_position) + 1e-12 < abs(position))
+    latest_present = latest_prediction is not None
+    operator_guidance = _prediction_operator_guidance(latest_prediction)
+    calibration_controls = dict(_trade_calibration_controls(operator_guidance) or {}) or None
+    operator_guidance_status = _operator_guidance_status(operator_guidance)
+    operator_guidance_reason = "not_available"
+    operator_guidance_ok = True
+    if operator_guidance_status:
+        if _should_calibration_abstain(operator_guidance) and not risk_reducing:
+            operator_guidance_ok = False
+            operator_guidance_reason = "calibration_abstain"
+        elif operator_guidance_status == "downgrade":
+            operator_guidance_reason = "calibration_downgrade"
+        else:
+            operator_guidance_reason = f"calibration_{operator_guidance_status}"
+
+    calibration_max_order_size_pct = _optional_float(
+        (calibration_controls or {}).get("max_order_size_pct") if isinstance(calibration_controls, dict) else None
+    )
+    calibration_max_order_notional: Optional[float] = None
+    calibration_max_quantity: Optional[float] = None
+    calibration_reduction_pct: Optional[float] = None
+    calibration_basis: Optional[str] = None
+    if calibration_max_order_size_pct is not None and calibration_max_order_size_pct > 0:
+        if visible_liquidity_notional > 0:
+            calibration_max_order_notional = visible_liquidity_notional * (calibration_max_order_size_pct / 100.0)
+            calibration_basis = "visible_liquidity_notional"
+        elif order_size_pct > 0 and order_notional > 0:
+            calibration_max_order_notional = order_notional * (calibration_max_order_size_pct / order_size_pct)
+            calibration_basis = "order_size_pct"
+        if calibration_max_order_notional is not None and order_notional > 0 and qty > 0:
+            sizing_ratio = max(0.0, min(1.0, calibration_max_order_notional / order_notional))
+            calibration_max_quantity = qty * sizing_ratio
+            calibration_reduction_pct = max(0.0, 1.0 - sizing_ratio)
+        if isinstance(calibration_controls, dict):
+            calibration_controls["max_order_notional"] = round(calibration_max_order_notional, 2) if calibration_max_order_notional is not None else None
+            calibration_controls["max_quantity"] = round(calibration_max_quantity, 8) if calibration_max_quantity is not None else None
+            calibration_controls["recommended_reduction_pct"] = round(calibration_reduction_pct, 6) if calibration_reduction_pct is not None else None
+            calibration_controls["sizing_basis"] = calibration_basis
+    signal_ok = True
+    signal_reason = "no_prediction"
+    if latest_present:
+        if risk_reducing:
+            signal_ok = True
+            signal_reason = "risk_reducing_exit"
+        elif decision == "HOLD":
+            signal_ok = False
+            signal_reason = "signal_hold"
+        elif decision != side_norm:
+            signal_ok = False
+            signal_reason = "signal_mismatch"
+        else:
+            signal_reason = "signal_aligned"
+
+    checks: Dict[str, Dict[str, Any]] = {
+        "signal_alignment": {
+            "ok": signal_ok,
+            "value": decision if latest_present else None,
+            "reason": signal_reason,
+        },
+        "risk_reducing": {
+            "ok": risk_reducing,
+            "value": risk_reducing,
+        },
+        "position_quote": {
+            "ok": True,
+            "value": round(current_exposure_quote, 2),
+        },
+        "post_position_quote": {
+            "ok": True,
+            "value": round(post_exposure_quote, 2),
+        },
+        "operator_guidance": {
+            "ok": operator_guidance_ok,
+            "value": operator_guidance_status or None,
+            "reason": operator_guidance_reason,
+            "action": (calibration_controls or {}).get("action") if isinstance(calibration_controls, dict) else None,
+            "reasons": (calibration_controls or {}).get("reasons") if isinstance(calibration_controls, dict) else [],
+        },
+    }
+    blocked_checks: List[str] = []
+    blocked_reason: Optional[str] = None
+
+    def _block(name: str, reason: str, *, value: Any = None, threshold: Any = None) -> None:
+        nonlocal blocked_reason
+        existing = checks.get(name) if isinstance(checks.get(name), dict) else {}
+        checks[name] = {
+            **existing,
+            "ok": False,
+            "value": value,
+            "threshold": threshold,
+            "reason": reason,
+        }
+        blocked_checks.append(name)
+        if blocked_reason is None:
+            blocked_reason = reason
+
+    if not risk_reducing and _should_calibration_abstain(operator_guidance):
+        _block(
+            "operator_guidance",
+            "calibration_abstain",
+            value=operator_guidance_status or None,
+            threshold=(calibration_controls or {}).get("action") if isinstance(calibration_controls, dict) else None,
+        )
+
+    if not risk_reducing and calibration_max_order_notional is not None and order_notional > calibration_max_order_notional:
+        _block(
+            "calibration_order_notional",
+            "calibration_size_reduction_required",
+            value=round(order_notional, 2),
+            threshold=round(calibration_max_order_notional, 2),
+        )
+    if not risk_reducing and calibration_max_quantity is not None and qty > calibration_max_quantity:
+        _block(
+            "calibration_quantity",
+            "calibration_size_reduction_required",
+            value=round(qty, 8),
+            threshold=round(calibration_max_quantity, 8),
+        )
+    elif not risk_reducing and calibration_max_order_size_pct is not None and order_size_pct > calibration_max_order_size_pct:
+        _block(
+            "calibration_order_size_pct",
+            "calibration_size_reduction_required",
+            value=round(order_size_pct, 4),
+            threshold=round(calibration_max_order_size_pct, 4),
+        )
+
+    if enforce_signal_gate and latest_present and not signal_ok:
+        _block("signal_alignment", signal_reason, value=decision, threshold=side_norm)
+
+    if not risk_reducing:
+        max_order_notional = _optional_float(policy.get("max_order_notional"))
+        if max_order_notional is not None and max_order_notional > 0 and order_notional > max_order_notional:
+            _block("max_order_notional", "order_notional_too_large", value=round(order_notional, 2), threshold=round(max_order_notional, 2))
+
+    max_exposure_quote = _optional_float(policy.get("max_exposure_quote"))
+    if max_exposure_quote is not None and max_exposure_quote > 0 and post_exposure_quote > max_exposure_quote:
+        _block("max_exposure_quote", "exposure_too_large", value=round(post_exposure_quote, 2), threshold=round(max_exposure_quote, 2))
+
+    if not risk_reducing:
+        max_order_size_pct = _optional_float(policy.get("max_order_size_pct"))
+        if max_order_size_pct is not None and max_order_size_pct > 0:
+            if order_size_pct > max_order_size_pct:
+                _block("max_order_size_pct", "book_consumption_too_large", value=round(order_size_pct, 4), threshold=round(max_order_size_pct, 4))
+
+        if enforce_book_checks and risk:
+            max_book_consumption_pct = _optional_float(policy.get("max_book_consumption_pct"))
+            if max_book_consumption_pct is not None and max_book_consumption_pct > 0:
+                book_consumption_pct = _optional_float((risk or {}).get("book_consumption_pct")) or 0.0
+                if book_consumption_pct > max_book_consumption_pct:
+                    _block("max_book_consumption_pct", "book_consumption_too_large", value=round(book_consumption_pct, 4), threshold=round(max_book_consumption_pct, 4))
+
+            max_spread_bps = _optional_float(policy.get("max_spread_bps"))
+            if max_spread_bps is not None and max_spread_bps > 0:
+                spread_bps = _optional_float((risk or {}).get("spread_bps")) or 0.0
+                if spread_bps > max_spread_bps:
+                    _block("max_spread_bps", "spread_too_wide", value=round(spread_bps, 2), threshold=round(max_spread_bps, 2))
+
+            max_impact_score = _optional_float(policy.get("max_impact_score"))
+            if max_impact_score is not None and max_impact_score > 0:
+                impact_score = _optional_float((risk or {}).get("impact_score")) or 0.0
+                if impact_score > max_impact_score:
+                    _block("max_impact_score", "impact_too_high", value=round(impact_score, 2), threshold=round(max_impact_score, 2))
+
+            max_drag_pct = _optional_float(policy.get("max_execution_drag_pct"))
+            if max_drag_pct is not None and max_drag_pct > 0:
+                drag_pct = _optional_float((risk or {}).get("execution_drag_pct")) or 0.0
+                if drag_pct > max_drag_pct:
+                    _block("max_execution_drag_pct", "execution_drag_too_high", value=round(drag_pct, 6), threshold=round(max_drag_pct, 6))
+
+            min_rr = _optional_float(policy.get("min_risk_reward"))
+            if min_rr is not None and min_rr > 0:
+                risk_reward = _optional_float((risk or {}).get("risk_reward"))
+                if risk_reward is not None and risk_reward > 0 and risk_reward < min_rr:
+                    _block("min_risk_reward", "risk_reward_too_low", value=round(risk_reward, 2), threshold=round(min_rr, 2))
+
+    allowed = not blocked_checks
+    reason = blocked_reason or ("risk_reducing_exit" if risk_reducing else "ok")
+    return {
+        "allowed": allowed,
+        "reason": reason,
+        "decision": decision,
+        "signal_ok": signal_ok,
+        "signal_reason": signal_reason,
+        "risk_reducing": risk_reducing,
+        "current_position": round(position, 8),
+        "current_exposure_quote": round(current_exposure_quote, 2),
+        "post_trade_exposure_quote": round(post_exposure_quote, 2),
+        "order_notional": round(order_notional, 2),
+        "quantity": round(qty, 8),
+        "side": side_norm,
+        "symbol": symbol_pair,
+        "checks": checks,
+        "blocked_checks": blocked_checks,
+        "policy": policy,
+        "operator_guidance": operator_guidance,
+        "calibration_controls": calibration_controls,
+    }
+
+
+def _build_trade_preview(
+    *,
+    order: TradeRequest,
+    horizon_minutes: Optional[int] = None,
+    regime: Optional[str] = None,
+    use_order_book: bool = True,
+) -> Dict[str, Any]:
+    if order.quantity <= 0:
+        raise HTTPException(status_code=400, detail="quantity must be > 0")
+
+    symbol_pair = _normalize_binance_pair(order.symbol)
+    if not symbol_pair:
+        raise HTTPException(status_code=400, detail="Missing symbol")
+
+    requested_mode = order.execution_mode or ("testnet" if order.test else None) or os.getenv("BINANCE_EXECUTION_MODE", "simulated")
+    exec_snapshot = _crypto_execution_snapshot(requested_mode=requested_mode)
+    execution_mode = exec_snapshot["mode"]
+    api_key = (os.getenv("BINANCE_API_KEY") or "").strip()
+    api_secret = (os.getenv("BINANCE_API_SECRET") or "").strip()
+    live_trading_enabled = (os.getenv("BINANCE_LIVE_TRADING", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+    if execution_mode == "live" and not (api_key and api_secret and live_trading_enabled):
+        execution_mode = "simulated"
+    if execution_mode == "testnet" and not (api_key and api_secret):
+        execution_mode = "simulated"
+
+    price_live = _binance_spot_price(symbol_pair)
+    mid_price = float(price_live if price_live is not None else (100 + (hash(symbol_pair) % 500)))
+    execution_profile = _execution_profile(
+        symbol_pair=symbol_pair,
+        side=order.side,
+        quantity=order.quantity,
+        mid_price=mid_price,
+        execution_mode=execution_mode,
+    )
+    preview_trade = {
+        "symbol": symbol_pair,
+        "side": order.side,
+        "quantity": order.quantity,
+        "price": execution_profile.get("fill_price"),
+        "mid_price": execution_profile.get("mid_price"),
+        "fill_price": execution_profile.get("fill_price"),
+        "spread_bps": execution_profile.get("spread_bps"),
+        "slippage_bps": execution_profile.get("slippage_bps"),
+        "impact_bps": execution_profile.get("impact_bps"),
+        "liquidity_bucket": execution_profile.get("liquidity_bucket"),
+        "notional": execution_profile.get("notional"),
+        "execution_note": execution_profile.get("execution_note"),
+        "execution_mode": execution_mode,
+        "status": "SIMULATED",
+    }
+
+    scope_snapshot = build_crypto_state_snapshot(
+        symbol=symbol_pair,
+        horizon_minutes=horizon_minutes,
+        regime=regime,
+        limit=5,
+        trade_limit=20,
+        price_lookup=_binance_spot_price,
+        order_book_lookup=(lambda sym: _binance_order_book(sym, limit=10)) if use_order_book else None,
+        execution_snapshot=exec_snapshot,
+    )
+    latest_prediction = scope_snapshot.get("latest_prediction") if isinstance(scope_snapshot, dict) else None
+    risk = _risk_snapshot(
+        latest_prediction=latest_prediction if isinstance(latest_prediction, dict) else None,
+        latest_trade=preview_trade,
+        current_price=mid_price,
+        execution_snapshot=exec_snapshot,
+        trade_side=order.side,
+        order_book_snapshot=(scope_snapshot or {}).get("order_book") if isinstance(scope_snapshot, dict) else None,
+    )
+
+    entry_price = _optional_float((risk or {}).get("entry_price")) or float(execution_profile.get("fill_price"))
+    predicted_price = _optional_float((risk or {}).get("predicted_price"))
+    target_price = _optional_float((risk or {}).get("target_price"))
+    stop_price = _optional_float((risk or {}).get("stop_price"))
+    qty = float(order.quantity)
+    position_snapshot = _position_snapshot_from_pnl(
+        symbol_pair=symbol_pair,
+        current_price=entry_price,
+        pnl=(scope_snapshot or {}).get("pnl") if isinstance(scope_snapshot, dict) else None,
+        trades_count=len((scope_snapshot or {}).get("trades") or []) if isinstance(scope_snapshot, dict) else 0,
+    )
+    risk_gate = _evaluate_trade_risk_gate(
+        symbol_pair=symbol_pair,
+        side=order.side,
+        quantity=qty,
+        current_price=entry_price,
+        latest_prediction=latest_prediction if isinstance(latest_prediction, dict) else None,
+        risk=risk,
+        position_snapshot=position_snapshot,
+        policy=_crypto_risk_policy(order),
+        enforce_book_checks=use_order_book,
+        enforce_signal_gate=False,
+    )
+
+    expected_gain_quote = None
+    expected_loss_quote = None
+    if predicted_price is not None and entry_price > 0:
+        if order.side == "BUY":
+            expected_gain_quote = max(0.0, (predicted_price - entry_price) * qty)
+        else:
+            expected_gain_quote = max(0.0, (entry_price - predicted_price) * qty)
+    if stop_price is not None and entry_price > 0:
+        if order.side == "BUY":
+            expected_loss_quote = max(0.0, (entry_price - stop_price) * qty)
+        else:
+            expected_loss_quote = max(0.0, (stop_price - entry_price) * qty)
+
+    latest_prediction_ref = scope_snapshot.get("latest_prediction_ref") if isinstance(scope_snapshot, dict) else None
+    return {
+        "symbol": symbol_pair,
+        "side": order.side,
+        "quantity": order.quantity,
+        "price": execution_profile.get("fill_price"),
+        "mid_price": execution_profile.get("mid_price"),
+        "fill_price": execution_profile.get("fill_price"),
+        "spread_bps": execution_profile.get("spread_bps"),
+        "slippage_bps": execution_profile.get("slippage_bps"),
+        "impact_bps": execution_profile.get("impact_bps"),
+        "liquidity_bucket": execution_profile.get("liquidity_bucket"),
+        "notional": execution_profile.get("notional"),
+        "execution_note": execution_profile.get("execution_note"),
+        "execution_mode": execution_mode,
+        "requested_mode": exec_snapshot.get("mode") if isinstance(exec_snapshot, dict) else None,
+        "horizon_minutes": horizon_minutes,
+        "regime": regime,
+        "current_price": mid_price,
+        "predicted_price": predicted_price,
+        "signal_decision": str((latest_prediction or {}).get("action_decision") or (latest_prediction or {}).get("decision") or "HOLD").strip().upper() or "HOLD",
+        "signal_probability_up": _optional_float((latest_prediction or {}).get("probability_up")),
+        "entry_price": entry_price,
+        "target_price": target_price,
+        "stop_price": stop_price,
+        "expected_gain_quote": round(expected_gain_quote, 2) if expected_gain_quote is not None else None,
+        "expected_loss_quote": round(expected_loss_quote, 2) if expected_loss_quote is not None else None,
+        "expected_pnl_pct": _optional_float((risk or {}).get("expected_pnl_pct")),
+        "risk_reward": _optional_float((risk or {}).get("risk_reward")),
+        "projected_move_pct": _optional_float((risk or {}).get("projected_move_pct")),
+        "execution_drag_pct": _optional_float((risk or {}).get("execution_drag_pct")),
+        "confidence": _optional_float((risk or {}).get("confidence")),
+        "confidence_bucket": str((risk or {}).get("confidence_bucket") or "").strip() or None,
+        "order_notional": _optional_float((risk or {}).get("order_notional")),
+        "visible_liquidity_notional": _optional_float((risk or {}).get("visible_liquidity_notional")),
+        "side_liquidity_notional": _optional_float((risk or {}).get("side_liquidity_notional")),
+        "order_size_pct": _optional_float((risk or {}).get("order_size_pct")),
+        "book_consumption_pct": _optional_float((risk or {}).get("book_consumption_pct")),
+        "participation_pct": _optional_float((risk or {}).get("participation_pct")),
+        "others_pct": _optional_float((risk or {}).get("others_pct")),
+        "remaining_liquidity": _optional_float((risk or {}).get("remaining_liquidity")),
+        "pre_trade_price": _optional_float((risk or {}).get("pre_trade_price")),
+        "post_trade_estimate": _optional_float((risk or {}).get("post_trade_estimate")),
+        "impact_score": _optional_float((risk or {}).get("impact_score")),
+        "net_expected_profit_after_costs_pct": _optional_float((risk or {}).get("net_expected_profit_after_costs_pct")),
+        "net_expected_profit_after_costs_quote": _optional_float((risk or {}).get("net_expected_profit_after_costs_quote")),
+        "prediction_ref": latest_prediction_ref,
+        "risk": risk,
+        "risk_gate": risk_gate,
+        "preview_only": True,
     }
 
 
@@ -198,9 +956,13 @@ def _crypto_policy_snapshot(
     buy_threshold: float,
     sell_threshold: float,
     credibility: Optional[Dict[str, Any]],
+    operator_guidance: Optional[Dict[str, Any]],
     consensus_metrics: Optional[Dict[str, Any]],
     threshold_rec: Optional[Dict[str, Any]],
     require_trained: bool,
+    execution_margin: Optional[float] = None,
+    consensus_requirements: Optional[Dict[str, float]] = None,
+    execution_gate_reason: Optional[str] = None,
     adaptive_policy: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     confidence = max(0.0, min(1.0, max(p_up, 1.0 - p_up)))
@@ -211,16 +973,26 @@ def _crypto_policy_snapshot(
     else:
         confidence_bucket = "low"
 
+    operator_status = _operator_guidance_status(operator_guidance)
+    if execution_margin is None:
+        execution_margin = _effective_execution_margin(credibility, operator_guidance)
+    if consensus_requirements is None:
+        consensus_requirements = _effective_consensus_requirements(credibility, operator_guidance)
+
     route_mode = "trained" if prediction_engine == "trained" else "demo"
     route_reason = "trained_model_available" if prediction_engine == "trained" else "demo_fallback"
     if require_trained and prediction_engine != "trained":
         route_reason = "trained_required_unavailable"
-    if isinstance(credibility, dict) and bool(credibility.get("should_abstain")):
+    elif isinstance(credibility, dict) and bool(credibility.get("should_abstain")):
         route_reason = "credibility_abstain"
+    elif _should_calibration_abstain(operator_guidance):
+        route_reason = "calibration_abstain"
+    elif execution_gate_reason:
+        route_reason = execution_gate_reason
     elif action_decision in {"BUY", "SELL"} and threshold_rec:
         route_reason = "threshold_edge_passed"
     elif action_decision == "HOLD" and model_decision in {"BUY", "SELL"}:
-        route_reason = str((credibility or {}).get("status") or "gated")
+        route_reason = "calibration_downgrade" if operator_status == "downgrade" else str((credibility or {}).get("status") or "gated")
 
     return {
         "symbol": symbol,
@@ -240,19 +1012,14 @@ def _crypto_policy_snapshot(
             "threshold_strategy": threshold_rec,
         },
         "credibility": credibility,
+        "operator_guidance": operator_guidance,
+        "should_abstain": _effective_should_abstain(credibility, operator_guidance),
         "consensus": consensus_metrics,
         "gates": {
-            "execution_margin": _execution_margin_for_credibility(credibility),
-            "required_support_ratio": (
-                _consensus_requirements_for_credibility(credibility).get("min_support_ratio")
-                if credibility is not None
-                else None
-            ),
-            "required_max_spread": (
-                _consensus_requirements_for_credibility(credibility).get("max_spread")
-                if credibility is not None
-                else None
-            ),
+            "execution_margin": execution_margin,
+            "calibration_margin": _calibration_margin_for_operator_guidance(operator_guidance),
+            "required_support_ratio": (consensus_requirements or {}).get("min_support_ratio"),
+            "required_max_spread": (consensus_requirements or {}).get("max_spread"),
         },
         "policy_profile": _crypto_policy_profile(),
         "adaptive_policy": adaptive_policy,
@@ -676,6 +1443,120 @@ def _binance_ohlcv_window(
     return series
 
 
+def _binance_order_book(symbol: str, *, limit: int = 10) -> Optional[Dict[str, Any]]:
+    sym = _normalize_binance_pair(symbol)
+    if not sym:
+        return None
+    depth_limit = max(5, min(int(limit or 10), 50))
+    raw: Optional[Dict[str, Any]] = None
+    source = "binance"
+    try:
+        resp = requests.get(
+            f"{_binance_base_url()}/api/v3/depth",
+            params={"symbol": sym, "limit": depth_limit},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict):
+            raw = data
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Binance depth fetch failed for %s: %s", sym, exc)
+
+    def _parse_levels(levels: Any) -> List[Dict[str, Any]]:
+        parsed: List[Dict[str, Any]] = []
+        for row in list(levels or [])[:depth_limit]:
+            try:
+                price = float(row[0])
+                qty = float(row[1])
+            except Exception:
+                continue
+            parsed.append(
+                {
+                    "price": round(price, 2),
+                    "qty": round(qty, 8),
+                    "notional": round(price * qty, 2),
+                }
+            )
+        return parsed
+
+    bids = _parse_levels(raw.get("bids")) if raw else []
+    asks = _parse_levels(raw.get("asks")) if raw else []
+    if not bids or not asks:
+        source = "synthetic"
+        mid = float(_binance_spot_price(sym) or (100 + (hash(sym) % 500)))
+        base_asset = _base_symbol_from_pair(sym)
+        base_spread_bps = (
+            4.5
+            if base_asset in {"BTC", "ETH"}
+            else 7.5
+            if base_asset in {"BNB", "SOL", "XRP", "ADA", "DOGE", "LINK", "AVAX", "MATIC", "TRX"}
+            else 11.5
+        )
+        rng = random.Random(hash(("depth", sym)))
+        spread_bps = round(max(2.0, base_spread_bps + rng.uniform(-0.7, 1.6)), 2)
+        best_bid = round(mid * (1.0 - (spread_bps / 2.0) / 10000.0), 2)
+        best_ask = round(mid * (1.0 + (spread_bps / 2.0) / 10000.0), 2)
+        total_quote = 0.0
+        if base_asset in {"BTC", "ETH"}:
+            total_quote = 10000.0
+        elif base_asset in {"BNB", "SOL", "XRP", "ADA", "DOGE", "LINK", "AVAX", "MATIC", "TRX"}:
+            total_quote = 6000.0
+        else:
+            total_quote = 3000.0
+
+        bids = []
+        asks = []
+        for idx in range(depth_limit):
+            decay = 0.88 ** idx
+            bid_level_price = round(mid * (1.0 - ((spread_bps / 2.0) + idx * max(0.9, spread_bps * 0.28)) / 10000.0), 2)
+            ask_level_price = round(mid * (1.0 + ((spread_bps / 2.0) + idx * max(0.9, spread_bps * 0.28)) / 10000.0), 2)
+            bid_quote = total_quote * decay * rng.uniform(0.75, 1.2)
+            ask_quote = total_quote * decay * rng.uniform(0.75, 1.2)
+            bid_qty = round(max(0.0000001, bid_quote / max(bid_level_price, 1e-8)), 8)
+            ask_qty = round(max(0.0000001, ask_quote / max(ask_level_price, 1e-8)), 8)
+            bids.append({"price": bid_level_price, "qty": bid_qty, "notional": round(bid_level_price * bid_qty, 2)})
+            asks.append({"price": ask_level_price, "qty": ask_qty, "notional": round(ask_level_price * ask_qty, 2)})
+    else:
+        best_bid = bids[0]["price"]
+        best_ask = asks[0]["price"]
+        mid = round((best_bid + best_ask) / 2.0, 2)
+        spread_bps = round(((best_ask - best_bid) / mid) * 10000.0 if mid else 0.0, 2)
+
+    bid_qty = round(sum(float(level["qty"]) for level in bids), 8)
+    ask_qty = round(sum(float(level["qty"]) for level in asks), 8)
+    bid_notional = round(sum(float(level["notional"]) for level in bids), 2)
+    ask_notional = round(sum(float(level["notional"]) for level in asks), 2)
+    imbalance = 0.5
+    total_notional = bid_notional + ask_notional
+    if total_notional > 0:
+        imbalance = round(bid_notional / total_notional, 4)
+
+    liquidity_bucket = _liquidity_bucket_for_notional(max(bid_notional, ask_notional, total_notional / 2.0))
+    return {
+        "symbol": sym,
+        "source": source,
+        "levels": depth_limit,
+        "mid_price": round(float(mid), 2),
+        "best_bid": round(float(best_bid), 2),
+        "best_ask": round(float(best_ask), 2),
+        "spread": round(float(best_ask - best_bid), 2),
+        "spread_bps": round(float(spread_bps), 2),
+        "imbalance": imbalance,
+        "bid_qty": bid_qty,
+        "ask_qty": ask_qty,
+        "bid_notional": bid_notional,
+        "ask_notional": ask_notional,
+        "liquidity_bucket": liquidity_bucket,
+        "bids": bids[:depth_limit],
+        "asks": asks[:depth_limit],
+        "note": (
+            f"{source} order book • spread {spread_bps:.1f}bps • "
+            f"imbalance {imbalance * 100:.1f}% bid side"
+        ),
+    }
+
+
 def _interval_for_horizon(horizon_minutes: int) -> str:
     if horizon_minutes <= 15:
         return "1m"
@@ -751,6 +1632,16 @@ class TradeRequest(BaseModel):
     side: Literal["BUY", "SELL"]
     quantity: float
     test: bool = True  # simulated by default
+    execution_mode: Optional[Literal["simulated", "testnet", "live"]] = None
+    stop_loss_pct: Optional[float] = None
+    take_profit_pct: Optional[float] = None
+    max_exposure_quote: Optional[float] = None
+    max_order_notional: Optional[float] = None
+    max_order_size_pct: Optional[float] = None
+    max_impact_score: Optional[float] = None
+    min_risk_reward: Optional[float] = None
+    max_spread_bps: Optional[float] = None
+    max_book_consumption_pct: Optional[float] = None
 
 
 class TradeResponse(BaseModel):
@@ -758,9 +1649,72 @@ class TradeResponse(BaseModel):
     side: Literal["BUY", "SELL"]
     quantity: float
     price: Optional[float]
+    mid_price: Optional[float] = None
+    fill_price: Optional[float] = None
+    spread_bps: Optional[float] = None
+    slippage_bps: Optional[float] = None
+    impact_bps: Optional[float] = None
+    liquidity_bucket: Optional[str] = None
+    notional: Optional[float] = None
+    execution_note: Optional[str] = None
     status: Literal["FILLED", "SENT_TO_EXCHANGE", "SIMULATED", "REJECTED"]
     ts: int
+    execution_mode: Literal["simulated", "testnet", "live"] = "simulated"
     message: Optional[str] = None
+    risk_gate: Optional[Dict[str, Any]] = None
+    net_expected_profit_after_costs_pct: Optional[float] = None
+    net_expected_profit_after_costs_quote: Optional[float] = None
+
+
+class TradePreviewResponse(BaseModel):
+    symbol: str
+    side: Literal["BUY", "SELL"]
+    quantity: float
+    price: Optional[float] = None
+    mid_price: Optional[float] = None
+    fill_price: Optional[float] = None
+    spread_bps: Optional[float] = None
+    slippage_bps: Optional[float] = None
+    impact_bps: Optional[float] = None
+    liquidity_bucket: Optional[str] = None
+    notional: Optional[float] = None
+    execution_note: Optional[str] = None
+    execution_mode: Literal["simulated", "testnet", "live"] = "simulated"
+    requested_mode: Optional[Literal["simulated", "testnet", "live"]] = None
+    horizon_minutes: Optional[int] = None
+    regime: Optional[str] = None
+    current_price: Optional[float] = None
+    predicted_price: Optional[float] = None
+    signal_decision: Optional[Literal["BUY", "SELL", "HOLD"]] = None
+    signal_probability_up: Optional[float] = None
+    entry_price: Optional[float] = None
+    target_price: Optional[float] = None
+    stop_price: Optional[float] = None
+    expected_gain_quote: Optional[float] = None
+    expected_loss_quote: Optional[float] = None
+    expected_pnl_pct: Optional[float] = None
+    risk_reward: Optional[float] = None
+    projected_move_pct: Optional[float] = None
+    execution_drag_pct: Optional[float] = None
+    confidence: Optional[float] = None
+    confidence_bucket: Optional[str] = None
+    order_notional: Optional[float] = None
+    visible_liquidity_notional: Optional[float] = None
+    side_liquidity_notional: Optional[float] = None
+    order_size_pct: Optional[float] = None
+    book_consumption_pct: Optional[float] = None
+    participation_pct: Optional[float] = None
+    others_pct: Optional[float] = None
+    remaining_liquidity: Optional[float] = None
+    pre_trade_price: Optional[float] = None
+    post_trade_estimate: Optional[float] = None
+    impact_score: Optional[float] = None
+    prediction_ref: Optional[Dict[str, Any]] = None
+    risk: Optional[Dict[str, Any]] = None
+    risk_gate: Optional[Dict[str, Any]] = None
+    net_expected_profit_after_costs_pct: Optional[float] = None
+    net_expected_profit_after_costs_quote: Optional[float] = None
+    preview_only: bool = True
 
 
 class TopCoin(BaseModel):
@@ -813,6 +1767,41 @@ def _safe_read_json(path: Path) -> Optional[Dict[str, Any]]:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def _artifact_sha256(path_value: Any) -> Optional[str]:
+    raw = str(path_value or "").strip()
+    if not raw:
+        return None
+    try:
+        artifact_path = Path(raw).resolve()
+        if not artifact_path.is_file():
+            return None
+        stat = artifact_path.stat()
+    except Exception:
+        return None
+
+    cache_key = str(artifact_path)
+    with _artifact_sha_lock:
+        cached = _artifact_sha_cache.get(cache_key)
+        if cached and cached[0] == int(stat.st_mtime_ns) and cached[1] == int(stat.st_size):
+            return cached[2]
+
+    digest = hashlib.sha256()
+    try:
+        with artifact_path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except Exception:
+        return None
+
+    value = digest.hexdigest()
+    with _artifact_sha_lock:
+        _artifact_sha_cache[cache_key] = (int(stat.st_mtime_ns), int(stat.st_size), value)
+    return value
 
 
 def _trained_bundle_for_model(meta_module, trained: TrainedModel) -> Optional[Dict[str, Any]]:
@@ -1012,6 +2001,7 @@ def _predict_with_trained_models(
         return None
 
     try:
+        artifact_sha256 = _artifact_sha256(trained.artifact_path)
         interval_minutes = int(trained.interval_minutes or 0) or {
             "1m": 1,
             "5m": 5,
@@ -1076,8 +2066,10 @@ def _predict_with_trained_models(
             "predicted_price": predicted,
             "decision": decision,
             "current_price": current,
+            "trained_horizon_minutes": trained.horizon_minutes,
             "trained_model_type": trained.model_type,
             "trained_artifact": trained.artifact_path,
+            "trained_artifact_sha256": artifact_sha256,
             "dataset_hash": trained.dataset_hash,
             "trained_at": trained.trained_at,
             "validation_mode": trained.validation_mode,
@@ -1088,6 +2080,43 @@ def _predict_with_trained_models(
     except Exception as exc:  # noqa: BLE001
         logger.warning("trained-model prediction unavailable for %s: %s", symbol_pair, exc)
         return None
+
+
+def _build_prediction_provenance(
+    *,
+    requested_model: str,
+    model_used: str,
+    requested_horizon_minutes: int,
+    prediction_engine: str,
+    price_source: str,
+    trained_payload: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    trained_payload = trained_payload or {}
+    trained_horizon_minutes = trained_payload.get("trained_horizon_minutes")
+    artifact_path = trained_payload.get("trained_artifact")
+    artifact_sha256 = trained_payload.get("trained_artifact_sha256") or _artifact_sha256(artifact_path)
+    used_trained_horizon_fallback = (
+        isinstance(trained_horizon_minutes, int)
+        and int(trained_horizon_minutes) != int(requested_horizon_minutes)
+    )
+    return {
+        "requested_model": requested_model,
+        "model_used": model_used,
+        "engine": prediction_engine,
+        "requested_horizon_minutes": int(requested_horizon_minutes),
+        "trained_horizon_minutes": trained_horizon_minutes,
+        "requested_interval": _interval_for_horizon(int(requested_horizon_minutes)),
+        "model_interval_minutes": trained_payload.get("interval_minutes"),
+        "used_demo_fallback": prediction_engine != "trained",
+        "used_trained_horizon_fallback": used_trained_horizon_fallback,
+        "trained_model_type": trained_payload.get("trained_model_type"),
+        "trained_artifact": artifact_path,
+        "trained_artifact_sha256": artifact_sha256,
+        "dataset_hash": trained_payload.get("dataset_hash"),
+        "trained_at": trained_payload.get("trained_at"),
+        "validation_mode": trained_payload.get("validation_mode"),
+        "price_source": price_source,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1280,8 +2309,10 @@ def predict(req: PredictRequest) -> PredictResponse:
 
     model_decision = decision
     credibility = None
+    operator_guidance = None
     action_decision = model_decision
     execution_margin = 0.0
+    calibration_margin = 0.0
     threshold_edge = None
     execution_gate_reason = None
     consensus_metrics = None
@@ -1295,8 +2326,15 @@ def predict(req: PredictRequest) -> PredictResponse:
             regime=regime,
             min_trades=CRYPTO_THRESHOLD_MIN_TRADES,
         )
-        execution_margin = _execution_margin_for_credibility(credibility)
-        consensus_requirements = _consensus_requirements_for_credibility(credibility)
+        operator_guidance = _scope_operator_guidance(
+            symbol=sym,
+            horizon_minutes=req.horizon_minutes,
+            regime=regime,
+            limit=CRYPTO_THRESHOLD_LOOKBACK,
+        )
+        execution_margin = _effective_execution_margin(credibility, operator_guidance)
+        calibration_margin = _calibration_margin_for_operator_guidance(operator_guidance)
+        consensus_requirements = _effective_consensus_requirements(credibility, operator_guidance)
         consensus_metrics = _consensus_metrics((raw or {}).get("per_model_probs"), decision=model_decision)
         if model_decision == "BUY":
             threshold_edge = p_up - buy_threshold
@@ -1309,6 +2347,9 @@ def predict(req: PredictRequest) -> PredictResponse:
         ):
             action_decision = "HOLD"
             execution_gate_reason = "credibility_abstain"
+        elif _should_calibration_abstain(operator_guidance) and model_decision in {"BUY", "SELL"}:
+            action_decision = "HOLD"
+            execution_gate_reason = "calibration_abstain"
         elif (
             model_decision in {"BUY", "SELL"}
             and threshold_edge is not None
@@ -1356,6 +2397,7 @@ def predict(req: PredictRequest) -> PredictResponse:
         buy_threshold=buy_threshold,
         sell_threshold=sell_threshold,
         credibility=credibility,
+        operator_guidance=operator_guidance,
         consensus_metrics={
             **(consensus_metrics or {}),
             **{
@@ -1365,6 +2407,9 @@ def predict(req: PredictRequest) -> PredictResponse:
         },
         threshold_rec=threshold_rec,
         require_trained=require_trained,
+        execution_margin=execution_margin,
+        consensus_requirements=consensus_requirements,
+        execution_gate_reason=execution_gate_reason,
         adaptive_policy=adaptive_policy,
     )
     if isinstance(raw, dict):
@@ -1372,7 +2417,9 @@ def predict(req: PredictRequest) -> PredictResponse:
         raw["action_decision"] = action_decision
         raw["actionable"] = actionable
         raw["credibility"] = credibility
+        raw["operator_guidance"] = operator_guidance
         raw["execution_margin"] = execution_margin
+        raw["calibration_margin"] = calibration_margin
         raw["threshold_edge"] = threshold_edge
         raw["execution_gate_reason"] = execution_gate_reason
         raw["consensus"] = {
@@ -1384,6 +2431,17 @@ def predict(req: PredictRequest) -> PredictResponse:
         }
         raw["adaptive_policy"] = adaptive_policy
         raw["policy"] = policy
+
+    prediction_provenance = _build_prediction_provenance(
+        requested_model=requested_model,
+        model_used=model_used,
+        requested_horizon_minutes=req.horizon_minutes,
+        prediction_engine=prediction_engine,
+        price_source=price_source,
+        trained_payload=trained_payload,
+    )
+    if isinstance(raw, dict):
+        raw["prediction_provenance"] = prediction_provenance
 
     log_id: Optional[str] = None
     if req.save:
@@ -1409,10 +2467,13 @@ def predict(req: PredictRequest) -> PredictResponse:
                 "sell_threshold": sell_threshold,
                 "threshold_strategy": (raw or {}).get("threshold_strategy"),
                 "credibility": credibility,
+                "operator_guidance": operator_guidance,
                 "execution_margin": execution_margin,
+                "calibration_margin": calibration_margin,
                 "threshold_edge": threshold_edge,
                 "execution_gate_reason": execution_gate_reason,
                 "consensus": (raw or {}).get("consensus"),
+                "prediction_provenance": prediction_provenance,
                 "ts": int(time.time()),
             }
         )
@@ -1455,10 +2516,13 @@ def predict(req: PredictRequest) -> PredictResponse:
                         "sell_threshold": sell_threshold,
                         "threshold_strategy": (raw or {}).get("threshold_strategy"),
                         "credibility": credibility,
+                        "operator_guidance": operator_guidance,
                         "execution_margin": execution_margin,
+                        "calibration_margin": calibration_margin,
                         "threshold_edge": threshold_edge,
                         "execution_gate_reason": execution_gate_reason,
                         "consensus": (raw or {}).get("consensus"),
+                        "prediction_provenance": prediction_provenance,
                     }
                 )
             except Exception:
@@ -1498,7 +2562,11 @@ def predict(req: PredictRequest) -> PredictResponse:
             "credibility_status": (credibility or {}).get("status"),
             "credibility_score": (credibility or {}).get("score"),
             "credibility_reasons": (credibility or {}).get("reasons") or [],
+            "operator_guidance_status": (operator_guidance or {}).get("status"),
+            "operator_guidance_action": (operator_guidance or {}).get("action"),
+            "operator_guidance_reasons": (operator_guidance or {}).get("reasons") or [],
             "execution_margin": execution_margin,
+            "calibration_margin": calibration_margin,
             "threshold_edge": threshold_edge,
             "execution_gate_reason": execution_gate_reason,
             "consensus": (raw or {}).get("consensus"),
@@ -1509,6 +2577,7 @@ def predict(req: PredictRequest) -> PredictResponse:
             "route_mode": policy.get("route_mode"),
             "route_reason": policy.get("route_reason"),
             "confidence_bucket": policy.get("confidence_bucket"),
+            "prediction_provenance": prediction_provenance,
         },
         news=news_items,
     )
@@ -1846,6 +2915,15 @@ def crypto_policy(
             regime=scope["regime"],
             min_trades=CRYPTO_THRESHOLD_MIN_TRADES,
         )
+        operator_guidance = _scope_operator_guidance(
+            symbol=scope["symbol"],
+            horizon_minutes=scope["horizon_minutes"],
+            regime=scope["regime"],
+            limit=limit,
+        )
+        effective_execution_margin = _effective_execution_margin(credibility, operator_guidance)
+        effective_consensus_requirements = _effective_consensus_requirements(credibility, operator_guidance)
+        should_abstain = _effective_should_abstain(credibility, operator_guidance)
         adaptive = _adaptive_crypto_threshold_strategy(
             symbol=scope["symbol"] or "",
             horizon_minutes=scope["horizon_minutes"] or 15,
@@ -1866,12 +2944,24 @@ def crypto_policy(
                 "limit": limit,
             },
             "policy_profile": _crypto_policy_profile(),
+            "execution": _crypto_execution_snapshot(),
             "recommendation": rec,
             "credibility": credibility,
+            "operator_guidance": operator_guidance,
+            "effective_gates": {
+                "execution_margin": effective_execution_margin,
+                "required_support_ratio": effective_consensus_requirements.get("min_support_ratio"),
+                "required_max_spread": effective_consensus_requirements.get("max_spread"),
+            },
             "adaptive": adaptive,
             "summary": {
-                "route_mode": "trained" if credibility and credibility.get("status") != "blocked" else "demo",
-                "should_abstain": bool(credibility and credibility.get("should_abstain")),
+                "route_mode": "demo" if should_abstain else ("trained" if credibility and credibility.get("status") != "blocked" else "demo"),
+                "should_abstain": should_abstain,
+                "calibration_status": (operator_guidance or {}).get("status"),
+                "calibration_action": (operator_guidance or {}).get("action"),
+                "effective_execution_margin": effective_execution_margin,
+                "effective_required_support_ratio": effective_consensus_requirements.get("min_support_ratio"),
+                "effective_required_max_spread": effective_consensus_requirements.get("max_spread"),
                 "adaptive_strategy_source": adaptive.get("strategy_source"),
             },
         }
@@ -1959,6 +3049,8 @@ def _render_prediction_stats_markdown(
         f"- Net expectancy: `{_format_ratio_pct(stats.get('net_expectancy_pct'))}`",
         f"- Positive net rate: `{_format_ratio_pct(stats.get('positive_net_rate'))}`",
         f"- Max drawdown: `{_format_ratio_pct(stats.get('max_drawdown_pct'))}`",
+        f"- Avg probability error: `{_format_ratio_pct(stats.get('avg_probability_error'))}`",
+        f"- Brier score: `{(lambda value: f'{float(value):.4f}' if isinstance(value, (int, float)) and math.isfinite(float(value)) else 'n/a')(stats.get('brier_score'))}`",
         "",
     ]
     if engine_label != "trained":
@@ -1990,6 +3082,67 @@ def _render_prediction_stats_markdown(
                 f"- `{name}`: count=`{item.get('count', 0)}`, accuracy=`{_format_ratio_pct(item.get('accuracy'), 1)}`"
             )
         lines.append("")
+    provenance = stats.get("provenance") or {}
+    if provenance:
+        requested_vs_trained = provenance.get("requested_vs_trained") or {}
+        interval_counts = provenance.get("model_intervals") or {}
+        lines.extend(
+            [
+                "## Provenance",
+                "",
+                f"- Records with provenance: `{provenance.get('records_with_provenance', 0)}`",
+                f"- Demo fallback rows: `{provenance.get('demo_fallback_count', 0)}`",
+                f"- Trained horizon fallback rows: `{provenance.get('trained_horizon_fallback_count', 0)}`",
+                (
+                    "- Requested -> trained horizons: `"
+                    + ", ".join(f"{name} ({count})" for name, count in requested_vs_trained.items())
+                    + "`"
+                )
+                if requested_vs_trained
+                else "- Requested -> trained horizons: `n/a`",
+                (
+                    "- Model intervals: `"
+                    + ", ".join(f"{name} ({count})" for name, count in interval_counts.items())
+                    + "`"
+                )
+                if interval_counts
+                else "- Model intervals: `n/a`",
+                "",
+            ]
+        )
+    per_confidence = stats.get("per_confidence_bucket") or {}
+    if per_confidence:
+        lines.extend(["## Confidence Calibration", ""])
+        for name, item in sorted(
+            per_confidence.items(),
+            key=lambda pair: ({"high": 0, "medium": 1, "low": 2}.get(pair[0], 99), pair[0]),
+        ):
+            lines.append(
+                f"- `{name}`: count=`{item.get('count', 0)}`, accuracy=`{_format_ratio_pct(item.get('accuracy'), 1)}`, "
+                f"avg_prob_error=`{_format_ratio_pct(item.get('avg_probability_error'))}`, "
+                f"brier=`{(lambda value: f'{float(value):.4f}' if isinstance(value, (int, float)) and math.isfinite(float(value)) else 'n/a')(item.get('brier_score'))}`"
+            )
+        lines.append("")
+    operator_guidance = stats.get("operator_guidance") or {}
+    if operator_guidance:
+        reasons = [str(reason).strip() for reason in (operator_guidance.get("reasons") or []) if str(reason).strip()]
+        lines.extend(
+            [
+                "## Operating Guidance",
+                "",
+                f"- Calibration status: `{str(operator_guidance.get('status') or 'unknown').strip().lower() or 'unknown'}`",
+                f"- Operator action: `{str(operator_guidance.get('action') or 'unknown').strip().lower() or 'unknown'}`",
+                f"- Probability samples: `{int(operator_guidance.get('probability_count') or 0)}`",
+                f"- High-confidence samples: `{int(operator_guidance.get('high_confidence_count') or 0)}`",
+                f"- Focus bucket: `{str(operator_guidance.get('focus_bucket') or 'n/a').strip().lower() or 'n/a'}`",
+                (
+                    "- Reasons: `" + ", ".join(reasons) + "`"
+                    if reasons
+                    else "- Reasons: `n/a`"
+                ),
+                "",
+            ]
+        )
     lines.extend(
         [
             "## Interpretation",
@@ -2083,6 +3236,8 @@ def export_prediction_stats(
             "net_expectancy_pct": stats.get("net_expectancy_pct"),
             "positive_net_rate": stats.get("positive_net_rate"),
             "max_drawdown_pct": stats.get("max_drawdown_pct"),
+            "avg_probability_error": stats.get("avg_probability_error"),
+            "brier_score": stats.get("brier_score"),
         }
     ]
     for engine_name, item in sorted((stats.get("per_engine") or {}).items()):
@@ -2096,6 +3251,8 @@ def export_prediction_stats(
                 "net_expectancy_pct": item.get("net_expectancy_pct"),
                 "positive_net_rate": item.get("positive_net_rate"),
                 "max_drawdown_pct": item.get("max_drawdown_pct"),
+                "avg_probability_error": item.get("avg_probability_error"),
+                "brier_score": item.get("brier_score"),
             }
         )
     for model_name, item in sorted((stats.get("per_model") or {}).items()):
@@ -2109,6 +3266,8 @@ def export_prediction_stats(
                 "net_expectancy_pct": "",
                 "positive_net_rate": "",
                 "max_drawdown_pct": "",
+                "avg_probability_error": "",
+                "brier_score": "",
             }
         )
     rows.append(
@@ -2121,6 +3280,8 @@ def export_prediction_stats(
             "net_expectancy_pct": "",
             "positive_net_rate": "",
             "max_drawdown_pct": "",
+            "avg_probability_error": "",
+            "brier_score": "",
         }
     )
     rows.append(
@@ -2133,6 +3294,8 @@ def export_prediction_stats(
             "net_expectancy_pct": "",
             "positive_net_rate": "",
             "max_drawdown_pct": "",
+            "avg_probability_error": "",
+            "brier_score": "",
         }
     )
     rows.append(
@@ -2145,8 +3308,149 @@ def export_prediction_stats(
             "net_expectancy_pct": stats.get("net_expectancy_pct"),
             "positive_net_rate": stats.get("positive_net_rate"),
             "max_drawdown_pct": stats.get("max_drawdown_pct"),
+            "avg_probability_error": stats.get("avg_probability_error"),
+            "brier_score": stats.get("brier_score"),
         }
     )
+    provenance = stats.get("provenance") or {}
+    rows.append(
+        {
+            "section": "provenance",
+            "name": "with_provenance",
+            "count": provenance.get("records_with_provenance"),
+            "accuracy": "",
+            "avg_delta_pct": "",
+            "net_expectancy_pct": "",
+            "positive_net_rate": "",
+            "max_drawdown_pct": "",
+            "avg_probability_error": "",
+            "brier_score": "",
+        }
+    )
+    rows.append(
+        {
+            "section": "provenance",
+            "name": "trained_horizon_fallback",
+            "count": provenance.get("trained_horizon_fallback_count"),
+            "accuracy": "",
+            "avg_delta_pct": "",
+            "net_expectancy_pct": "",
+            "positive_net_rate": "",
+            "max_drawdown_pct": "",
+            "avg_probability_error": "",
+            "brier_score": "",
+        }
+    )
+    for name, count in sorted((provenance.get("requested_vs_trained") or {}).items()):
+        rows.append(
+            {
+                "section": "provenance",
+                "name": f"requested_vs_trained:{name}",
+                "count": count,
+                "accuracy": "",
+                "avg_delta_pct": "",
+                "net_expectancy_pct": "",
+                "positive_net_rate": "",
+                "max_drawdown_pct": "",
+                "avg_probability_error": "",
+                "brier_score": "",
+            }
+        )
+    for name, count in sorted((provenance.get("model_intervals") or {}).items()):
+        rows.append(
+            {
+                "section": "provenance",
+                "name": f"model_interval:{name}",
+                "count": count,
+                "accuracy": "",
+                "avg_delta_pct": "",
+                "net_expectancy_pct": "",
+                "positive_net_rate": "",
+                "max_drawdown_pct": "",
+                "avg_probability_error": "",
+                "brier_score": "",
+            }
+        )
+    for name, item in sorted(
+        (stats.get("per_confidence_bucket") or {}).items(),
+        key=lambda pair: ({"high": 0, "medium": 1, "low": 2}.get(pair[0], 99), pair[0]),
+    ):
+        rows.append(
+            {
+                "section": "confidence",
+                "name": name,
+                "count": item.get("count"),
+                "accuracy": item.get("accuracy"),
+                "avg_delta_pct": item.get("avg_delta_pct"),
+                "net_expectancy_pct": item.get("net_expectancy_pct"),
+                "positive_net_rate": item.get("positive_net_rate"),
+                "max_drawdown_pct": item.get("max_drawdown_pct"),
+                "avg_probability_error": item.get("avg_probability_error"),
+                "brier_score": item.get("brier_score"),
+            }
+        )
+    operator_guidance = stats.get("operator_guidance") or {}
+    if operator_guidance:
+        rows.append(
+            {
+                "section": "guidance",
+                "name": f"status:{str(operator_guidance.get('status') or 'unknown').strip().lower() or 'unknown'}",
+                "count": operator_guidance.get("probability_count"),
+                "accuracy": "",
+                "avg_delta_pct": "",
+                "net_expectancy_pct": "",
+                "positive_net_rate": "",
+                "max_drawdown_pct": "",
+                "avg_probability_error": stats.get("avg_probability_error"),
+                "brier_score": stats.get("brier_score"),
+            }
+        )
+        rows.append(
+            {
+                "section": "guidance",
+                "name": f"action:{str(operator_guidance.get('action') or 'unknown').strip().lower() or 'unknown'}",
+                "count": operator_guidance.get("high_confidence_count"),
+                "accuracy": "",
+                "avg_delta_pct": "",
+                "net_expectancy_pct": "",
+                "positive_net_rate": "",
+                "max_drawdown_pct": "",
+                "avg_probability_error": "",
+                "brier_score": "",
+            }
+        )
+        weakest_bucket = operator_guidance.get("weakest_bucket") if isinstance(operator_guidance.get("weakest_bucket"), dict) else {}
+        focus_bucket = str(operator_guidance.get("focus_bucket") or "").strip().lower()
+        if focus_bucket:
+            rows.append(
+                {
+                    "section": "guidance",
+                    "name": f"focus_bucket:{focus_bucket}",
+                    "count": weakest_bucket.get("count") if weakest_bucket else "",
+                    "accuracy": weakest_bucket.get("accuracy") if weakest_bucket else "",
+                    "avg_delta_pct": "",
+                    "net_expectancy_pct": "",
+                    "positive_net_rate": "",
+                    "max_drawdown_pct": "",
+                    "avg_probability_error": weakest_bucket.get("avg_probability_error") if weakest_bucket else "",
+                    "brier_score": weakest_bucket.get("brier_score") if weakest_bucket else "",
+                }
+            )
+        for reason in operator_guidance.get("reasons") or []:
+            rows.append(
+                {
+                    "section": "guidance",
+                    "name": f"reason:{str(reason).strip().lower()}",
+                    "count": "",
+                    "accuracy": "",
+                    "avg_delta_pct": "",
+                    "net_expectancy_pct": "",
+                    "positive_net_rate": "",
+                    "max_drawdown_pct": "",
+                    "avg_probability_error": "",
+                    "brier_score": "",
+                }
+            )
 
     buffer = io.StringIO()
     writer = csv.DictWriter(
@@ -2160,6 +3464,8 @@ def export_prediction_stats(
             "net_expectancy_pct",
             "positive_net_rate",
             "max_drawdown_pct",
+            "avg_probability_error",
+            "brier_score",
         ],
     )
     writer.writeheader()
@@ -2202,20 +3508,94 @@ def trade(order: TradeRequest) -> TradeResponse:
     api_secret = (os.getenv("BINANCE_API_SECRET") or "").strip()
     live_trading_enabled = (os.getenv("BINANCE_LIVE_TRADING", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
     base_url = _binance_base_url()
+    requested_mode = order.execution_mode or ("testnet" if order.test else None) or os.getenv("BINANCE_EXECUTION_MODE", "simulated")
+    exec_snapshot = _crypto_execution_snapshot(requested_mode=requested_mode)
+    execution_mode = exec_snapshot["mode"]
+    if execution_mode == "live" and not (api_key and api_secret and live_trading_enabled):
+        execution_mode = "simulated"
+    if execution_mode == "testnet" and not (api_key and api_secret):
+        execution_mode = "simulated"
 
-    if api_key and api_secret:
-        if not order.test and not live_trading_enabled:
-            price = price_live if price_live is not None else (100 + (hash(symbol_pair) % 500))
-            return TradeResponse(
-                symbol=symbol_pair,
-                side=order.side,
-                quantity=order.quantity,
-                price=round(price or 0.0, 2),
-                status="SIMULATED",
-                ts=int(time.time()),
-                message="Simulated trade (set BINANCE_LIVE_TRADING=1 to allow live orders)",
-            )
-        path = "/api/v3/order/test" if order.test else "/api/v3/order"
+    mid_price = float(price_live if price_live is not None else (100 + (hash(symbol_pair) % 500)))
+    execution_profile = _execution_profile(
+        symbol_pair=symbol_pair,
+        side=order.side,
+        quantity=order.quantity,
+        mid_price=mid_price,
+        execution_mode=execution_mode,
+    )
+    estimated_fill_price = float(execution_profile["fill_price"])
+    latest_prediction_candidates = list_predictions(limit=5, symbol=symbol_pair)
+    latest_prediction = latest_prediction_candidates[0] if latest_prediction_candidates else None
+    symbol_trades = list_trades(limit=200, symbol=symbol_pair)
+    symbol_pnl = compute_pnl(symbol_trades, lambda _sym: mid_price)
+    position_snapshot = _position_snapshot_from_pnl(
+        symbol_pair=symbol_pair,
+        current_price=mid_price,
+        pnl=symbol_pnl,
+        trades_count=len(symbol_trades),
+    )
+    preview_trade = {
+        "symbol": symbol_pair,
+        "side": order.side,
+        "quantity": order.quantity,
+        "price": estimated_fill_price,
+        "mid_price": round(mid_price, 2),
+        "fill_price": estimated_fill_price,
+        "spread_bps": execution_profile.get("spread_bps"),
+        "slippage_bps": execution_profile.get("slippage_bps"),
+        "impact_bps": execution_profile.get("impact_bps"),
+        "liquidity_bucket": execution_profile.get("liquidity_bucket"),
+        "notional": execution_profile.get("notional"),
+        "execution_note": execution_profile.get("execution_note"),
+        "execution_mode": execution_mode,
+        "status": "SIMULATED",
+    }
+    risk = _risk_snapshot(
+        latest_prediction=latest_prediction if isinstance(latest_prediction, dict) else None,
+        latest_trade=preview_trade,
+        current_price=mid_price,
+        execution_snapshot=exec_snapshot,
+        trade_side=order.side,
+        order_book_snapshot=None,
+    )
+    risk_gate = _evaluate_trade_risk_gate(
+        symbol_pair=symbol_pair,
+        side=order.side,
+        quantity=order.quantity,
+        current_price=mid_price,
+        latest_prediction=latest_prediction if isinstance(latest_prediction, dict) else None,
+        risk=risk,
+        position_snapshot=position_snapshot,
+        policy=_crypto_risk_policy(order),
+        enforce_book_checks=False,
+        enforce_signal_gate=False,
+    )
+    if not risk_gate.get("allowed", True):
+        blocked = TradeResponse(
+            symbol=symbol_pair,
+            side=order.side,
+            quantity=order.quantity,
+            price=estimated_fill_price,
+            mid_price=round(mid_price, 2),
+            fill_price=estimated_fill_price,
+            spread_bps=execution_profile.get("spread_bps"),
+            slippage_bps=execution_profile.get("slippage_bps"),
+            impact_bps=execution_profile.get("impact_bps"),
+            liquidity_bucket=execution_profile.get("liquidity_bucket"),
+            notional=execution_profile.get("notional"),
+            execution_note=str(execution_profile.get("execution_note") or ""),
+            status="REJECTED",
+            ts=int(time.time()),
+            execution_mode=execution_mode,
+            message=f"Risk gate blocked: {risk_gate.get('reason')}",
+            risk_gate=risk_gate,
+            net_expected_profit_after_costs_pct=_optional_float((risk or {}).get("net_expected_profit_after_costs_pct")),
+            net_expected_profit_after_costs_quote=_optional_float((risk or {}).get("net_expected_profit_after_costs_quote")),
+        )
+        return blocked
+    if execution_mode == "live":
+        path = "/api/v3/order"
         params = {
             "symbol": symbol_pair,
             "side": order.side,
@@ -2232,18 +3612,26 @@ def trade(order: TradeRequest) -> TradeResponse:
                 api_secret=api_secret,
                 base_url=base_url,
             )
-            status: Literal["FILLED", "SENT_TO_EXCHANGE", "SIMULATED", "REJECTED"] = (
-                "SIMULATED" if order.test else "SENT_TO_EXCHANGE"
-            )
-            msg = "Binance test order ok" if order.test else "Order sent to Binance"
             resp = TradeResponse(
                 symbol=symbol_pair,
                 side=order.side,
                 quantity=order.quantity,
-                price=round(price_live or 0.0, 2),
-                status=status,
+                price=estimated_fill_price,
+                mid_price=round(mid_price, 2),
+                fill_price=estimated_fill_price,
+                spread_bps=execution_profile.get("spread_bps"),
+                slippage_bps=execution_profile.get("slippage_bps"),
+                impact_bps=execution_profile.get("impact_bps"),
+                liquidity_bucket=execution_profile.get("liquidity_bucket"),
+                notional=execution_profile.get("notional"),
+                execution_note=str(execution_profile.get("execution_note") or ""),
+                status="SENT_TO_EXCHANGE",
                 ts=int(time.time()),
-                message=msg,
+                execution_mode="live",
+                message=f"Order sent to Binance • estimated fill {estimated_fill_price:.2f}",
+                risk_gate=risk_gate,
+                net_expected_profit_after_costs_pct=_optional_float((risk or {}).get("net_expected_profit_after_costs_pct")),
+                net_expected_profit_after_costs_quote=_optional_float((risk or {}).get("net_expected_profit_after_costs_quote")),
             )
             try:
                 log_trade(
@@ -2252,7 +3640,84 @@ def trade(order: TradeRequest) -> TradeResponse:
                         "side": resp.side,
                         "quantity": resp.quantity,
                         "price": resp.price,
+                        "mid_price": resp.mid_price,
+                        "fill_price": resp.fill_price,
+                        "spread_bps": resp.spread_bps,
+                        "slippage_bps": resp.slippage_bps,
+                        "impact_bps": resp.impact_bps,
+                        "liquidity_bucket": resp.liquidity_bucket,
+                        "notional": resp.notional,
+                        "execution_note": resp.execution_note,
+                "status": resp.status,
+                "execution_mode": resp.execution_mode,
+                "test": order.test,
+                "ts": resp.ts,
+            }
+                )
+            except Exception:
+                pass
+            return resp
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"Binance order failed: {exc}") from exc
+
+    if execution_mode == "testnet":
+        path = "/api/v3/order"
+        params = {
+            "symbol": symbol_pair,
+            "side": order.side,
+            "type": "MARKET",
+            "quantity": order.quantity,
+            "timestamp": int(time.time() * 1000),
+        }
+        try:
+            _binance_signed_request(
+                method="POST",
+                path=path,
+                params=params,
+                api_key=api_key,
+                api_secret=api_secret,
+                base_url=base_url,
+            )
+            resp = TradeResponse(
+                symbol=symbol_pair,
+                side=order.side,
+                quantity=order.quantity,
+                price=estimated_fill_price,
+                mid_price=round(mid_price, 2),
+                fill_price=estimated_fill_price,
+                spread_bps=execution_profile.get("spread_bps"),
+                slippage_bps=execution_profile.get("slippage_bps"),
+                impact_bps=execution_profile.get("impact_bps"),
+                liquidity_bucket=execution_profile.get("liquidity_bucket"),
+                notional=execution_profile.get("notional"),
+                execution_note=str(execution_profile.get("execution_note") or ""),
+                status="SENT_TO_EXCHANGE",
+                ts=int(time.time()),
+                execution_mode="testnet",
+                message=f"Binance test order ok • estimated fill {estimated_fill_price:.2f}",
+                risk_gate=risk_gate,
+                net_expected_profit_after_costs_pct=_optional_float((risk or {}).get("net_expected_profit_after_costs_pct")),
+                net_expected_profit_after_costs_quote=_optional_float((risk or {}).get("net_expected_profit_after_costs_quote")),
+            )
+            try:
+                log_trade(
+                    {
+                        "symbol": resp.symbol,
+                        "side": resp.side,
+                        "quantity": resp.quantity,
+                        "price": resp.price,
+                        "mid_price": resp.mid_price,
+                        "fill_price": resp.fill_price,
+                        "spread_bps": resp.spread_bps,
+                        "slippage_bps": resp.slippage_bps,
+                        "impact_bps": resp.impact_bps,
+                        "liquidity_bucket": resp.liquidity_bucket,
+                        "notional": resp.notional,
+                        "execution_note": resp.execution_note,
                         "status": resp.status,
+                        "execution_mode": resp.execution_mode,
                         "test": order.test,
                         "ts": resp.ts,
                     }
@@ -2263,33 +3728,81 @@ def trade(order: TradeRequest) -> TradeResponse:
         except HTTPException:
             raise
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=502, detail=f"Binance order failed: {exc}") from exc
+            raise HTTPException(status_code=502, detail=f"Binance test order failed: {exc}") from exc
 
-    price = price_live if price_live is not None else (100 + (hash(symbol_pair) % 500))
     resp = TradeResponse(
         symbol=symbol_pair,
         side=order.side,
         quantity=order.quantity,
-        price=round(price, 2),
+        price=estimated_fill_price,
+        mid_price=round(mid_price, 2),
+        fill_price=estimated_fill_price,
+        spread_bps=execution_profile.get("spread_bps"),
+        slippage_bps=execution_profile.get("slippage_bps"),
+        impact_bps=execution_profile.get("impact_bps"),
+        liquidity_bucket=execution_profile.get("liquidity_bucket"),
+        notional=execution_profile.get("notional"),
+        execution_note=str(execution_profile.get("execution_note") or ""),
         status="SIMULATED",
         ts=int(time.time()),
-        message="Simulated trade (set BINANCE_API_KEY/SECRET for live or test orders)",
+        execution_mode="simulated",
+        message=(
+            "Simulated trade (set BINANCE_LIVE_TRADING=1 to allow live orders)"
+            if api_key and api_secret and not live_trading_enabled and execution_mode != "testnet"
+            else "Simulated trade (set BINANCE_API_KEY/SECRET for live or test orders)"
+        ),
+        risk_gate=risk_gate,
+        net_expected_profit_after_costs_pct=_optional_float((risk or {}).get("net_expected_profit_after_costs_pct")),
+        net_expected_profit_after_costs_quote=_optional_float((risk or {}).get("net_expected_profit_after_costs_quote")),
     )
     try:
         log_trade(
             {
                 "symbol": resp.symbol,
                 "side": resp.side,
-                "quantity": resp.quantity,
-                "price": resp.price,
-                "status": resp.status,
-                "test": order.test,
-                "ts": resp.ts,
-            }
+                        "quantity": resp.quantity,
+                        "price": resp.price,
+                        "mid_price": resp.mid_price,
+                        "fill_price": resp.fill_price,
+                        "spread_bps": resp.spread_bps,
+                        "slippage_bps": resp.slippage_bps,
+                        "impact_bps": resp.impact_bps,
+                        "liquidity_bucket": resp.liquidity_bucket,
+                        "notional": resp.notional,
+                        "execution_note": resp.execution_note,
+                        "status": resp.status,
+                        "execution_mode": resp.execution_mode,
+                        "test": order.test,
+                        "ts": resp.ts,
+                    }
         )
     except Exception:
         pass
     return resp
+
+
+@router.post("/trade/preview", response_model=TradePreviewResponse)
+def trade_preview(
+    order: TradeRequest,
+    horizon_minutes: Optional[int] = Query(None, ge=1, le=10080),
+    regime: Optional[str] = Query(None),
+) -> TradePreviewResponse:
+    """
+    What it does:
+    - Builds a market-style preview for a prospective crypto order without sending it.
+
+    Why it exists:
+    - Let the UI show fill/slippage/risk before the user confirms BUY/SELL.
+
+    Called from ->
+    - Crypto trade preview card and order confirmation flow
+
+    Notes:
+    - No trade log is written here.
+    - The result reuses the same execution profile used by live/test/simulated trades.
+    """
+    preview = _build_trade_preview(order=order, horizon_minutes=horizon_minutes, regime=regime)
+    return TradePreviewResponse(**preview)
 
 
 @router.get("/symbols/meta")
@@ -2353,56 +3866,114 @@ def get_pnl(
         raise HTTPException(status_code=500, detail=f"Error computing P&L: {exc}") from exc
 
 
+@router.get("/state")
+def crypto_state(
+    symbol: Optional[str] = Query(None),
+    engine: Optional[str] = Query("all", description="all | trained | demo"),
+    horizon_minutes: Optional[int] = Query(None, ge=1, le=10080),
+    regime: Optional[str] = Query(None),
+    execution_mode: Optional[Literal["simulated", "testnet", "live"]] = Query(
+        None,
+        description="Requested execution mode for the crypto panel snapshot",
+    ),
+    limit: int = Query(20, ge=1, le=200),
+    trade_limit: int = Query(100, ge=1, le=500),
+    leaderboard_limit: int = Query(10, ge=1, le=50),
+) -> Dict[str, Any]:
+    """Return a unified crypto snapshot for chart/chat/trade consumers."""
+    try:
+        return _crypto_state_snapshot_payload(
+            symbol=symbol,
+            engine=engine,
+            horizon_minutes=horizon_minutes,
+            regime=regime,
+            execution_mode=execution_mode,
+            limit=int(_query_default_value(limit) or 20),
+            trade_limit=int(_query_default_value(trade_limit) or 100),
+            leaderboard_limit=int(_query_default_value(leaderboard_limit) or 10),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Error building crypto state: {exc}") from exc
+
+
+@router.get("/stream")
+async def crypto_state_stream(
+    request: Request,
+    symbol: Optional[str] = Query(None),
+    engine: Optional[str] = Query("all", description="all | trained | demo"),
+    horizon_minutes: Optional[int] = Query(None, ge=1, le=10080),
+    regime: Optional[str] = Query(None),
+    execution_mode: Optional[Literal["simulated", "testnet", "live"]] = Query(
+        None,
+        description="Requested execution mode for the crypto panel stream",
+    ),
+    limit: int = Query(20, ge=1, le=200),
+    trade_limit: int = Query(100, ge=1, le=500),
+    leaderboard_limit: int = Query(10, ge=1, le=50),
+    interval_seconds: float = Query(5.0, ge=1.0, le=60.0),
+) -> StreamingResponse:
+    """Stream crypto snapshots so the panel can stay in sync without polling."""
+
+    async def event_stream():
+        last_signature = ""
+        emitted_any_snapshot = False
+        scope_symbol = str(symbol or "").strip().upper() or None
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                snapshot = _crypto_state_snapshot_payload(
+                    symbol=symbol,
+                    engine=engine,
+                    horizon_minutes=horizon_minutes,
+                    regime=regime,
+                    execution_mode=execution_mode,
+                    limit=int(_query_default_value(limit) or 20),
+                    trade_limit=int(_query_default_value(trade_limit) or 100),
+                    leaderboard_limit=int(_query_default_value(leaderboard_limit) or 10),
+                )
+                signature = _crypto_state_signature(snapshot)
+                if not emitted_any_snapshot or signature != last_signature:
+                    emitted_any_snapshot = True
+                    last_signature = signature
+                    yield f"event: crypto_state\ndata: {json.dumps(snapshot, default=str, separators=(',', ':'))}\n\n"
+                else:
+                    heartbeat = {
+                        "type": "heartbeat",
+                        "ts": int(time.time()),
+                        "symbol": scope_symbol,
+                        "scope": snapshot.get("scope"),
+                        "summary": snapshot.get("summary"),
+                    }
+                    yield f"event: heartbeat\ndata: {json.dumps(heartbeat, default=str, separators=(',', ':'))}\n\n"
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:  # noqa: BLE001
+                heartbeat = {
+                    "type": "heartbeat",
+                    "ts": int(time.time()),
+                    "symbol": scope_symbol,
+                    "error": str(exc),
+                }
+                yield f"event: heartbeat\ndata: {json.dumps(heartbeat, default=str, separators=(',', ':'))}\n\n"
+            await asyncio.sleep(float(interval_seconds))
+
+    headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
+
+
 @router.post("/predictions/evaluate")
 def evaluate_predictions(
     limit: int = Query(400, ge=10, le=2000),
 ) -> Dict[str, Any]:
     try:
-        preds = list_predictions(limit=limit)
-        outs = list_outcomes(limit=limit * 2)
-        already = {o.get("log_id") for o in outs if o.get("log_id")}
-        now_ts = int(time.time())
-        evaluated = 0
-        for p in preds:
-            pid = p.get("id")
-            if not pid or pid in already:
-                continue
-            horizon = int(p.get("horizon_minutes") or 0)
-            ts = int(p.get("ts") or 0)
-            if horizon <= 0 or ts <= 0 or now_ts - ts < horizon * 60:
-                continue
-            sym = (p.get("symbol") or "").upper()
-            if not sym:
-                continue
-            live = _binance_spot_price(sym) or p.get("current_price")
-            if live is None:
-                continue
-            current = p.get("current_price") or live
-            decision = p.get("decision") or "HOLD"
-            delta_pct = (live - current) / current if current else 0.0
-            hit = None
-            if decision == "BUY":
-                hit = live > current
-            elif decision == "SELL":
-                hit = live < current
-            elif decision == "HOLD":
-                hit = abs(delta_pct) < 0.01
-            log_outcome(
-                {
-                    "log_id": pid,
-                    "symbol": sym,
-                    "horizon_minutes": horizon,
-                    "decision": decision,
-                    "probability_up": p.get("probability_up"),
-                    "model": p.get("model"),
-                    "predicted_price": current,
-                    "actual_price": live,
-                    "delta_pct": delta_pct,
-                    "hit": hit,
-                }
-            )
-            evaluated += 1
-        return {"evaluated": evaluated}
+        return reconcile_due_predictions(price_lookup=_binance_spot_price, limit=limit)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Error evaluando predicciones: {exc}") from exc
 

@@ -26,7 +26,7 @@ def _embedding_status() -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         return {"status": "disabled", "detail": str(exc)}
     try:
-        return embedding_service.get_embedding_status(ensure_loaded=True)
+        return embedding_service.get_embedding_status(ensure_loaded=False)
     except Exception as exc:  # noqa: BLE001
         return {"status": "error", "detail": str(exc)}
 

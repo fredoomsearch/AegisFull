@@ -18,6 +18,7 @@ WINDOW_SECONDS="${AEGIS_CONTRACT_WINDOW_SECONDS:-900}"
 RUN_SOAK=0
 DURATION_HOURS="${AEGIS_SOAK_HOURS:-4}"
 PRECHECK_ONLY=0
+SYNC_RELEASE_BOARD="${AEGIS_SYNC_RELEASE_BOARD:-0}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -40,6 +41,10 @@ while [[ $# -gt 0 ]]; do
     --duration-hours)
       DURATION_HOURS="$2"
       shift 2
+      ;;
+    --sync-release-board)
+      SYNC_RELEASE_BOARD=1
+      shift
       ;;
     --precheck-only)
       PRECHECK_ONLY=1
@@ -85,6 +90,7 @@ echo "  out_dir=${OUT_DIR}"
 echo "  run_soak=${RUN_SOAK}"
 echo "  duration_hours=${DURATION_HOURS}"
 echo "  precheck_only=${PRECHECK_ONLY}"
+echo "  sync_release_board=${SYNC_RELEASE_BOARD}"
 
 echo "[run] doctor (core)"
 if ! "$PYTHON_BIN" -m app.scripts.doctor \
@@ -168,6 +174,21 @@ curl -fsS -H "X-API-Key: ${API_KEY}" "${BASE_URL}/system/snapshot" > "${OUT_DIR}
 curl -fsS -H "X-API-Key: ${API_KEY}" "${BASE_URL}/system/metrics?window_seconds=${WINDOW_SECONDS}" > "${OUT_DIR}/system_metrics.json"
 curl -fsS -H "X-API-Key: ${API_KEY}" "${BASE_URL}/system/readyz" > "${OUT_DIR}/system_readyz.json"
 
+echo "[run] release evidence summary (core)"
+"$PYTHON_BIN" -m app.scripts.release_evidence_summary \
+  --bundle-dir "${OUT_DIR}" \
+  --track core \
+  --json \
+  | tee "${OUT_DIR}/release_summary.json"
+
+if [[ "$SYNC_RELEASE_BOARD" == "1" ]]; then
+  echo "[run] release_board_sync"
+  "$PYTHON_BIN" -m app.scripts.release_board_sync \
+    --board-path "${ROOT_DIR}/docs/release_board.md" \
+    --evidence-root "artifacts/release_evidence" \
+    --core-evidence-root "${OUT_ROOT}"
+fi
+
 cat > "${OUT_DIR}/run_meta.txt" <<EOF
 timestamp=${TS}
 base_url=${BASE_URL}
@@ -176,6 +197,7 @@ product_track=core
 run_soak=${RUN_SOAK}
 duration_hours=${DURATION_HOURS}
 window_seconds=${WINDOW_SECONDS}
+sync_release_board=${SYNC_RELEASE_BOARD}
 EOF
 
 echo "[ok] core evidence bundle ready: ${OUT_DIR}"

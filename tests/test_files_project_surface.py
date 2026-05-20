@@ -12,7 +12,7 @@ from app.services import project_store
 from app.services.project_manifest import save_project_manifest
 
 
-def test_files_tree_content_and_delete_project():
+def test_files_tree_content_and_delete_project(monkeypatch: pytest.MonkeyPatch):
     root = Path("data/uploads") / f"surface_{uuid.uuid4().hex[:8]}"
     (root / "app").mkdir(parents=True, exist_ok=True)
     (root / "app" / "service.py").write_text("def login():\n    return 'ok'\n", encoding="utf-8")
@@ -57,6 +57,12 @@ def test_files_tree_content_and_delete_project():
     save_project_manifest(root, root.name, chunk_count=10, chunked_files=9)
     project_id = root.name
     project_store.register_project(project_id, root, source="upload-zip", status="uploaded")
+    removed_projects: list[str] = []
+    monkeypatch.setattr(
+        files_api,
+        "remove_project_documents",
+        lambda value: removed_projects.append(value) or 7,
+    )
 
     try:
         tree = asyncio.run(files_api.project_tree(project_id=project_id, max_depth=3))
@@ -296,18 +302,26 @@ def test_files_tree_content_and_delete_project():
 
         deleted = asyncio.run(files_api.delete_project_endpoint(files_api.DeleteProjectRequest(project_id=project_id)))
         assert deleted["status"] == "ok"
+        assert deleted["retrieval_removed"] == 7
         assert not root.exists()
         assert project_store.get_project(project_id) is None
+        assert removed_projects == [project_id]
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
 
-def test_register_root_workspace_only_unregisters():
+def test_register_root_workspace_only_unregisters(monkeypatch: pytest.MonkeyPatch):
     root = Path("tmp") / f"workspace_proj_{uuid.uuid4().hex[:8]}"
     (root / "app").mkdir(parents=True, exist_ok=True)
     (root / "app" / "service.py").write_text("def login():\n    return 'ok'\n", encoding="utf-8")
     save_project_manifest(root, root.name, chunk_count=2, chunked_files=1)
     project_id = "workspace_proj"
+    removed_projects: list[str] = []
+    monkeypatch.setattr(
+        files_api,
+        "remove_project_documents",
+        lambda value: removed_projects.append(value) or 2,
+    )
 
     try:
         registered = asyncio.run(files_api.register_root(files_api.RegisterRootRequest(path=str(root), project_id=project_id)))
@@ -326,8 +340,36 @@ def test_register_root_workspace_only_unregisters():
         assert deleted["status"] == "ok"
         assert deleted["deleted_path"] is False
         assert deleted["unregistered_only"] is True
+        assert deleted["retrieval_removed"] == 2
         assert root.exists()
         assert project_store.get_project(project_id) is None
+        assert removed_projects == [project_id]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        project_store.delete_project(project_id)
+
+
+def test_delete_project_by_id_allows_unregister_only_for_external_root(monkeypatch: pytest.MonkeyPatch):
+    root = Path("/tmp") / f"external_proj_{uuid.uuid4().hex[:8]}"
+    root.mkdir(parents=True, exist_ok=True)
+    project_id = f"external_{uuid.uuid4().hex[:8]}"
+    removed_projects: list[str] = []
+    monkeypatch.setattr(
+        files_api,
+        "remove_project_documents",
+        lambda value: removed_projects.append(value) or 0,
+    )
+    project_store.register_project(project_id, root, source="workspace", status="uploaded")
+
+    try:
+        deleted = asyncio.run(files_api.delete_project_endpoint(files_api.DeleteProjectRequest(project_id=project_id)))
+        assert deleted["status"] == "ok"
+        assert deleted["deleted_path"] is False
+        assert deleted["unregistered_only"] is True
+        assert deleted["project_id"] == project_id
+        assert root.exists()
+        assert project_store.get_project(project_id) is None
+        assert removed_projects == [project_id]
     finally:
         shutil.rmtree(root, ignore_errors=True)
         project_store.delete_project(project_id)

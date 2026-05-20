@@ -139,6 +139,30 @@ def test_web_mode_with_attachment_context_stays_local_only():
     assert source_plan == "local_only"
 
 
+def test_repo_file_prompt_without_active_project_stays_local_only():
+    source_plan = chat_api._decide_source_plan(
+        "read main.py",
+        mode_value="chat",
+        force_web=False,
+        is_crypto_mode=False,
+        has_active_project=False,
+        session_state={},
+    )
+    assert source_plan == "local_only"
+
+
+def test_repo_tree_prompt_without_active_project_stays_local_only():
+    source_plan = chat_api._decide_source_plan(
+        "show files inside repo",
+        mode_value="chat",
+        force_web=False,
+        is_crypto_mode=False,
+        has_active_project=False,
+        session_state={},
+    )
+    assert source_plan == "local_only"
+
+
 def test_missing_evidence_skips_attachment_context_questions():
     resp = chat_api._maybe_missing_evidence_response(
         "what is that image?\n\n[Attachment context image: trust1.png]\nDetected text: example",

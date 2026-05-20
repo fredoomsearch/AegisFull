@@ -1,3 +1,10 @@
+FALTA
+Crypto/demo/analysis: faltan 3-4%
+Crypto para testnet serio: faltan 10-12%
+Crypto para live real con Binance: faltan 15-20%
+Seguridad/auth actual del sistema: faltan 5-8%
+
+
 # AegisChat
 
 AegisChat is a local-first conversational runtime with grounded chat, project-aware retrieval, controlled web augmentation, image/OCR flows, and a crypto lab. The runtime supports `standard|strict` profiles and `core|full` product tracks.

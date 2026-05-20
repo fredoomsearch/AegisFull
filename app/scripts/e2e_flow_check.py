@@ -40,6 +40,9 @@ class Transport(ABC):
 
 
 class RequestsTransport(Transport):
+    def __init__(self) -> None:
+        self._session = requests.Session()
+
     def request(
         self,
         method: str,
@@ -51,7 +54,7 @@ class RequestsTransport(Transport):
         params: Optional[dict] = None,
         timeout: float = 30.0,
     ):
-        return requests.request(
+        return self._session.request(
             method=method,
             url=url,
             headers=headers,
@@ -115,10 +118,14 @@ class ClientCtx:
     api_key: str
     files_api_key: str
     transport: Transport
+    cookie_auth: bool = False
+    auth_scopes: list[str] = field(default_factory=list)
+    auth_cookie_exp: int = 0
     access_token: str = ""
     refresh_token: str = ""
     uploaded_path: str = ""
     uploaded_project_id: str = ""
+    uploaded_ingest_job_id: str = ""
     conversation_id: str = ""
     strict_capabilities: bool = False
     cleanup_artifacts: bool = True
@@ -127,10 +134,8 @@ class ClientCtx:
     def _headers(self, *, files_scope: bool = False, json_body: bool = True) -> Dict[str, str]:
         out: Dict[str, str] = {}
         key = self.files_api_key if files_scope else self.api_key
-        if key:
+        if key and not self.cookie_auth:
             out["X-API-Key"] = key
-        if self.access_token:
-            out["Authorization"] = f"Bearer {self.access_token}"
         if json_body:
             out["Content-Type"] = "application/json"
         return out
@@ -219,10 +224,13 @@ def check_auth_token(ctx: ClientCtx) -> bool:
     body = {"scopes": ["chat", "files", "crypto"], "refresh": True}
     r = ctx.request("POST", "/auth/token", json_body=body)
     data = _json_or_text(r)
-    if r.status_code == 200 and isinstance(data, dict) and data.get("access_token"):
-        ctx.access_token = str(data.get("access_token") or "")
-        ctx.refresh_token = str(data.get("refresh_token") or "")
-        _print_ok("auth/token", "token issued")
+    if r.status_code == 200 and isinstance(data, dict) and data.get("cookie_auth"):
+        ctx.cookie_auth = True
+        ctx.auth_scopes = [str(s).strip() for s in (data.get("scopes") or []) if str(s).strip()]
+        ctx.auth_cookie_exp = int(time.time()) + int(data.get("expires_in") or 1800)
+        ctx.access_token = ""
+        ctx.refresh_token = ""
+        _print_ok("auth/token", "cookie session issued")
         return True
     _print_fail("auth/token", f"status={r.status_code} body={data}")
     return False
@@ -485,6 +493,8 @@ def check_upload_and_ingest(ctx: ClientCtx) -> bool:
 
     ctx.uploaded_path = str(data.get("path") or "")
     ctx.uploaded_project_id = str(data.get("project_id") or "")
+    auto_ingest = data.get("auto_ingest") if isinstance(data.get("auto_ingest"), dict) else {}
+    ctx.uploaded_ingest_job_id = str(auto_ingest.get("job_id") or ctx.uploaded_ingest_job_id or "")
     _print_ok("files/upload-zip", f"path={ctx.uploaded_path}")
 
     r2 = ctx.request(
@@ -618,6 +628,17 @@ def check_project_context(ctx: ClientCtx) -> bool:
     response = str((data3 or {}).get("response") or "") if isinstance(data3, dict) else ""
     context = (data3 or {}).get("context") if isinstance(data3, dict) else None
     source_origin = context.get("source_origin") if isinstance(context, dict) else []
+    response_lower = response.lower()
+    response_has_project_summary = any(
+        marker in response_lower
+        for marker in (
+            "detected layers",
+            "top directories",
+            "folder breakdown",
+            "likely entrypoints",
+            "config/infra files",
+        )
+    ) or ctx.uploaded_project_id.lower() in response_lower
     if _looks_like_internal_leak(response):
         _print_fail("project-context", "internal-prompt-leak-detected")
         return False
@@ -628,6 +649,7 @@ def check_project_context(ctx: ClientCtx) -> bool:
         and str(context.get("active_project_id") or "") == ctx.uploaded_project_id
         and "manifest" in list(source_origin or [])
         and str(context.get("web_status") or "") == "not-used"
+        and response_has_project_summary
     ):
         r4 = ctx.request(
             "POST",
@@ -666,6 +688,16 @@ def check_project_context(ctx: ClientCtx) -> bool:
             _print_fail("agent_run", f"status={r5.status_code} body={data5}")
             return False
         _print_ok("agent_run", "ok")
+        _print_ok("project-context", f"project={ctx.uploaded_project_id}")
+        return True
+    if (
+        r3.status_code == 200
+        and isinstance(context, dict)
+        and str(context.get("active_project_id") or "") == ctx.uploaded_project_id
+        and "manifest" in list(source_origin or [])
+        and str(context.get("web_status") or "") == "not-used"
+        and response_has_project_summary
+    ):
         _print_ok("project-context", f"project={ctx.uploaded_project_id}")
         return True
     _print_fail("project-context", f"status={r3.status_code} body={data3}")

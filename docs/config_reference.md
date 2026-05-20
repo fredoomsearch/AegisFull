@@ -121,10 +121,42 @@ Optional readyz probing:
 
 ## Crypto
 
+- `BINANCE_EXECUTION_MODE=simulated|testnet|live`
 - `BINANCE_LIVE=1`
 - `BINANCE_LIVE_TRADING=1`
 - `BINANCE_API_KEY`
 - `BINANCE_API_SECRET`
+
+### One-Symbol Testnet Rehearsal
+
+- Keep `BINANCE_EXECUTION_MODE=testnet`.
+- Provide `BINANCE_API_KEY` and `BINANCE_API_SECRET` for Binance testnet only.
+- Keep `BINANCE_LIVE_TRADING=0` so live order placement stays disabled.
+- Run one symbol and one horizon at a time; use the crypto preview first and only confirm after the risk gate is green.
+- If the preview is blocked with calibration sizing guidance, use the suggested lower qty path before retrying the order.
+- To include this lane inside the full release evidence bundle, set `AEGIS_RUN_CRYPTO_TESTNET_REHEARSAL=1` before running `run_full_release_evidence.sh`.
+- Optional: set `AEGIS_CRYPTO_REHEARSAL_SUBMIT=1` to allow `/crypto/trade` submission when the preview remains allowed in effective testnet mode.
+- Optional: set `AEGIS_SYNC_RELEASE_BOARD=1` to refresh `docs/release_board.md` from the latest full evidence bundle after `release_summary.json` is written.
+- The same `AEGIS_SYNC_RELEASE_BOARD=1` flag can also be used with `run_core_release_evidence.sh`; the board sync now updates both the latest full and latest core snapshot blocks.
+
+Example:
+
+```bash
+venv/bin/python app/scripts/crypto_testnet_rehearsal.py \
+	--base-url http://127.0.0.1:8000 \
+	--symbol BTCUSDT \
+	--side BUY \
+	--quantity 0.001 \
+	--horizon-minutes 15 \
+	--execution-mode testnet \
+	--submit-if-allowed
+```
+
+- The script archives JSON and Markdown evidence under `artifacts/release_evidence/crypto_testnet_rehearsal/`.
+- If Binance testnet credentials are missing, the preview will record the effective fallback mode instead of pretending the rehearsal was real testnet execution.
+- When the rehearsal is archived under a full evidence bundle, `app.scripts.release_evidence_summary` will include it automatically.
+- `python -m app.scripts.release_board_sync --print-only` shows the generated board snapshot without editing the markdown file.
+- `python -m app.scripts.release_board_sync --track core --print-only` prints only the generated core snapshot block.
 
 ## Startup / Verification
 

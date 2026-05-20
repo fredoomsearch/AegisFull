@@ -893,6 +893,17 @@ def _derive_planner_state(
     asks_excerpt = any(term in lowered for term in ("show", "read", "open", "inside", "contenido", "content", "explain", "code", "inspect", "analiza", "analyze"))
     asks_location = any(term in lowered for term in ("where", "donde", "dónde", "which file", "archivo", "path", "ruta"))
     asks_fresh = any(term in lowered for term in ("latest", "current", "docs", "documentation", "version", "package", "library"))
+    imperative_project_analysis = bool(
+        explicit_project_scope
+        and not is_question_like(user_message)
+        and (
+            asks_tree
+            or asks_manifest
+            or asks_excerpt
+            or asks_location
+            or any(term in lowered for term in ("active project", "this project", "proyecto activo", "este proyecto", "repo", "repository", "codebase"))
+        )
+    )
 
     file_focus = _extract_file_focus(user_message) or (
         _parent_directory_focus(current_file_focus) if tree_expansion_followup else current_file_focus
@@ -920,7 +931,7 @@ def _derive_planner_state(
             next_tool = "project_manifest"
 
     needs_project_binding = explicit_project_scope or asks_tree or asks_manifest or (asks_location and project_intent)
-    if is_question_like(user_message) and not has_active_project and needs_project_binding:
+    if (is_question_like(user_message) or imperative_project_analysis) and not has_active_project and needs_project_binding:
         missing_evidence.append("active_project")
     if asks_fresh and not state.get("last_web_query"):
         missing_evidence.append("fresh_web_context")

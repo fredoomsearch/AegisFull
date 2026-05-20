@@ -18,7 +18,6 @@ const CHAT_MAX_TIMEOUT_MS = 0;
 const AUTH_RETRY_BASE_MS = 1500;
 const AUTH_RETRY_MAX_MS = 30000;
 const RESET_CONV_ON_LOAD = false;
-const TRADE_TEST_DEFAULT = false; // keep trades educational unless you flip it server-side
 // Keep all explicit modes visible by default (chat/web/url/crypto/image).
 const CHAT_ONLY_EXPERIENCE = false;
 // Keep agent internals available server-side, but hide agent-centric UI controls by default.
@@ -42,6 +41,7 @@ const endpoints = {
   cryptoModels: "/crypto/models",
   cryptoOhlcv: "/crypto/ohlcv",
   cryptoTrade: "/crypto/trade",
+  cryptoTradePreview: "/crypto/trade/preview",
   cryptoTrades: "/crypto/trades",
   cryptoTradesClear: "/crypto/trades",
   cryptoPnl: "/crypto/pnl",
@@ -54,6 +54,8 @@ const endpoints = {
   cryptoPredictionsClear: "/crypto/predictions",
   cryptoModelsRegistry: "/crypto/models/registry",
   cryptoSymbolsMeta: "/crypto/symbols/meta",
+  cryptoState: "/crypto/state",
+  cryptoStateStream: "/crypto/stream",
   adminRefresh: "/admin/refresh-crypto",
   adminRefreshLog: "/admin/refresh-log",
   adminCancelAll: "/admin/cancel-all",
@@ -71,6 +73,7 @@ const endpoints = {
   systemReadyz: "/system/readyz",
   systemDemoCheck: "/system/demo_check",
   systemShutdown: "/system/shutdown",
+  authLogout: "/auth/logout",
 
   filesTree: "/files/tree",
   filesContent: "/files/content",
@@ -133,11 +136,58 @@ const cleanKey = (k) =>
     .map((s) => s.trim())
     .filter(Boolean)[0] || "";
 
+function readJsonStorage(key, fallback) {
+  try {
+    const raw = readSecretItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+
+function readSecretItem(key) {
+  const k = String(key || "").trim();
+  if (!k) return "";
+  try {
+    const sessionValue = sessionStorage.getItem(k) || "";
+    if (sessionValue) return sessionValue;
+    const legacyValue = localStorage.getItem(k) || "";
+    if (legacyValue) {
+      sessionStorage.setItem(k, legacyValue);
+      localStorage.removeItem(k);
+    }
+    return legacyValue;
+  } catch {
+    try {
+      return sessionStorage.getItem(k) || "";
+    } catch {
+      return "";
+    }
+  }
+}
+
+function writeSecretItem(key, value) {
+  const k = String(key || "").trim();
+  if (!k) return;
+  try {
+    if (value) sessionStorage.setItem(k, String(value));
+    else sessionStorage.removeItem(k);
+  } catch {}
+  try {
+    localStorage.removeItem(k);
+  } catch {}
+}
+
 function hasMainApiKey() {
+  if (state.cookieAuth) return Array.isArray(state.authScopes) ? state.authScopes.length > 0 : false;
   return !!cleanKey(state.apiKey);
 }
 
 function hasFilesApiKey() {
+  if (state.cookieAuth) {
+    return Array.isArray(state.authScopes) && state.authScopes.includes("files");
+  }
   return !!cleanKey(state.filesApiKey || state.apiKey);
 }
 
@@ -150,8 +200,11 @@ const state = {
   lang: localStorage.getItem("aegis_lang") || LANG.ES,
   conversationId: localStorage.getItem("aegis_conv") || null,
   useExistingConversation: localStorage.getItem("aegis_use_existing") === "1",
-  apiKey: cleanKey(localStorage.getItem("aegis_api_key")),
-  filesApiKey: cleanKey(localStorage.getItem("aegis_files_api_key") || localStorage.getItem("aegis_api_key")),
+  apiKey: cleanKey(readSecretItem("aegis_api_key")),
+  filesApiKey: cleanKey(readSecretItem("aegis_files_api_key") || readSecretItem("aegis_api_key")),
+  cookieAuth: readSecretItem("aegis_cookie_auth") === "1",
+  authScopes: readJsonStorage("aegis_auth_scopes", []),
+  authCookieExp: Number(readSecretItem("aegis_auth_cookie_exp") || "0"),
   imageReferenceFile: null,
   chatAttachment: null,
   chatAttachmentAutoWeb: JSON.parse(localStorage.getItem("aegis_attachment_auto_web") || "true"),
@@ -192,14 +245,21 @@ const state = {
   cryptoModelRegistry: [],
   cryptoSymbolMeta: null,
   selectedCryptoModel: "ensemble",
+  cryptoExecutionMode: localStorage.getItem("aegis_crypto_execution_mode") || "simulated",
+  cryptoPreviewSide: localStorage.getItem("aegis_crypto_preview_side") || "BUY",
+  cryptoState: null,
+  cryptoTradePreview: null,
+  cryptoTradePreviewPendingOrder: null,
+  cryptoTradePreviewArmed: false,
   cryptoStatsEngine: localStorage.getItem("aegis_crypto_stats_engine") || "trained",
   cryptoThresholdRec: null,
   cryptoCredibility: null,
   cryptoLeaderboard: [],
   lastPrediction: null,
+  lastTradeQuote: null,
   savePredictions: JSON.parse(localStorage.getItem("aegis_save_preds") || "true"),
   alertsOn: JSON.parse(localStorage.getItem("aegis_alerts") || "false"),
-  showNewsMarkers: true,
+  showNewsMarkers: localStorage.getItem("aegis_show_news_markers") === "1",
   newsProvider: null,
   chatSideVisible: false,
   layoutCollapsed: localStorage.getItem("aegis_layout_collapsed") === "1",
@@ -246,6 +306,24 @@ const state = {
   alertsInFlight: false,
   cryptoPredictionInFlight: false,
   cryptoPredictionQueued: false,
+  cryptoStateInFlight: false,
+  cryptoStateQueued: false,
+  cryptoStateTimer: null,
+  cryptoStateStreamActive: false,
+  cryptoStateStreamInFlight: false,
+  cryptoStateStreamController: null,
+  cryptoStateStreamReconnectTimer: null,
+  cryptoStateStreamKey: "",
+  cryptoStateStreamFailures: 0,
+  cryptoStateStreamLastHeartbeatAt: 0,
+  cryptoStateStreamFallbackActive: false,
+  cryptoTradePreviewInFlight: false,
+  cryptoTradePreviewQueued: false,
+  cryptoTradePreviewTimer: null,
+  lastCryptoStateAt: 0,
+  lastCryptoStateKey: "",
+  lastCryptoTradePreviewAt: 0,
+  lastCryptoTradePreviewKey: "",
   lastCryptoPredictionAt: 0,
   lastCryptoPredictionKey: "",
 
@@ -276,9 +354,9 @@ const state = {
   activeProjectImpact: null,
   lastSnapshot: null,
   lastChatContext: null,
-  accessToken: localStorage.getItem("aegis_access_token") || "",
-  refreshToken: localStorage.getItem("aegis_refresh_token") || "",
-  tokenExp: Number(localStorage.getItem("aegis_token_exp") || "0"), // epoch seconds
+  accessToken: "",
+  refreshToken: "",
+  tokenExp: 0,
   authDiag: {
     failures: 0,
     lastError: null,
@@ -308,6 +386,7 @@ document.addEventListener("DOMContentLoaded", () => {
     void loadCryptoSymbolsMeta().then(() => loadSymbolsList(dom.chartSymbol?.value || ""));
     startTokenAutoRefresh();
     startReadyzPolling();
+    document.addEventListener("visibilitychange", updateCryptoStatePolling);
     applyLayoutCollapsed();
     if (state.autoSnapshotEnabled) scheduleSnapshot(1500);
   } catch (err) {
@@ -331,7 +410,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
 function applyAuthState() {
   const es = state.lang === LANG.ES;
-  const missingKey = !String(state.apiKey || "").trim();
+  const missingKey = !hasAuthForScope("main");
   // Do not hard-disable primary actions when the key is missing: it confuses users ("nothing happens").
   // Instead, let clicks open the API key modal and show a clear message.
   const disabled = !!state.pending;
@@ -339,7 +418,7 @@ function applyAuthState() {
     dom.sendBtn.disabled = disabled;
     dom.sendBtn.classList.toggle("requires-key", missingKey);
     dom.sendBtn.title = missingKey
-      ? (es ? "Configura tu API key (🔑) para enviar." : "Set your API key (🔑) to send.")
+      ? (es ? "Configura tu clave de arranque (🔑) para autenticar." : "Set your bootstrap key (🔑) to authenticate.")
       : "";
   }
   if (dom.stopBtn) {
@@ -356,8 +435,8 @@ function applyAuthState() {
     state.authHintShown = true;
     appendBubble(
       es
-        ? "Configura tu API key (ícono 🔑 arriba) para usar Chat/Files. Sin clave, la UI carga pero el backend responderá 401."
-        : "Set your API key (🔑 icon) to use Chat/Files. Without a key, the UI loads but the backend will return 401.",
+        ? "Configura tu clave de arranque (ícono 🔑 arriba) para usar Chat/Files. La UI guarda solo una sesión HttpOnly y limpia la clave luego del bootstrap."
+        : "Set your bootstrap key (🔑 icon) to use Chat/Files. The UI keeps only an HttpOnly session and clears the key after bootstrap.",
       "error"
     );
     // Reduce confusion: if the modal exists, open it once automatically.
@@ -372,14 +451,13 @@ function applyAuthState() {
 }
 
 function ensureApiKeyOrPrompt({ action = "chat" } = {}) {
-  const missingKey = !String(state.apiKey || "").trim();
-  if (!missingKey) return true;
+  if (hasAuthForScope("main")) return true;
 
   const es = state.lang === LANG.ES;
   appendBubble(
     es
-      ? `Falta API key. Abre 🔑 y configura tu key para continuar (${action}).`
-      : `Missing API key. Open 🔑 and set your key to continue (${action}).`,
+      ? `Falta la clave de arranque. Abre 🔑 para continuar (${action}).`
+      : `Missing bootstrap key. Open 🔑 to continue (${action}).`,
     "error"
   );
   try {
@@ -556,8 +634,17 @@ function cacheDom() {
   dom.cryptoModelSelect = document.getElementById("cryptoModelSelect");
   dom.cryptoHorizon = document.getElementById("cryptoHorizon");
   dom.chatTradeQty = document.getElementById("chatTradeQty");
+  dom.cryptoStopLossPct = document.getElementById("cryptoStopLossPct");
+  dom.cryptoTakeProfitPct = document.getElementById("cryptoTakeProfitPct");
+  dom.cryptoMaxExposureQuote = document.getElementById("cryptoMaxExposureQuote");
+  dom.cryptoMaxOrderSizePct = document.getElementById("cryptoMaxOrderSizePct");
+  dom.cryptoRiskExplain = document.getElementById("cryptoRiskExplain");
   dom.buyBtn = document.getElementById("buyBtn");
   dom.sellBtn = document.getElementById("sellBtn");
+  dom.cryptoExecutionGroup = document.getElementById("cryptoExecutionGroup");
+  dom.cryptoExecutionMeta = document.getElementById("cryptoExecutionMeta");
+  dom.cryptoTradePreview = document.getElementById("cryptoTradePreview");
+  dom.cryptoOrderBook = document.getElementById("cryptoOrderBook");
 
   // chart
   dom.chartPanel = document.getElementById("chartPanel");
@@ -614,8 +701,8 @@ function initState() {
   } else if (dom.sessionsList) {
     dom.sessionsList.innerHTML = `<li class="sessions-empty">${
       state.lang === LANG.ES
-        ? "Auth requerida. Configura API key (🔑)."
-        : "Auth required. Set API key (🔑)."
+        ? "Auth requerida. Configura la clave de arranque (🔑)."
+        : "Auth required. Set the bootstrap key (🔑)."
     }</li>`;
   }
   if (state.conversationId && hasAuthForScope("main")) {
@@ -635,11 +722,17 @@ function initState() {
   }
   if (state.conversationId && hasAuthForScope("main")) syncConversationState(state.conversationId);
   if (dom.chatAttachmentAutoWeb) dom.chatAttachmentAutoWeb.checked = !!state.chatAttachmentAutoWeb;
+  if (dom.newsMarkersToggle) dom.newsMarkersToggle.checked = !!state.showNewsMarkers;
   updateChatAttachmentBar();
   updateImageQuickBar();
   setDebugTraceEnabled(state.debugTraceEnabled, { persist: false, silent: true });
   loadSymbolsList();
   applyChatOnlyExperience();
+  updateCryptoExecutionUI();
+  updateCryptoStatePolling();
+  if (state.chartVisible || state.mode === MODES.CRYPTO) {
+    loadCryptoState({ force: true });
+  }
 }
 
 function hideNode(node, hide = true) {
@@ -709,6 +802,7 @@ function wireUI() {
   // cancel
   // mode buttons
   dom.chatBtn?.addEventListener("click", () => setMode(MODES.CHAT));
+  dom.webBtn?.addEventListener("click", () => setMode(MODES.WEB));
   dom.urlBtn?.addEventListener("click", () => setMode(state.mode === MODES.URL ? MODES.CHAT : MODES.URL));
   dom.cryptoBtn?.addEventListener("click", () => setMode(state.mode === MODES.CRYPTO ? MODES.CHAT : MODES.CRYPTO));
   dom.imgBtn?.addEventListener("click", () => {
@@ -863,32 +957,31 @@ function wireUI() {
       const es = state.lang === LANG.ES;
       appendBubble(
         es
-          ? "UI desactualizada: no se encontró el modal de API keys. Haz hard refresh (Ctrl+Shift+R) y reinicia el servidor si hace falta. Fallback: usando prompts."
-          : "Stale UI: API key modal not found. Hard refresh (Ctrl+Shift+R) and restart the server if needed. Fallback: using prompts.",
+          ? "UI desactualizada: no se encontró el modal de arranque/auth. Haz hard refresh (Ctrl+Shift+R) y reinicia el servidor si hace falta. Fallback: usando prompts."
+          : "Stale UI: bootstrap/auth modal not found. Hard refresh (Ctrl+Shift+R) and restart the server if needed. Fallback: using prompts.",
         "error"
       );
-      const msgMain = es ? "X-API-Key (vacío para borrar):" : "X-API-Key (empty to clear):";
+      const msgMain = es ? "Clave de arranque (vacío para borrar):" : "Bootstrap key (empty to clear):";
       const next = prompt(msgMain, state.apiKey || "");
       if (next == null) return;
       state.apiKey = cleanKey(next || "");
-      if (state.apiKey) localStorage.setItem("aegis_api_key", state.apiKey);
-      else localStorage.removeItem("aegis_api_key");
 
       const msgFiles = es
-        ? "X-API-Key para Files (Enter para usar la misma):"
-        : "X-API-Key for Files (Enter to reuse main):";
+        ? "Clave de Files (Enter para usar la misma):"
+        : "Files bootstrap key (Enter to reuse main):";
       const nextFiles = prompt(msgFiles, state.filesApiKey || state.apiKey || "");
       if (nextFiles !== null) {
         const trimmed = cleanKey(nextFiles || "");
         state.filesApiKey = trimmed || state.apiKey || "";
-        if (state.filesApiKey) localStorage.setItem("aegis_files_api_key", state.filesApiKey);
-        else localStorage.removeItem("aegis_files_api_key");
       }
       clearAuthRetryCooldown();
       clearTokens();
-      refreshAuthedPanels().catch(() => {});
-      applyAuthState();
-      appendBubble(es ? "API key actualizada." : "API key updated.", "bot");
+      ensureAccessToken()
+        .then((ok) => ok ? refreshAuthedPanels().catch(() => {}) : Promise.resolve())
+        .finally(() => {
+          applyAuthState();
+          appendBubble(es ? "Clave de arranque actualizada." : "Bootstrap key updated.", "bot");
+        });
       return;
     }
     // Fill modal inputs from current state (do not show in cleartext unless user types).
@@ -911,27 +1004,21 @@ function wireUI() {
     const files = useSame ? "" : cleanKey(dom.apiKeyFilesInput?.value || "");
 
     state.apiKey = main;
-    if (state.apiKey) localStorage.setItem("aegis_api_key", state.apiKey);
-    else localStorage.removeItem("aegis_api_key");
-
     state.filesApiKey = files || state.apiKey || "";
-    if (state.filesApiKey) localStorage.setItem("aegis_files_api_key", state.filesApiKey);
-    else localStorage.removeItem("aegis_files_api_key");
 
     clearAuthRetryCooldown();
     clearTokens();
+    await ensureAccessToken();
     await refreshAuthedPanels().catch(() => {});
     applyAuthState();
     closeModal(dom.apiKeyModal);
-    appendBubble(state.lang === LANG.ES ? "API key actualizada." : "API key updated.", "bot");
+    appendBubble(state.lang === LANG.ES ? "Clave de arranque actualizada." : "Bootstrap key updated.", "bot");
   });
-  dom.apiKeyClear?.addEventListener("click", () => {
+  dom.apiKeyClear?.addEventListener("click", async () => {
     state.apiKey = "";
     state.filesApiKey = "";
-    localStorage.removeItem("aegis_api_key");
-    localStorage.removeItem("aegis_files_api_key");
     clearAuthRetryCooldown();
-    clearTokens();
+    await logoutAuthSession();
     stopConversationEventsPolling();
     applyAuthState();
     closeModal(dom.apiKeyModal);
@@ -1054,6 +1141,7 @@ function wireUI() {
     if (state.chartVisible) {
       loadPredictionComparison(dom.chartSymbol?.value, { force: true });
     }
+    loadCryptoTradePreview({ side: state.cryptoPreviewSide || "BUY", force: true });
   });
   dom.chartSymbol?.addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
@@ -1062,9 +1150,13 @@ function wireUI() {
     if (state.chartVisible) {
       loadPredictionComparison(dom.chartSymbol?.value, { force: true });
     }
+    loadCryptoTradePreview({ side: state.cryptoPreviewSide || "BUY", force: true });
   });
   dom.chartSymbol?.addEventListener("input", () => {
     loadSymbolsList(dom.chartSymbol?.value || "");
+    if (state.chartVisible || state.mode === MODES.CRYPTO) {
+      scheduleCryptoTradePreviewRefresh({ force: false, side: state.cryptoPreviewSide || "BUY" });
+    }
   });
   dom.chartRangeButtons?.forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -1085,22 +1177,46 @@ function wireUI() {
   dom.chartLive?.addEventListener("change", () => (dom.chartLive.checked ? startLiveChart() : stopLiveChart()));
   dom.newsMarkersToggle?.addEventListener("change", () => {
     state.showNewsMarkers = !!dom.newsMarkersToggle.checked;
+    localStorage.setItem("aegis_show_news_markers", state.showNewsMarkers ? "1" : "0");
     if (state.lastPoints?.length) renderChart(state.lastPoints);
   });
 
-  dom.buyBtn?.addEventListener("click", () => submitTrade("BUY"));
-  dom.sellBtn?.addEventListener("click", () => submitTrade("SELL"));
+  dom.buyBtn?.addEventListener("click", () => requestCryptoTradePreview("BUY"));
+  dom.sellBtn?.addEventListener("click", () => requestCryptoTradePreview("SELL"));
+  dom.cryptoExecutionGroup?.addEventListener("click", (event) => {
+    const btn = event.target?.closest?.("[data-execution-mode]");
+    if (!btn) return;
+    const mode = normalizeCryptoExecutionMode(btn.dataset.executionMode || btn.getAttribute("data-execution-mode"));
+    state.cryptoExecutionMode = mode;
+    localStorage.setItem("aegis_crypto_execution_mode", mode);
+    updateCryptoExecutionUI();
+    loadCryptoState({ force: true });
+    loadCryptoPrediction({ force: true });
+    loadCryptoTradePreview({ side: state.cryptoPreviewSide || "BUY", force: true });
+  });
 
   dom.cryptoModelSelect?.addEventListener("change", () => {
     state.selectedCryptoModel = dom.cryptoModelSelect.value || "ensemble";
     localStorage.setItem("aegis_crypto_model", state.selectedCryptoModel);
     loadCryptoPrediction({ force: true });
+    loadCryptoState({ force: true });
+    loadCryptoTradePreview({ side: state.cryptoPreviewSide || "BUY", force: true });
   });
   dom.cryptoHorizon?.addEventListener("change", () => {
     loadCryptoPrediction({ force: true });
     loadPredictionComparison(dom.chartSymbol?.value || state.chartSymbol, { force: true });
+    loadCryptoState({ force: true });
+    loadCryptoTradePreview({ side: state.cryptoPreviewSide || "BUY", force: true });
   });
-  dom.chatTradeQty?.addEventListener("change", () => loadCryptoPrediction({ force: true }));
+  dom.chatTradeQty?.addEventListener("input", () => {
+    if (!state.chartVisible && state.mode !== MODES.CRYPTO) return;
+    scheduleCryptoTradePreviewRefresh({ force: false, side: state.cryptoPreviewSide || "BUY" });
+  });
+  dom.chatTradeQty?.addEventListener("change", () => {
+    loadCryptoPrediction({ force: true });
+    loadCryptoState({ force: true });
+    loadCryptoTradePreview({ side: state.cryptoPreviewSide || "BUY", force: true });
+  });
 
   dom.copyConvId?.addEventListener("click", async () => {
     const id = state.conversationId || "";
@@ -1164,6 +1280,27 @@ function wireUI() {
       appendBubble(raw, "bot");
     }
   });
+
+  hydrateCryptoRiskInputs();
+  [
+    [dom.cryptoStopLossPct, CRYPTO_RISK_INPUT_KEYS.stopLossPct],
+    [dom.cryptoTakeProfitPct, CRYPTO_RISK_INPUT_KEYS.takeProfitPct],
+    [dom.cryptoMaxExposureQuote, CRYPTO_RISK_INPUT_KEYS.maxExposureQuote],
+    [dom.cryptoMaxOrderSizePct, CRYPTO_RISK_INPUT_KEYS.maxOrderSizePct],
+  ].forEach(([input, key]) => {
+    if (!input) return;
+    input.addEventListener("input", () => {
+      persistCryptoRiskInput(input, key);
+      if (!state.chartVisible && state.mode !== MODES.CRYPTO) return;
+      scheduleCryptoTradePreviewRefresh({ force: false, side: state.cryptoPreviewSide || "BUY" });
+    });
+    input.addEventListener("change", () => {
+      persistCryptoRiskInput(input, key);
+      loadCryptoPrediction({ force: true });
+      loadCryptoState({ force: true });
+      loadCryptoTradePreview({ side: state.cryptoPreviewSide || "BUY", force: true });
+    });
+  });
 }
 
 function updateAllUI() {
@@ -1209,6 +1346,7 @@ function updateAllUI() {
   if (state.chartVisible) {
     loadCryptoModels();
     loadChartData(state.chartSymbol);
+    loadCryptoState({ force: true });
   } else {
     updateChartTitle(state.chartSymbol);
   }
@@ -1493,7 +1631,7 @@ function updateStatusCenter() {
   });
 
   const authErr = state.authDiag?.lastError || null;
-  const hasCreds = !!(state.apiKey || state.filesApiKey || state.accessToken);
+  const hasCreds = !!(state.cookieAuth || state.apiKey || state.filesApiKey);
   const retryMsLeft = Math.max(0, Number(state.authRetryBlockedUntil || 0) - Date.now());
   const retryNote = retryMsLeft > 0
     ? ` · ${es ? "reintento" : "retry"} ${Math.ceil(retryMsLeft / 1000)}s`
@@ -1705,6 +1843,7 @@ function setMode(mode) {
     loadCryptoModels();
     loadCryptoPrediction({ force: true });
     loadPredictionComparison(state.chartSymbol, { force: true });
+    loadCryptoState({ force: true });
     if (dom.chartLive?.checked && !state.liveTimer) {
       startLiveChart();
     }
@@ -1713,6 +1852,7 @@ function setMode(mode) {
   if (!state.chatOnlyExperience && state.mode === MODES.IMAGE) {
     dom.msgInput?.focus();
   }
+  updateCryptoStatePolling();
 }
 
 function updateModeIndicator() {
@@ -2348,6 +2488,23 @@ function localizeUI() {
     model_label: es ? "Modelo" : "Model",
     horizon_label: es ? "Horizonte" : "Horizon",
     qty_label: es ? "Cantidad" : "Qty",
+    risk_controls_title: es ? "Controles de riesgo" : "Risk controls",
+    risk_controls_note: es ? "Estos valores alimentan el risk gate antes de confirmar la orden." : "These values feed the risk gate before you confirm the order.",
+    stop_loss_label: es ? "Stop loss %" : "Stop loss %",
+    take_profit_label: es ? "Take profit %" : "Take profit %",
+    max_exposure_label: es ? "Exposición máxima" : "Max exposure",
+    max_order_size_label: es ? "Tamaño máx. de orden %" : "Max order size %",
+    stop_loss_title: es ? "Corta la pérdida si el precio va en contra" : "Cut the loss if price moves against you",
+    take_profit_title: es ? "Bloquea la ganancia al llegar al objetivo" : "Lock the gain when the target is reached",
+    max_exposure_title: es ? "Máximo valor en moneda cotizada que puede usar esta orden" : "Maximum quote value this order can use",
+    max_order_size_title: es ? "Máximo porcentaje del libro visible que puede consumir la orden" : "Maximum percent of visible book liquidity this order can consume",
+    stop_loss_placeholder: es ? "0.8" : "0.8",
+    take_profit_placeholder: es ? "1.5" : "1.5",
+    max_exposure_placeholder: es ? "1000" : "1000",
+    max_order_size_placeholder: es ? "5" : "5",
+    risk_controls_explain: es
+      ? "El risk gate usa estos valores antes de confirmar. Stop loss corta la operación si el precio va en contra. Take profit bloquea la ganancia al llegar al objetivo. Exposición máxima limita cuánto capital puede usar esta orden. Tamaño máx. de orden % limita cuánto libro visible consume tu orden."
+      : "The risk gate uses these values before you confirm. Stop loss cuts the trade if price moves against you. Take profit locks gains when the target is reached. Max exposure caps how much quote currency this trade can use. Max order size % limits how much visible book liquidity your order may consume.",
     live_label: es ? "En vivo" : "Live",
     news_label: es ? "Noticias" : "News",
     news_compact: es ? "Compacto" : "Compact",
@@ -2372,7 +2529,8 @@ function localizeUI() {
     session_log_title: es ? "Log sesión" : "Session log",
     sessions_title: es ? "Conversaciones" : "Conversations",
     compare_title: es ? "Comparación post-horizonte" : "Post-horizon comparison",
-    chart_mode_hint: es ? "p>63% COMPRAR • p<37% VENDER • mantener en medio" : "p>63% BUY • p<37% SELL • HOLD in between",
+    chart_mode_hint: es ? "Precio • trades • compare • fills" : "Price • trades • compare • fills",
+    chart_mode_hint_title: es ? "Precio • trades • compare • fills" : "Price • trades • compare • fills",
     file_viewer_placeholder: es ? "Selecciona un archivo en Archivos" : "Select a file in Files",
     image_generator_title: es ? "Generador de imágenes (local demo)" : "Image generator (local demo)",
     image_flow_hint: es ? "Flujo: subir → extraer contexto → conversar/generar." : "Flow: upload → extract context → chat/generate.",
@@ -2419,7 +2577,9 @@ function localizeUI() {
     attachment_auto_web: es ? "Enriquecer con web (si hace falta)" : "Enrich with web (if needed)",
     attachment_clear_title: es ? "Quitar adjunto" : "Clear attachment",
     help_item_crypto_label: es ? "Cripto (señal + horizonte)" : "Crypto (signal + horizon)",
-    help_item_crypto_desc: es ? "escribe “BTCUSDT H=2m” o usa el panel Cripto. Genera señal demo y guarda precio base." : "type “BTCUSDT H=2m” or use the Crypto panel. It creates a demo signal and saves base price.",
+    help_item_crypto_desc: es
+      ? "escribe “BTCUSDT H=2m” o usa el panel Cripto. Muestra señal BUY/SELL/HOLD, p%, horizonte, thresholds, risk gate, controles de riesgo, modo de ejecución (simulated/testnet/live) y comparación post-horizonte sincronizada con el gráfico."
+      : "type “BTCUSDT H=2m” or use the Crypto panel. It shows BUY/SELL/HOLD, p%, horizon, thresholds, risk gate, risk controls, execution mode (simulated/testnet/live), and the post-horizon comparison synced with the chart.",
     symbols_modal_title: es ? "Despliegue rápido + monedas/pairs Binance permitidos" : "Quick deploy + allowed Binance coins/pairs",
     symbols_deploy_label: es ? "Deploy (local):" : "Deploy (local):",
     symbols_deploy_desc: es ? "activa DB + claves, luego" : "set DB + keys, then run",
@@ -2429,7 +2589,7 @@ function localizeUI() {
     symbols_pairs_label: es ? "Pares Binance sugeridos (lista ampliada):" : "Suggested Binance pairs (expanded list):",
     symbols_tip: es ? "Puedes escribir nombre o alias (ej: bitcoin, ethereum, btc, eth). Se normaliza automáticamente al par Binance (USDT por defecto)." : "You can type coin name or alias (e.g. bitcoin, ethereum, btc, eth). It auto-normalizes to a Binance pair (USDT by default).",
 
-    api_key_title: es ? "Configurar API key" : "Set API key",
+    api_key_title: es ? "Configurar clave de arranque" : "Set bootstrap key",
     show_crypto_panel_title: es ? "Mostrar panel cripto" : "Show crypto panel",
     show_files_panel_title: es ? "Mostrar panel de archivos/repos" : "Show files/repos panel",
     tree_title: es ? "Ver árbol de proyecto" : "View project tree",
@@ -2455,7 +2615,7 @@ function localizeUI() {
     chart_symbol_aria: es ? "Símbolo cripto" : "Crypto symbol",
     chart_refresh_title: es ? "Actualizar gráfico" : "Refresh chart",
     chart_expand_title: es ? "Expandir/contraer gráfico" : "Expand/collapse chart",
-    chart_mode_hint_title: es ? "p>63% COMPRAR • p<37% VENDER • si no MANTENER" : "p>63% BUY • p<37% SELL • otherwise HOLD",
+    chart_mode_hint_title: es ? "Precio • trades • compare • fills" : "Price • trades • compare • fills",
     price_source_title: es ? "Fuente de precio" : "Price source",
     crypto_context_title: es ? "Contexto cripto" : "Crypto context",
     signal_confidence_aria: es ? "Confianza de la señal" : "Signal confidence",
@@ -2511,8 +2671,8 @@ function localizeUI() {
   if (dom.sellBtn) dom.sellBtn.title = es ? "Vender (simulado, educativo)" : "Sell (simulated, educational)";
   if (dom.predictionCompareHelp) {
     dom.predictionCompareHelp.title = es
-      ? "Predicción vs. realidad: precisión y Δ promedio. BUY si p>63%, SELL si p<37%, HOLD en medio."
-      : "Prediction vs actual: accuracy and avg Δ. BUY if p>63%, SELL if p<37%, HOLD otherwise.";
+      ? "Predicción vs. realidad: compara el movimiento esperado con el real y mira la precisión y el Δ promedio."
+      : "Prediction vs actual: compare expected versus actual move and review accuracy plus average Δ.";
   }
   if (dom.statsBtn) {
     dom.statsBtn.title = es
@@ -2604,6 +2764,7 @@ function showCryptoPanelFromToolbar() {
   loadCryptoModels();
   loadChartData(state.chartSymbol);
   loadCryptoPrediction({ force: true });
+  loadCryptoState({ force: true });
   loadPredictionComparison(state.chartSymbol, { force: true });
   notifyStatus(
     state.lang === LANG.ES ? "Panel cripto abierto." : "Crypto panel opened.",
@@ -2636,6 +2797,7 @@ function toggleChartVisibility() {
   state.chartVisible = !state.chartVisible;
   localStorage.setItem("aegis_chart_visible", state.chartVisible ? "1" : "0");
   applyPanelVisibility();
+  updateCryptoStatePolling();
 }
 
 function applyPanelVisibility() {
@@ -2681,6 +2843,7 @@ function applyPanelVisibility() {
       ? (es ? "Ocultar panel de archivos/repos" : "Hide files/repos panel")
       : (es ? "Mostrar panel de archivos/repos" : "Show files/repos panel");
   }
+  updateCryptoStatePolling();
 }
 
 function registerAbortController(controller) {
@@ -2704,6 +2867,8 @@ async function cancelAllRequests(fullStop = false) {
   state.cancelledByUser = true;
   let backendNote = "";
   if (fullStop) {
+    stopCryptoStateLiveStream();
+    stopCryptoStatePolling();
     stopLiveChart();
     stopAlertsPolling();
     stopLogsPolling();
@@ -2900,13 +3065,12 @@ async function executeConversationTool(
 
 function withJsonHeaders(headers = {}, scope = "main") {
   const normalizedScope = scope === "files" ? "files" : "main";
-  const keyToUse = cleanKey(normalizedScope === "files" ? (state.filesApiKey || state.apiKey) : state.apiKey);
+  const keyToUse = state.cookieAuth ? "" : cleanKey(normalizedScope === "files" ? (state.filesApiKey || state.apiKey) : state.apiKey);
   return {
     Accept: "application/json",
     "Content-Type": "application/json",
     ...(headers || {}),
     ...(keyToUse ? { "X-API-Key": keyToUse } : {}),
-    ...(state.accessToken ? { Authorization: `Bearer ${state.accessToken}` } : {}),
   };
 }
 
@@ -2921,19 +3085,28 @@ async function fetchWithTimeout(url, opts = {}, { timeout = CHAT_MAX_TIMEOUT_MS,
       await ensureAccessToken();
       const scope = authScopeForUrl(url);
       const useFilesKey = scope === "files";
-      const keyToUse = cleanKey(useFilesKey ? (state.filesApiKey || state.apiKey) : state.apiKey);
+      const keyToUse = state.cookieAuth ? "" : cleanKey(useFilesKey ? (state.filesApiKey || state.apiKey) : state.apiKey);
       const merged = { ...opts };
+      merged.credentials = "include";
       merged.headers = {
         ...(opts.headers || {}),
         ...(keyToUse ? { "X-API-Key": keyToUse } : {}),
-        ...(state.accessToken ? { Authorization: `Bearer ${state.accessToken}` } : {}),
       };
       const res = await fetch(url, { ...merged, signal: controller.signal });
       if (res.status === 401 || res.status === 403) {
-        if (await tryRefreshAccessToken()) {
-          // retry once immediately with new token (no extra backoff)
-          if (state.accessToken) merged.headers.Authorization = `Bearer ${state.accessToken}`;
-          else delete merged.headers.Authorization;
+        if (state.cookieAuth && await tryRefreshAccessToken()) {
+          const retried = await fetch(url, { ...merged, signal: controller.signal });
+          if (retried.status === 401 || retried.status === 403) {
+            await markAuthFailure(url, retried, { scope, keyToUse });
+            if (isConversationPollUrl(url)) {
+              handleConversationPollAuthDenied(retried.status);
+            }
+          } else if (retried.ok) {
+            clearAuthFailure();
+          }
+          return retried;
+        }
+        if (!state.cookieAuth && await fetchNewAccessToken()) {
           const retried = await fetch(url, { ...merged, signal: controller.signal });
           if (retried.status === 401 || retried.status === 403) {
             await markAuthFailure(url, retried, { scope, keyToUse });
@@ -3029,7 +3202,7 @@ async function markAuthFailure(url, res, { scope, keyToUse } = {}) {
     scope: scope || authScopeForUrl(url),
     status: Number(res?.status || 401),
     hasKey: !!cleanKey(keyToUse || ""),
-    hasBearer: !!(state.accessToken || ""),
+    hasCookieAuth: !!state.cookieAuth,
     detail,
     ts: Date.now(),
   };
@@ -3063,9 +3236,9 @@ function authDebugForUrl(url) {
   try {
     const scope = authScopeForUrl(url);
     const filesScope = scope === "files";
-    const key = cleanKey(filesScope ? (state.filesApiKey || state.apiKey) : state.apiKey);
-    const hasBearer = !!(state.accessToken || "");
-    return `${scope}:${key ? "key" : "no-key"},bearer:${hasBearer ? "yes" : "no"}`;
+    const key = state.cookieAuth ? "" : cleanKey(filesScope ? (state.filesApiKey || state.apiKey) : state.apiKey);
+    const cookie = state.cookieAuth ? "yes" : "no";
+    return `${scope}:${key ? "key" : "no-key"},cookie:${cookie}`;
   } catch {
     return "unknown";
   }
@@ -3110,27 +3283,46 @@ function clearTokens() {
   state.accessToken = "";
   state.refreshToken = "";
   state.tokenExp = 0;
-  localStorage.removeItem("aegis_access_token");
-  localStorage.removeItem("aegis_refresh_token");
-  localStorage.removeItem("aegis_token_exp");
+  state.cookieAuth = false;
+  state.authScopes = [];
+  state.authCookieExp = 0;
+  writeSecretItem("aegis_cookie_auth", "");
+  writeSecretItem("aegis_auth_scopes", "");
+  writeSecretItem("aegis_auth_cookie_exp", "");
+  try {
+    applyAuthState();
+    updateStatusCenter();
+  } catch {}
 }
 
-function storeTokens({ access_token, refresh_token, exp }) {
-  if (access_token) {
-    state.accessToken = access_token;
-    localStorage.setItem("aegis_access_token", access_token);
+function storeTokens({ scopes = [], expires_in = 0, refresh_expires_in = 0, cookie_auth = true } = {}) {
+  state.cookieAuth = !!cookie_auth;
+  state.authScopes = Array.isArray(scopes) ? scopes.map((s) => String(s || "").trim().toLowerCase()).filter(Boolean) : [];
+  const now = Math.floor(Date.now() / 1000);
+  state.authCookieExp = expires_in ? now + Math.max(0, Number(expires_in) || 0) : 0;
+  state.tokenExp = state.authCookieExp;
+  state.accessToken = "";
+  state.refreshToken = "";
+  if (state.cookieAuth) {
+    writeSecretItem("aegis_cookie_auth", "1");
+    writeSecretItem("aegis_auth_scopes", JSON.stringify(state.authScopes));
+    writeSecretItem("aegis_auth_cookie_exp", String(state.authCookieExp));
+    // Clear bootstrap secrets from storage once the cookie session is live.
+    writeSecretItem("aegis_api_key", "");
+    writeSecretItem("aegis_files_api_key", "");
   }
-  if (refresh_token) {
-    state.refreshToken = refresh_token;
-    localStorage.setItem("aegis_refresh_token", refresh_token);
-  }
-  if (exp) {
-    state.tokenExp = Number(exp) || 0;
-    localStorage.setItem("aegis_token_exp", String(state.tokenExp));
-  }
+  void refresh_expires_in;
+  try {
+    applyAuthState();
+    updateStatusCenter();
+  } catch {}
 }
 
 function tokenExpiresSoon() {
+  if (state.cookieAuth && state.authCookieExp) {
+    const msLeft = state.authCookieExp * 1000 - Date.now();
+    return msLeft < 120000; // 2 min
+  }
   if (!state.tokenExp) return true;
   const msLeft = state.tokenExp * 1000 - Date.now();
   return msLeft < 120000; // 2 min
@@ -3158,50 +3350,57 @@ function isAuthRetryBlocked() {
 async function fetchNewAccessToken() {
   const key = cleanKey(state.apiKey);
   if (isAuthRetryBlocked()) return false;
-  if (!key) return false;
+  if (!key && !state.cookieAuth) return false;
   try {
     const res = await fetch(endpoints.authToken, {
       method: "POST",
+      credentials: "include",
       headers: {
         "Content-Type": "application/json",
-        "X-API-Key": key,
+        ...(key ? { "X-API-Key": key } : {}),
       },
       // Self-issued JWT scopes are intentionally limited server-side; keep this list
       // aligned with allowed non-privileged UI capabilities.
       body: JSON.stringify({ scopes: ["chat", "files", "crypto"], refresh: true }),
     });
     const data = await safeJson(res);
-    if (!res.ok || !data?.access_token) throw new Error("token failed");
-    const now = Math.floor(Date.now() / 1000);
-    const exp = now + (Number(data.expires_in) || 1800);
-    storeTokens({ access_token: data.access_token, refresh_token: data.refresh_token, exp });
+    if (!res.ok || !data?.cookie_auth) throw new Error("token failed");
+    storeTokens({
+      cookie_auth: true,
+      scopes: data.scopes || ["chat", "files", "crypto"],
+      expires_in: Number(data.expires_in) || 1800,
+      refresh_expires_in: Number(data.refresh_expires_in) || 86400,
+    });
     clearAuthRetryCooldown();
+    clearBootstrapSecrets();
     return true;
   } catch {
     setAuthRetryCooldown();
-    clearTokens();
+    if (!state.cookieAuth) clearTokens();
     return false;
   }
 }
 
 async function tryRefreshAccessToken() {
-  const key = cleanKey(state.apiKey);
   if (isAuthRetryBlocked()) return false;
-  if (!state.refreshToken || !key) return false;
+  if (!state.cookieAuth) return false;
   try {
     const res = await fetch(endpoints.authRefresh, {
       method: "POST",
+      credentials: "include",
       headers: {
         "Content-Type": "application/json",
-        "X-API-Key": key,
       },
-      body: JSON.stringify({ refresh_token: state.refreshToken }),
+      body: JSON.stringify({}),
     });
     const data = await safeJson(res);
-    if (!res.ok || !data?.access_token) throw new Error("refresh failed");
-    const now = Math.floor(Date.now() / 1000);
-    const exp = now + (Number(data.expires_in) || 1800);
-    storeTokens({ access_token: data.access_token, refresh_token: data.refresh_token, exp });
+    if (!res.ok || !data?.cookie_auth) throw new Error("refresh failed");
+    storeTokens({
+      cookie_auth: true,
+      scopes: data.scopes || state.authScopes,
+      expires_in: Number(data.expires_in) || 1800,
+      refresh_expires_in: Number(data.refresh_expires_in) || 86400,
+    });
     clearAuthRetryCooldown();
     return true;
   } catch {
@@ -3212,14 +3411,49 @@ async function tryRefreshAccessToken() {
 }
 
 async function ensureAccessToken() {
-  if (isAuthRetryBlocked()) return;
-  if (!state.apiKey) return;
+  if (isAuthRetryBlocked()) return false;
+  if (state.cookieAuth) {
+    if (!state.authCookieExp || tokenExpiresSoon()) {
+      const ok = await tryRefreshAccessToken();
+      if (!ok) {
+        clearTokens();
+        return false;
+      }
+    }
+    return true;
+  }
+  if (!state.apiKey) return false;
   if (!state.accessToken || tokenExpiresSoon()) {
-    const ok = state.refreshToken ? await tryRefreshAccessToken() : await fetchNewAccessToken();
+    const ok = await fetchNewAccessToken();
     if (!ok) {
       clearTokens();
+      return false;
     }
   }
+  return true;
+}
+
+function clearBootstrapSecrets() {
+  state.apiKey = "";
+  state.filesApiKey = "";
+  writeSecretItem("aegis_api_key", "");
+  writeSecretItem("aegis_files_api_key", "");
+}
+
+async function logoutAuthSession() {
+  try {
+    await fetch(endpoints.authLogout, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    });
+  } catch {}
+  clearTokens();
+  clearBootstrapSecrets();
 }
 
 async function refreshAuthedPanels() {
@@ -4879,7 +5113,13 @@ async function syncConversationState(convId) {
   try {
     const res = await fetchWithTimeout(endpoints.conversationState(convId), { headers: { Accept: "application/json" } }, { timeout: 10000, retries: 0 });
     const data = await safeJson(res);
-    if (!res.ok) throw new Error();
+    if (!res.ok) {
+      if (res.status === 404) {
+        handleMissingConversation(convId, { source: "state" });
+        return false;
+      }
+      throw new Error(data?.detail || `HTTP ${res.status}`);
+    }
     const remoteProjectId = String(data?.state?.active_project_id || "");
     state.activeProjectId = remoteProjectId;
     if (remoteProjectId) localStorage.setItem("aegis_active_project_id", remoteProjectId);
@@ -4894,8 +5134,14 @@ async function syncConversationState(convId) {
       state.activeProjectImpact = null;
       renderProjectMeta();
     }
+    return true;
   } catch (err) {
+    if (String(err?.message || "").includes("HTTP 404")) {
+      handleMissingConversation(convId, { source: "state" });
+      return false;
+    }
     console.error("conversation-state-sync-error", err);
+    return false;
   }
 }
 
@@ -4916,18 +5162,22 @@ async function restoreConversationTranscript(convId, { force = false } = {}) {
     const data = await safeJson(res);
     if (!res.ok) {
       if (res.status === 404) {
-        state.lastTranscriptConversationId = "";
+        handleMissingConversation(targetConvId, { source: "bundle" });
+        return false;
       }
       throw new Error(data?.detail || `HTTP ${res.status}`);
     }
 
     const turns = Array.isArray(data?.turns) ? data.turns : [];
+    clearChatTranscript();
     if (!turns.length) {
       state.lastTranscriptConversationId = targetConvId;
+      try {
+        localStorage.setItem("aegis_last_transcript_conv", targetConvId);
+      } catch {}
       return false;
     }
 
-    clearChatTranscript();
     turns.forEach((turn) => {
       const userMessage = String(turn?.user_message || "").trim();
       const assistantMessage = String(turn?.assistant_message || "").trim();
@@ -4941,6 +5191,10 @@ async function restoreConversationTranscript(convId, { force = false } = {}) {
     } catch {}
     return true;
   } catch (err) {
+    if (String(err?.message || "").includes("HTTP 404")) {
+      handleMissingConversation(targetConvId, { source: "bundle" });
+      return false;
+    }
     console.error("conversation-transcript-restore-error", err);
     return false;
   }
@@ -5113,6 +5367,85 @@ function clearChatAttachment({ clearImageRef = false } = {}) {
   updateChatAttachmentBar();
 }
 
+function messageTargetsAttachmentContext(text) {
+  const lower = String(text || "").trim().toLowerCase();
+  if (!lower) return false;
+  if (looksLocalSocialMessage(lower)) return false;
+  if (looksProjectScopedMessage(lower) || looksExplicitLocalOnlyMessage(lower)) return false;
+
+  const normalized = lower.replace(/[!?.,;:]+/g, " ").replace(/\s+/g, " ").trim();
+  if ([
+    "this",
+    "that",
+    "it",
+    "this image",
+    "that image",
+    "this file",
+    "that file",
+    "this document",
+    "that document",
+    "esto",
+    "eso",
+    "esta imagen",
+    "ese archivo",
+    "este archivo",
+    "este documento",
+    "ese documento",
+  ].includes(normalized)) {
+    return true;
+  }
+
+  return [
+    "attachment",
+    "attached",
+    "adjunto",
+    "adjunta",
+    "image",
+    "imagen",
+    "photo",
+    "foto",
+    "screenshot",
+    "captura",
+    "file",
+    "archivo",
+    "document",
+    "documento",
+    "pdf",
+    "html",
+    "text",
+    "texto",
+    "ocr",
+    "code",
+    "codigo",
+    "código",
+    "what is this",
+    "what is that",
+    "what's this",
+    "what's that",
+    "whats this",
+    "whats that",
+    "what does it say",
+    "what does this say",
+    "describe",
+    "explain",
+    "summarize",
+    "summary",
+    "resume",
+    "resumen",
+    "analiza",
+    "analyze",
+    "extract",
+    "extrae",
+    "read",
+    "lee",
+    "que es",
+    "qué es",
+    "que dice",
+    "qué dice",
+    "explica",
+  ].some((kw) => lower.includes(kw));
+}
+
 function buildMessageWithAttachment(message, mode = "general") {
   const base = String(message || "").trim();
   const modeValue = String(mode || "").trim().toLowerCase();
@@ -5120,6 +5453,7 @@ function buildMessageWithAttachment(message, mode = "general") {
   if (!base || !a || !a.analysis) return base;
   if (modeValue === "url" || modeValue === "crypto") return base;
   if (/\[(?:attached|adjunto)\s+/i.test(base)) return base;
+  if (!messageTargetsAttachmentContext(base)) return base;
 
   const es = state.lang === LANG.ES;
   const head = es
@@ -5202,6 +5536,34 @@ function buildCryptoScopedMessage(text) {
   if (!explicitHorizon && Number.isFinite(panelHorizon) && panelHorizon > 0) prefix.push(`H=${panelHorizon}m`);
   if (!prefix.length) return raw;
   return `${prefix.join(" ")} ${raw}`.trim();
+}
+
+function syncCryptoPanelScopeFromText(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return false;
+
+  let changed = false;
+  const explicitSymbol = extractCryptoSymbolFromText(raw);
+  const explicitHorizon = extractCryptoHorizonFromText(raw);
+
+  if (explicitSymbol) {
+    state.chartSymbol = explicitSymbol;
+    if (dom.chartSymbol) dom.chartSymbol.value = explicitSymbol;
+    changed = true;
+  }
+
+  if (Number.isFinite(explicitHorizon) && explicitHorizon > 0) {
+    if (dom.cryptoHorizon) dom.cryptoHorizon.value = String(explicitHorizon);
+    if (state.lastPrediction && typeof state.lastPrediction === "object") {
+      state.lastPrediction.horizon = explicitHorizon;
+    }
+    changed = true;
+  }
+
+  if (changed) {
+    loadSymbolsList(dom.chartSymbol?.value || state.chartSymbol || "");
+  }
+  return changed;
 }
 
 /* ------------------------- SEND / CHAT ------------------------- */
@@ -5435,33 +5797,12 @@ function attachmentKeepsLocalRouting(text, mode = "general") {
   if (modeValue === "crypto" || modeValue === "url") return false;
   const attachment = state.chatAttachment && typeof state.chatAttachment === "object" ? state.chatAttachment : null;
   if (!attachment) return false;
-  const lower = String(text || "").toLowerCase();
+  if (!messageTargetsAttachmentContext(text)) return false;
   const kind = String(attachment.kind || "").trim().toLowerCase();
   if (looksProjectScopedMessage(text)) return true;
   if (kind === "image") return true;
   if (messageNeedsFreshWeb(text)) return false;
-  return [
-    "attachment",
-    "attached",
-    "adjunto",
-    "image",
-    "imagen",
-    "file",
-    "archivo",
-    "document",
-    "documento",
-    "ocr",
-    "screenshot",
-    "screen",
-    "what is that",
-    "what's that",
-    "whats that",
-    "explain",
-    "describe",
-    "summarize",
-    "analiza",
-    "analyze",
-  ].some((kw) => lower.includes(kw));
+  return true;
 }
 
 function projectKeepsLocalRouting(text, mode = "general") {
@@ -5827,8 +6168,66 @@ async function handleChat(text, { mode = "general" } = {}) {
 
   // crypto side-effects
   if (effectiveMode === "crypto") {
+    syncCryptoPanelScopeFromText(text);
+    loadChartData(state.chartSymbol);
+    loadCryptoPrediction({ force: true });
+    loadCryptoState({ force: true });
     loadPredictionComparison(state.chartSymbol, { force: true });
   }
+
+  return { context, sources, data };
+}
+
+function mergePrefetchedWebContext(prefetchedContext, currentContext, prefetchedResults = [], currentSources = []) {
+  const prefetched = prefetchedContext && typeof prefetchedContext === "object" ? prefetchedContext : null;
+  const current = currentContext && typeof currentContext === "object" ? currentContext : null;
+  const prefetchedList = Array.isArray(prefetchedResults) ? prefetchedResults : [];
+  const currentList = Array.isArray(currentSources) ? currentSources : [];
+
+  if (!prefetched) return current;
+
+  const prefetchedHasWebEvidence = !!(
+    prefetched.using_live_web
+    || prefetched.using_cached_web
+    || prefetched.using_stale_cache
+    || prefetchedList.length
+  );
+  if (!prefetchedHasWebEvidence) return current || prefetched;
+
+  const currentHasWebEvidence = !!(
+    current
+    && (
+      current.using_live_web
+      || current.using_cached_web
+      || current.using_stale_cache
+      || Number(current.web_results || 0) > 0
+      || currentList.length > 0
+    )
+  );
+  if (currentHasWebEvidence) return current;
+
+  const merged = { ...(current || {}) };
+  const mergedOrigins = [];
+  const seenOrigins = new Set();
+  for (const origin of [...(prefetched.source_origin || []), ...(merged.source_origin || [])]) {
+    const cleanOrigin = String(origin || "").trim();
+    if (!cleanOrigin || seenOrigins.has(cleanOrigin)) continue;
+    seenOrigins.add(cleanOrigin);
+    mergedOrigins.push(cleanOrigin);
+  }
+
+  merged.source_origin = mergedOrigins;
+  merged.source_plan = prefetched.source_plan || merged.source_plan;
+  merged.active_project_id = merged.active_project_id || prefetched.active_project_id || null;
+  merged.web_status = prefetched.web_status || merged.web_status || "";
+  merged.web_source = prefetched.web_source || merged.web_source || "";
+  merged.web_provider = prefetched.web_provider || merged.web_provider || "";
+  merged.web_results = Math.max(Number(merged.web_results || 0), Number(prefetched.web_results || 0), prefetchedList.length);
+  merged.using_live_web = !!prefetched.using_live_web;
+  merged.using_cached_web = !!prefetched.using_cached_web;
+  merged.using_stale_cache = !!prefetched.using_stale_cache;
+  merged.data_notice = prefetched.data_notice || merged.data_notice || "";
+  return merged;
 }
 
 function normalizeEvidence(items) {
@@ -6011,6 +6410,9 @@ async function handleWeb(query) {
     configs: state.activeProjectDetail?.configs || [],
   };
 
+  state.lastChatContext = ctx;
+  updateModeIndicator();
+  renderSourceOriginBar(state.lastChatContext);
   renderResponseSources(query, results, ctx, null);
 
   if (results.length) {
@@ -6025,7 +6427,14 @@ async function handleWeb(query) {
     }
   }
   // Then ask backend chat in web mode (so it can answer)
-  await handleChat(query, { mode: "web" });
+  const chatResult = await handleChat(query, { mode: "web" });
+  const mergedContext = mergePrefetchedWebContext(ctx, chatResult?.context, results, chatResult?.sources || []);
+  if (mergedContext && mergedContext !== chatResult?.context) {
+    state.lastChatContext = mergedContext;
+    updateModeIndicator();
+    renderSourceOriginBar(state.lastChatContext);
+    renderResponseSources(query, results, mergedContext, null);
+  }
 }
 
 async function webSearch(query) {
@@ -6162,6 +6571,57 @@ function prettyWebStatusLabel(context) {
   return labels[source || status] || labels[status] || "";
 }
 
+function formatCryptoPredictionRef(ref, options = {}) {
+  if (!ref || typeof ref !== "object") return "";
+  const es = !!options.es;
+  const includeSource = options.includeSource !== false;
+  const includeId = options.includeId !== false;
+  const symbol = String(ref.symbol || "").trim().toUpperCase();
+  const horizon = Number(ref.horizon_minutes || ref.horizon || 0);
+  const logId = String(ref.log_id || ref.id || "").trim();
+  const ts = Number(ref.ts || ref.timestamp || 0);
+  const source = String(ref.source || "").trim().toLowerCase();
+  const parts = [];
+  if (symbol) parts.push(symbol);
+  if (Number.isFinite(horizon) && horizon > 0) parts.push(`H=${Math.trunc(horizon)}m`);
+  if (includeId && logId) parts.push(logId.slice(0, 12));
+  if (Number.isFinite(ts) && ts > 0) {
+    const ms = ts > 1e12 ? ts : ts * 1000;
+    try {
+      parts.push(new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+    } catch (_err) {
+      // Ignore invalid timestamps in UI formatting.
+    }
+  }
+  if (includeSource && source) {
+    const sourceLabel =
+      source === "fresh" ? (es ? "nueva" : "fresh")
+      : source === "history" ? (es ? "guardada" : "saved")
+      : source;
+    parts.push(sourceLabel);
+  }
+  return parts.join(" • ");
+}
+
+function formatCryptoOutcomeRefMetrics(ref, options = {}) {
+  if (!ref || typeof ref !== "object") return "";
+  const es = !!options.es;
+  const deltaPct = Number(ref.delta_pct);
+  const grossReturnPct = Number(ref.gross_return_pct);
+  const netReturnPct = Number(ref.net_return_pct);
+  const probabilityError = Number(ref.probability_error);
+  const brierComponent = Number(ref.brier_component);
+  const confidenceBucket = String(ref.confidence_bucket || "").trim().toLowerCase();
+  const parts = [];
+  if (Number.isFinite(deltaPct)) parts.push(`Δ ${formatPct(deltaPct, 2)}`);
+  if (Number.isFinite(grossReturnPct)) parts.push(`${es ? "Bruto" : "Gross"} ${formatPct(grossReturnPct, 2)}`);
+  if (Number.isFinite(netReturnPct)) parts.push(`${es ? "Neto" : "Net"} ${formatPct(netReturnPct, 2)}`);
+  if (Number.isFinite(probabilityError)) parts.push(`${es ? "Error prob" : "Prob err"} ${formatPct(probabilityError, 2)}`);
+  if (Number.isFinite(brierComponent)) parts.push(`Brier ${brierComponent.toFixed(3)}`);
+  if (confidenceBucket) parts.push(`${es ? "Conf" : "Conf"} ${confidenceBucket}`);
+  return parts.join(" • ");
+}
+
 function buildDataNoticeFromMeta(meta, hasLocalProject = false) {
   const es = state.lang === LANG.ES;
   const source = String(meta?.source || "").trim();
@@ -6266,6 +6726,9 @@ function renderSourceOriginBar(context = null) {
       el("span", { class: "project-badge project-badge-active", text: `${es ? "Proyecto" : "Project"}: ${context.active_project_id}` })
     );
   }
+  if (context.crypto_prediction_ref) {
+    addPill("focus", es ? "Pred" : "Pred", formatCryptoPredictionRef(context.crypto_prediction_ref, { es }));
+  }
   if (context.data_notice) {
     addNote(context.data_notice);
   }
@@ -6319,6 +6782,7 @@ function renderBubbleTrace(node, context = null) {
   if (context.effective_tool) addTracePill("tool", es ? "Usada" : "Used", context.effective_tool);
   if (context.effective_tool_status) addTracePill("provider", es ? "Estado" : "Status", context.effective_tool_status);
   if (context.active_project_id) addTracePill("project", es ? "Proyecto" : "Project", context.active_project_id);
+  if (context.crypto_prediction_ref) addTracePill("focus", es ? "Pred" : "Pred", formatCryptoPredictionRef(context.crypto_prediction_ref, { es }));
   addTracePill("llm", "LLM", context.llm_required ? "required" : "bypassed");
 
   if (context.data_notice) {
@@ -6416,6 +6880,14 @@ function renderResponseSources(query, results, context = null, raw = null) {
     }
     if (debugMode && context.current_artifact_focus) {
       list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Artefacto" : "Artifact"}: ${context.current_artifact_focus}` }));
+    }
+    if (context.crypto_prediction_ref) {
+      list.appendChild(
+        el("span", {
+          class: "mini-chip",
+          text: `${es ? "Pred usada" : "Prediction used"}: ${formatCryptoPredictionRef(context.crypto_prediction_ref, { es })}`,
+        })
+      );
     }
     if (debugMode && context.next_tool) {
       list.appendChild(el("span", { class: "mini-chip", text: `${es ? "Tool" : "Tool"}: ${context.next_tool}` }));
@@ -6782,7 +7254,10 @@ function renderResponseSources(query, results, context = null, raw = null) {
     card.appendChild(head);
 
     const a = el("a", { class: "source-link", attrs: { href: r.url, target: "_blank", rel: "noopener noreferrer" } });
-    a.innerHTML = `<i class="fa-solid fa-up-right-from-square"></i> ${r.title ? r.title : r.url}`;
+    const icon = el("i", { class: "fa-solid fa-up-right-from-square", attrs: { "aria-hidden": "true" } });
+    a.appendChild(icon);
+    a.appendChild(document.createTextNode(" "));
+    a.appendChild(document.createTextNode(r.title ? String(r.title) : String(r.url)));
     card.appendChild(a);
 
     if (r.snippet) {
@@ -7359,8 +7834,8 @@ function updateChartModeHint({
   const text = parts.join(" • ");
   dom.chartModeHint.textContent = text;
   dom.chartModeHint.title = es
-    ? "Línea de precio con marcadores de trades/noticias/comparación. Ctrl+rueda: zoom, Shift+rueda: pan."
-    : "Price line with trade/news/compare markers. Ctrl+wheel: zoom, Shift+wheel: pan.";
+    ? "Línea de precio con marcadores de trades/comparación y noticias opcionales. Ctrl+rueda: zoom, Shift+rueda: pan."
+    : "Price line with trade/compare markers and optional news. Ctrl+wheel: zoom, Shift+wheel: pan.";
 }
 
 function parseOhlcv(raw) {
@@ -7400,6 +7875,7 @@ function renderChart(points) {
   const windowEndTs = points[Math.max(0, chartWindow.end)]?.t ?? points[points.length - 1]?.t;
   const spanMinutes = Math.max(1, Math.round((windowEndTs - windowStartTs) / 60000));
   const labelOpts = getChartLabelOptions(spanMinutes);
+  const windowPoints = points.slice(Math.max(0, chartWindow.start), Math.min(points.length, chartWindow.end + 1));
   const labels = points.map((p) => formatTimeLabel(p.t, labelOpts));
   const pointByLabel = new Map();
   points.forEach((p, idx) => {
@@ -7407,6 +7883,15 @@ function renderChart(points) {
     pointByLabel.set(labels[idx], ref);
   });
   const mainData = points.map((p) => p.c);
+  const windowCloses = windowPoints.map((p) => Number(p.c)).filter((v) => Number.isFinite(v));
+  const minClose = windowCloses.length ? Math.min(...windowCloses) : null;
+  const maxClose = windowCloses.length ? Math.max(...windowCloses) : null;
+  const spread = Number.isFinite(minClose) && Number.isFinite(maxClose) ? Math.max(0, maxClose - minClose) : 0;
+  const pad = Number.isFinite(maxClose)
+    ? Math.max(spread * 0.22, maxClose * 0.0015, 0.5)
+    : 0.5;
+  const ySuggestedMin = Number.isFinite(minClose) ? Math.max(0, minClose - pad) : undefined;
+  const ySuggestedMax = Number.isFinite(maxClose) ? maxClose + pad : undefined;
   const nearestPoint = (targetTs) => {
     const normalized = normalizeTimestampMs(targetTs);
     if (!Number.isFinite(normalized)) return { idx: points.length - 1, label: labels[points.length - 1], price: mainData[points.length - 1], t: points[points.length - 1].t };
@@ -7480,13 +7965,13 @@ function renderChart(points) {
           borderWidth: 2,
           backgroundColor: (ctx) => {
             const area = ctx?.chart?.chartArea;
-            if (!area) return "rgba(34, 211, 238, 0.20)";
+            if (!area) return "rgba(34, 211, 238, 0.10)";
             const gradient = ctx.chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
-            gradient.addColorStop(0, "rgba(34, 211, 238, 0.35)");
-            gradient.addColorStop(1, "rgba(15, 23, 42, 0.05)");
+            gradient.addColorStop(0, "rgba(34, 211, 238, 0.16)");
+            gradient.addColorStop(1, "rgba(15, 23, 42, 0.00)");
             return gradient;
           },
-          tension: 0.18,
+          tension: 0.12,
           fill: true,
           pointRadius: 0,
           pointHoverRadius: 0,
@@ -7526,14 +8011,15 @@ function renderChart(points) {
         }] : []),
       ],
     },
-    options: {
-      normalized: true,
-      interaction: { mode: "nearest", axis: "x", intersect: false },
-      plugins: {
-        chartHoverGuide: { color: "rgba(148, 163, 184, 0.35)", lineWidth: 1 },
-        tooltip: {
-          enabled: true,
-          displayColors: true,
+      options: {
+        normalized: true,
+        interaction: { mode: "nearest", axis: "x", intersect: false },
+        layout: { padding: { left: 4, right: 10, top: 2, bottom: 2 } },
+        plugins: {
+          chartHoverGuide: { color: "rgba(148, 163, 184, 0.35)", lineWidth: 1 },
+          tooltip: {
+            enabled: true,
+            displayColors: true,
           callbacks: {
             title(items) {
               const first = items?.[0];
@@ -7579,6 +8065,7 @@ function renderChart(points) {
             usePointStyle: true,
             boxWidth: 10,
             boxHeight: 10,
+            font: { size: 11, weight: "600" },
           },
         },
       },
@@ -7590,6 +8077,7 @@ function renderChart(points) {
           border: { color: "rgba(148,163,184,0.18)" },
           ticks: {
             color: "#cbd5e1",
+            font: { size: 11, weight: "600" },
             maxRotation: 0,
             autoSkip: true,
             maxTicksLimit: Math.min(10, Math.max(4, Math.round(chartWindowSize / 14))),
@@ -7598,10 +8086,13 @@ function renderChart(points) {
         },
         y: {
           position: "right",
+          suggestedMin: ySuggestedMin,
+          suggestedMax: ySuggestedMax,
           grid: { color: "rgba(148,163,184,0.10)" },
           border: { color: "rgba(148,163,184,0.18)" },
           ticks: {
             color: "#cbd5e1",
+            font: { size: 11, weight: "600" },
             padding: 8,
             callback: (v) => formatPrice(v, { compact: false }),
           },
@@ -7610,7 +8101,10 @@ function renderChart(points) {
       responsive: true,
       maintainAspectRatio: false,
       animation: false,
-      elements: { point: { hitRadius: 12 } },
+      elements: {
+        line: { borderWidth: 2.4 },
+        point: { hitRadius: 12, radius: 0, hoverRadius: 4, borderWidth: 1.25 },
+      },
    },
  });
 }
@@ -7735,6 +8229,8 @@ async function loadCryptoPrediction(options = {}) {
       engine: data?.additional_info?.engine || "demo",
       prob,
       px,
+      current_price: data?.current_price ?? data?.price ?? null,
+      predicted_price: data?.predicted_price ?? data?.target_price ?? null,
       decision,
       model_decision: data?.additional_info?.model_decision || data?.raw?.model_decision || decision,
       action_decision: data?.additional_info?.action_decision || data?.raw?.action_decision || decision,
@@ -7776,7 +8272,9 @@ async function loadCryptoPrediction(options = {}) {
       px,
       context,
     });
+    updatePredictionTooltipText();
     loadPredictionComparison(symbol, { force: true });
+    loadCryptoState({ force: true });
   } catch {
   } finally {
     state.cryptoPredictionInFlight = false;
@@ -7851,6 +8349,9 @@ function updateCryptoBadges({ priceSource, model, horizon, probText, px, context
     const newsCount = state.lastPrediction?.news_count ?? null;
     const pBase = state.lastPrediction?.p_base;
     const pFinal = state.lastPrediction?.p_final ?? null;
+    const executionMode = normalizeCryptoExecutionMode(
+      state.cryptoExecutionMode || state.cryptoState?.execution?.mode || state.cryptoState?.execution?.requested_mode || "simulated"
+    );
     const regime = state.lastPrediction?.regime ? ` • ${state.lastPrediction.regime}` : "";
     const engine = state.lastPrediction?.engine ? ` • ${String(state.lastPrediction.engine).toUpperCase()}` : "";
     const modelDecision = state.lastPrediction?.model_decision || null;
@@ -7860,7 +8361,7 @@ function updateCryptoBadges({ priceSource, model, horizon, probText, px, context
     const thresholdEdge = Number(state.lastPrediction?.threshold_edge);
     const gateReason = state.lastPrediction?.execution_gate_reason || null;
     const consensus = state.lastPrediction?.consensus || null;
-    let txt = context || `${model || "ensemble"}${engine} • H=${horizon || "-"} • p=${probText || "—"} • px=${px ?? "—"}${regime}`;
+    let txt = context || `${executionMode.toUpperCase()} • ${model || "ensemble"}${engine} • H=${horizon || "-"} • p=${probText || "—"} • px=${px ?? "—"}${regime}`;
     if (pBase != null && pFinal != null && Math.abs(pFinal - pBase) > 0.005) {
       txt += ` • p_adj ${formatProb(pBase)}→${formatProb(pFinal)}`;
     }
@@ -7907,6 +8408,1191 @@ function updateCryptoBadges({ priceSource, model, horizon, probText, px, context
   }
 }
 
+function normalizeCryptoExecutionMode(mode) {
+  const raw = String(mode || "").trim().toLowerCase();
+  if (raw === "test" || raw === "paper") return "simulated";
+  if (raw === "testnet" || raw === "live" || raw === "simulated") return raw;
+  return "simulated";
+}
+
+function updateCryptoExecutionButtons() {
+  if (!dom.cryptoExecutionGroup) return;
+  const cryptoState = state.cryptoState && typeof state.cryptoState === "object" ? state.cryptoState : {};
+  const execution = cryptoState.execution && typeof cryptoState.execution === "object" ? cryptoState.execution : {};
+  const selectedMode = normalizeCryptoExecutionMode(
+    state.cryptoExecutionMode || execution.requested_mode || execution.mode || "simulated"
+  );
+  state.cryptoExecutionMode = selectedMode;
+  localStorage.setItem("aegis_crypto_execution_mode", selectedMode);
+
+  const readyByMode = {
+    simulated: true,
+    testnet: !!execution.credentials_present,
+    live: !!execution.live_enabled,
+  };
+  dom.cryptoExecutionGroup.querySelectorAll("[data-execution-mode]").forEach((btn) => {
+    const mode = normalizeCryptoExecutionMode(btn.dataset.executionMode || btn.getAttribute("data-execution-mode"));
+    const active = mode === selectedMode;
+    btn.classList.toggle("active", active);
+    btn.classList.toggle("disabled", !readyByMode[mode] && mode !== "simulated");
+    btn.setAttribute("aria-pressed", String(active));
+    const readyText = readyByMode[mode]
+      ? (state.lang === LANG.ES ? "listo" : "ready")
+      : (state.lang === LANG.ES ? "requiere keys" : "needs keys");
+    const scopeText = cryptoState?.scope?.symbol ? ` • ${cryptoState.scope.symbol}` : "";
+    const horizonText = Number.isFinite(Number(cryptoState?.scope?.horizon_minutes))
+      ? ` • H=${Number(cryptoState.scope.horizon_minutes)}m`
+      : "";
+    btn.title = `${mode.toUpperCase()}${scopeText}${horizonText} • ${readyText}`;
+  });
+}
+
+function renderCryptoExecutionSummary() {
+  if (!dom.cryptoExecutionMeta) return;
+  const es = state.lang === LANG.ES;
+  const cryptoState = state.cryptoState && typeof state.cryptoState === "object" ? state.cryptoState : {};
+  const execution = cryptoState.execution && typeof cryptoState.execution === "object" ? cryptoState.execution : {};
+  const scope = cryptoState.scope && typeof cryptoState.scope === "object" ? cryptoState.scope : getCurrentCryptoScope();
+  const summary = cryptoState.summary && typeof cryptoState.summary === "object" ? cryptoState.summary : {};
+  const orderBook = cryptoState.order_book && typeof cryptoState.order_book === "object" ? cryptoState.order_book : {};
+  const riskGate = state.cryptoTradePreview?.risk_gate && typeof state.cryptoTradePreview.risk_gate === "object"
+    ? state.cryptoTradePreview.risk_gate
+    : state.lastTradeQuote?.risk_gate && typeof state.lastTradeQuote.risk_gate === "object"
+      ? state.lastTradeQuote.risk_gate
+      : null;
+  const selected = normalizeCryptoExecutionMode(state.cryptoExecutionMode || execution.requested_mode || execution.mode || "simulated");
+  const selectedLabel = selected.toUpperCase();
+  const readiness = selected === "live"
+    ? (execution.live_enabled
+      ? (es ? "live listo" : "live ready")
+      : (es ? "live bloqueado" : "live locked"))
+    : selected === "testnet"
+      ? (execution.credentials_present
+        ? (es ? "testnet listo" : "testnet ready")
+        : (es ? "testnet bloqueado" : "testnet locked"))
+      : (es ? "solo demo" : "demo only");
+  const credentials = execution.credentials_present
+    ? (es ? "keys ok" : "keys ok")
+    : (es ? "sin keys" : "no keys");
+  const counts = `${Number(summary.predictions_count || 0)}/${Number(summary.outcomes_count || 0)}/${Number(summary.trades_count || 0)}`;
+  const liveMode = execution.mode || selected;
+  const streamState = state.cryptoStateStreamActive
+    ? (state.cryptoStateStreamFallbackActive ? (es ? "live + fallback" : "live + fallback") : (es ? "live" : "live"))
+    : (state.cryptoStateStreamFallbackActive ? (es ? "fallback" : "fallback") : (es ? "poll" : "poll"));
+  const heartbeat = state.cryptoStateStreamLastHeartbeatAt ? ` • ${formatAgo(state.cryptoStateStreamLastHeartbeatAt)}` : "";
+  const parts = [
+    `${es ? "Selección" : "Selected"}: ${selectedLabel}`,
+    `${es ? "Backend" : "Backend"}: ${String(liveMode || "simulated").toUpperCase()} • ${readiness}`,
+    `${es ? "Auth" : "Auth"}: ${credentials}`,
+    `${es ? "Scope" : "Scope"}: ${scope.symbol || "—"} • ${Number.isFinite(Number(scope.horizon_minutes || scope.horizon))
+      ? `${Number(scope.horizon_minutes || scope.horizon)}m`
+      : "—"}`,
+    `${es ? "Pred/Out/Trades" : "Pred/Out/Trades"}: ${counts}`,
+    `${es ? "Stream" : "Stream"}: ${streamState}${heartbeat}`,
+  ];
+  if (state.lastTradeQuote?.execution_note) {
+    parts.push(String(state.lastTradeQuote.execution_note));
+  }
+  if (state.lastTradeQuote?.fill_price) {
+    parts.push(`${es ? "Fill" : "Fill"}: ${formatPrice(Number(state.lastTradeQuote.fill_price))}`);
+  }
+  if (Number.isFinite(Number(orderBook?.spread_bps)) && Number.isFinite(Number(orderBook?.imbalance))) {
+    parts.push(
+      `${es ? "Book" : "Book"}: ${formatPrice(Number(orderBook.spread_bps), { compact: true })}bps • ${(
+        Number(orderBook.imbalance) * 100
+      ).toFixed(1)}% bid`
+    );
+  }
+  if (riskGate) {
+    parts.push(
+      riskGate.allowed
+        ? `${es ? "Risk gate" : "Risk gate"}: OK`
+        : `${es ? "Risk gate" : "Risk gate"}: ${es ? "bloqueado" : "blocked"} • ${String(riskGate.reason || "risk").replace(/_/g, " ")}`
+    );
+    const calibrationSizing = formatCryptoCalibrationSizing(riskGate, { es, includeStatus: true });
+    if (calibrationSizing) parts.push(calibrationSizing);
+  }
+  dom.cryptoExecutionMeta.textContent = parts.join(" • ");
+}
+
+function formatCryptoQuantityValue(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "";
+  if (Math.abs(number) >= 100) return number.toFixed(2);
+  if (Math.abs(number) >= 1) return number.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+  return number.toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function formatCryptoCalibrationSizing(riskGate, { es = false, includeStatus = false } = {}) {
+  const gate = riskGate && typeof riskGate === "object" ? riskGate : null;
+  if (!gate) return "";
+  const controls = gate.calibration_controls && typeof gate.calibration_controls === "object"
+    ? gate.calibration_controls
+    : null;
+  if (!controls) return "";
+  const status = String(gate?.operator_guidance?.status || controls.status || "").trim().toLowerCase();
+  const action = String(controls.action || "").trim().toLowerCase();
+  const maxOrderNotional = Number(controls.max_order_notional);
+  const maxQuantity = Number(controls.max_quantity);
+  const reductionPct = Number(controls.recommended_reduction_pct);
+  const sizingBasis = String(controls.sizing_basis || "").trim().toLowerCase();
+  const parts = [];
+  if (includeStatus && status) {
+    parts.push(`${es ? "Calibración" : "Calibration"} ${status.replace(/_/g, " ")}`);
+  }
+  if (includeStatus && action) {
+    parts.push(`${es ? "acción" : "action"} ${action.replace(/_/g, " ")}`);
+  }
+  if (Number.isFinite(maxOrderNotional)) {
+    parts.push(`${es ? "máx notional" : "max notional"} ${formatPrice(maxOrderNotional, { compact: true })}`);
+  }
+  if (Number.isFinite(maxQuantity)) {
+    parts.push(`${es ? "máx qty" : "max qty"} ${formatCryptoQuantityValue(maxQuantity)}`);
+  }
+  if (Number.isFinite(reductionPct) && reductionPct > 0) {
+    parts.push(`${es ? "recorta" : "cut"} ${formatPct(reductionPct, 1)}`);
+  }
+  if (sizingBasis === "visible_liquidity_notional") {
+    parts.push(es ? "base liquidez visible" : "basis visible liquidity");
+  } else if (sizingBasis === "order_size_pct") {
+    parts.push(es ? "base % orden" : "basis order %");
+  }
+  return parts.join(" • ");
+}
+
+function getCryptoCalibrationSuggestedQuantity(riskGate, currentQty = NaN) {
+  const gate = riskGate && typeof riskGate === "object" ? riskGate : null;
+  const controls = gate?.calibration_controls && typeof gate.calibration_controls === "object"
+    ? gate.calibration_controls
+    : null;
+  const maxQuantity = Number(controls?.max_quantity);
+  const qty = Number(currentQty);
+  if (!Number.isFinite(maxQuantity) || maxQuantity <= 0) return NaN;
+  if (Number.isFinite(qty) && qty > 0 && maxQuantity >= qty) return NaN;
+  return maxQuantity;
+}
+
+async function applyCryptoSuggestedQuantity(riskGate, { side = state.cryptoPreviewSide || "BUY" } = {}) {
+  const suggestedQty = getCryptoCalibrationSuggestedQuantity(riskGate, Number.parseFloat(dom.chatTradeQty?.value || "0"));
+  if (!dom.chatTradeQty || !Number.isFinite(suggestedQty) || suggestedQty <= 0) return false;
+  const formattedQty = formatCryptoQuantityValue(suggestedQty);
+  dom.chatTradeQty.value = formattedQty;
+  state.cryptoTradePreviewArmed = true;
+  setTradeStatus(
+    state.lang === LANG.ES
+      ? `Aplicando qty calibrada ${formattedQty}...`
+      : `Applying calibrated qty ${formattedQty}...`
+  );
+  const preview = await loadCryptoTradePreview({
+    side: normalizeCryptoTradeSide(side),
+    force: true,
+    arm: true,
+  });
+  return !!preview;
+}
+
+function updateCryptoExecutionUI() {
+  updateCryptoExecutionButtons();
+  renderCryptoExecutionSummary();
+  renderCryptoTradePreview();
+}
+
+function normalizeCryptoTradeSide(side) {
+  return String(side || "").trim().toUpperCase() === "SELL" ? "SELL" : "BUY";
+}
+
+const CRYPTO_RISK_INPUT_KEYS = {
+  stopLossPct: "aegis_crypto_stop_loss_pct",
+  takeProfitPct: "aegis_crypto_take_profit_pct",
+  maxExposureQuote: "aegis_crypto_max_exposure_quote",
+  maxOrderSizePct: "aegis_crypto_max_order_size_pct",
+};
+
+function parseOptionalPositiveNumber(value) {
+  const n = Number.parseFloat(String(value ?? "").trim());
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function hydrateCryptoRiskInputs() {
+  const pairs = [
+    [dom.cryptoStopLossPct, CRYPTO_RISK_INPUT_KEYS.stopLossPct],
+    [dom.cryptoTakeProfitPct, CRYPTO_RISK_INPUT_KEYS.takeProfitPct],
+    [dom.cryptoMaxExposureQuote, CRYPTO_RISK_INPUT_KEYS.maxExposureQuote],
+    [dom.cryptoMaxOrderSizePct, CRYPTO_RISK_INPUT_KEYS.maxOrderSizePct],
+  ];
+  pairs.forEach(([input, key]) => {
+    if (!input) return;
+    const stored = localStorage.getItem(key);
+    if (stored !== null && stored !== undefined) {
+      input.value = stored;
+    }
+  });
+}
+
+function persistCryptoRiskInput(input, key) {
+  if (!input) return;
+  const raw = String(input.value || "").trim();
+  if (raw) localStorage.setItem(key, raw);
+  else localStorage.removeItem(key);
+}
+
+function getCryptoRiskControlValues() {
+  return {
+    stopLossPct: parseOptionalPositiveNumber(dom.cryptoStopLossPct?.value),
+    takeProfitPct: parseOptionalPositiveNumber(dom.cryptoTakeProfitPct?.value),
+    maxExposureQuote: parseOptionalPositiveNumber(dom.cryptoMaxExposureQuote?.value),
+    maxOrderSizePct: parseOptionalPositiveNumber(dom.cryptoMaxOrderSizePct?.value),
+  };
+}
+
+function formatCryptoRiskControlSummary(controls, { es = state.lang === LANG.ES } = {}) {
+  if (!controls || typeof controls !== "object") return "";
+  const parts = [];
+  if (Number.isFinite(controls.stopLossPct)) {
+    parts.push(`${es ? "Stop loss" : "Stop loss"} ${formatPct(controls.stopLossPct / 100, 2)}`);
+  }
+  if (Number.isFinite(controls.takeProfitPct)) {
+    parts.push(`${es ? "Take profit" : "Take profit"} ${formatPct(controls.takeProfitPct / 100, 2)}`);
+  }
+  if (Number.isFinite(controls.maxExposureQuote)) {
+    parts.push(`${es ? "Max exposure" : "Max exposure"} ${formatPrice(controls.maxExposureQuote, { compact: true })}`);
+  }
+  if (Number.isFinite(controls.maxOrderSizePct)) {
+    parts.push(`${es ? "Max order" : "Max order"} ${formatPct(controls.maxOrderSizePct / 100, 2)}`);
+  }
+  return parts.length ? `${es ? "Guardrails" : "Guardrails"} • ${parts.join(" • ")}` : "";
+}
+
+function buildCryptoTradeDraft(side = state.cryptoPreviewSide || "BUY") {
+  const normalizedSide = normalizeCryptoTradeSide(side);
+  const symbol = normalizeCryptoScopeSymbol(dom.chartSymbol?.value || state.chartSymbol || "BTCUSDT") || "BTCUSDT";
+  const rawQty = Number.parseFloat(dom.chatTradeQty?.value || "0");
+  const quantity = Number.isFinite(rawQty) && rawQty > 0 ? rawQty : NaN;
+  const horizonRaw = parseInt(dom.cryptoHorizon?.value || state.lastPrediction?.horizon || "15", 10);
+  const horizon = Number.isFinite(horizonRaw) && horizonRaw > 0 ? horizonRaw : 15;
+  const executionMode = normalizeCryptoExecutionMode(
+    state.cryptoExecutionMode || state.cryptoState?.execution?.requested_mode || state.cryptoState?.execution?.mode || "simulated"
+  );
+  const regime = String(state.lastPrediction?.regime || state.cryptoState?.scope?.regime || "").trim().toLowerCase() || null;
+  const riskControls = getCryptoRiskControlValues();
+  return {
+    side: normalizedSide,
+    symbol,
+    quantity,
+    horizon,
+    regime,
+    executionMode,
+    test: executionMode !== "live",
+    ...riskControls,
+  };
+}
+
+function getCryptoTradeDraftKey(draft) {
+  if (!draft) return "";
+  return [
+    draft.symbol || "",
+    draft.side || "",
+    Number.isFinite(Number(draft.quantity)) ? Number(draft.quantity).toFixed(8) : "0",
+    draft.executionMode || "simulated",
+    Number.isFinite(Number(draft.horizon)) ? Number(draft.horizon) : 15,
+    draft.regime || "",
+    Number.isFinite(Number(draft.stopLossPct)) ? Number(draft.stopLossPct).toFixed(4) : "",
+    Number.isFinite(Number(draft.takeProfitPct)) ? Number(draft.takeProfitPct).toFixed(4) : "",
+    Number.isFinite(Number(draft.maxExposureQuote)) ? Number(draft.maxExposureQuote).toFixed(2) : "",
+    Number.isFinite(Number(draft.maxOrderSizePct)) ? Number(draft.maxOrderSizePct).toFixed(4) : "",
+  ].join("|");
+}
+
+function scheduleCryptoTradePreviewRefresh({ side = null, force = false } = {}) {
+  if (side) {
+    const normalizedSide = normalizeCryptoTradeSide(side);
+    state.cryptoPreviewSide = normalizedSide;
+    localStorage.setItem("aegis_crypto_preview_side", normalizedSide);
+  }
+  if (state.cryptoTradePreviewTimer) {
+    clearTimeout(state.cryptoTradePreviewTimer);
+  }
+  state.cryptoTradePreviewTimer = setTimeout(() => {
+    state.cryptoTradePreviewTimer = null;
+    loadCryptoTradePreview({
+      side: side || state.cryptoPreviewSide || "BUY",
+      force,
+      arm: state.cryptoTradePreviewArmed,
+    }).catch(() => {});
+  }, 220);
+}
+
+function requestCryptoTradePreview(side) {
+  const normalizedSide = normalizeCryptoTradeSide(side);
+  state.cryptoPreviewSide = normalizedSide;
+  localStorage.setItem("aegis_crypto_preview_side", normalizedSide);
+  state.cryptoTradePreviewArmed = true;
+  if (!state.chartVisible) {
+    showCryptoPanelFromToolbar();
+  }
+  setTradeStatus(
+    state.lang === LANG.ES
+      ? `Generando preview ${normalizedSide}...`
+      : `Generating ${normalizedSide} preview...`
+  );
+  return loadCryptoTradePreview({ side: normalizedSide, force: true, arm: true });
+}
+
+async function loadCryptoTradePreview({ side = null, force = false, arm = null } = {}) {
+  const draft = buildCryptoTradeDraft(side || state.cryptoPreviewSide || "BUY");
+  state.cryptoPreviewSide = draft.side;
+  localStorage.setItem("aegis_crypto_preview_side", draft.side);
+  const shouldArm = arm === true || (arm !== false && state.cryptoTradePreviewArmed);
+
+  if (!draft.symbol || !Number.isFinite(draft.quantity) || draft.quantity <= 0) {
+    state.cryptoTradePreview = null;
+    state.cryptoTradePreviewPendingOrder = null;
+    state.cryptoTradePreviewArmed = false;
+    renderCryptoTradePreview();
+    return null;
+  }
+
+  const requestKey = getCryptoTradeDraftKey(draft);
+  const now = Date.now();
+  if (!force && state.lastCryptoTradePreviewKey === requestKey && (now - Number(state.lastCryptoTradePreviewAt || 0)) < 10000) {
+    state.cryptoTradePreviewArmed = shouldArm;
+    state.cryptoTradePreviewPendingOrder = shouldArm ? draft : null;
+    renderCryptoTradePreview();
+    return state.cryptoTradePreview;
+  }
+  if (state.cryptoTradePreviewInFlight) {
+    state.cryptoTradePreviewQueued = true;
+    return state.cryptoTradePreview;
+  }
+
+  state.cryptoTradePreviewInFlight = true;
+  state.lastCryptoTradePreviewAt = now;
+  state.lastCryptoTradePreviewKey = requestKey;
+  try {
+    const url = new URL(endpoints.cryptoTradePreview, location.origin);
+    url.searchParams.set("horizon_minutes", String(draft.horizon));
+    if (draft.regime) url.searchParams.set("regime", draft.regime);
+    const res = await fetchWithTimeout(
+      url.toString(),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({
+          symbol: draft.symbol,
+          side: draft.side,
+          quantity: draft.quantity,
+          test: draft.test,
+          execution_mode: draft.executionMode,
+          stop_loss_pct: draft.stopLossPct,
+          take_profit_pct: draft.takeProfitPct,
+          max_exposure_quote: draft.maxExposureQuote,
+          max_order_size_pct: draft.maxOrderSizePct,
+        }),
+      },
+      { timeout: 12000, retries: 0 }
+    );
+    const data = await safeJson(res);
+    if (!res.ok || !data || typeof data !== "object") {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    state.cryptoTradePreview = data;
+    state.cryptoTradePreviewArmed = shouldArm;
+    state.cryptoTradePreviewPendingOrder = shouldArm ? draft : null;
+    updateCryptoExecutionUI();
+    const blockedByRisk = data?.risk_gate && data.risk_gate.allowed === false;
+    const calibrationSizing = formatCryptoCalibrationSizing(data?.risk_gate, { es: state.lang === LANG.ES, includeStatus: false });
+    const suggestedQty = getCryptoCalibrationSuggestedQuantity(data?.risk_gate, draft.quantity);
+    const suggestedQtyText = Number.isFinite(suggestedQty)
+      ? `${state.lang === LANG.ES ? "usa qty" : "use qty"} ${formatCryptoQuantityValue(suggestedQty)}`
+      : "";
+    setTradeStatus(
+      blockedByRisk
+        ? (state.lang === LANG.ES
+          ? `Preview bloqueado por risk gate • ${String(data?.risk_gate?.reason || "risk").replace(/_/g, " ")}${calibrationSizing ? ` • ${calibrationSizing}` : ""}${suggestedQtyText ? ` • ${suggestedQtyText}` : ""}`
+          : `Preview blocked by risk gate • ${String(data?.risk_gate?.reason || "risk").replace(/_/g, " ")}${calibrationSizing ? ` • ${calibrationSizing}` : ""}${suggestedQtyText ? ` • ${suggestedQtyText}` : ""}`)
+        : (state.lang === LANG.ES
+          ? `Preview ${draft.side} listo • ${draft.symbol} • qty=${draft.quantity}`
+          : `${draft.side} preview ready • ${draft.symbol} • qty=${draft.quantity}`),
+      !!blockedByRisk
+    );
+    return data;
+  } catch (err) {
+    console.error("crypto-trade-preview", err);
+    state.cryptoTradePreview = null;
+    state.cryptoTradePreviewPendingOrder = null;
+    state.cryptoTradePreviewArmed = false;
+    renderCryptoTradePreview();
+    setTradeStatus(
+      state.lang === LANG.ES
+        ? "No pude generar el preview de la orden."
+        : "Could not generate the order preview.",
+      true
+    );
+    return null;
+  } finally {
+    state.cryptoTradePreviewInFlight = false;
+    if (state.cryptoTradePreviewQueued) {
+      state.cryptoTradePreviewQueued = false;
+      setTimeout(() => loadCryptoTradePreview({ side: state.cryptoPreviewSide || "BUY", force: true }), 0);
+    }
+  }
+}
+
+async function confirmCryptoTrade() {
+  const draft = state.cryptoTradePreviewPendingOrder || buildCryptoTradeDraft(state.cryptoPreviewSide || "BUY");
+  const currentKey = getCryptoTradeDraftKey(draft);
+  if (!state.cryptoTradePreview || state.lastCryptoTradePreviewKey !== currentKey) {
+    await loadCryptoTradePreview({ side: draft.side || "BUY", force: true });
+    setTradeStatus(
+      state.lang === LANG.ES
+        ? "Preview refrescado. Confirma otra vez."
+        : "Preview refreshed. Confirm again.",
+      false
+    );
+    return false;
+  }
+  const ok = await submitTrade(draft.side, {
+    symbol: draft.symbol,
+    quantity: draft.quantity,
+    executionMode: draft.executionMode,
+    horizon: draft.horizon,
+    regime: draft.regime,
+    stopLossPct: draft.stopLossPct,
+    takeProfitPct: draft.takeProfitPct,
+    maxExposureQuote: draft.maxExposureQuote,
+    maxOrderSizePct: draft.maxOrderSizePct,
+  });
+  if (ok) {
+    state.cryptoTradePreviewArmed = false;
+    state.cryptoTradePreviewPendingOrder = null;
+    renderCryptoTradePreview();
+  }
+  return ok;
+}
+
+function renderCryptoTradePreview() {
+  if (!dom.cryptoTradePreview) return;
+  const es = state.lang === LANG.ES;
+  const preview = state.cryptoTradePreview && typeof state.cryptoTradePreview === "object" ? state.cryptoTradePreview : null;
+  dom.cryptoTradePreview.innerHTML = "";
+
+  const head = el("div", { class: "preview-head" });
+  head.appendChild(el("div", { class: "preview-title", text: es ? "Trade preview" : "Trade preview" }));
+  const side = normalizeCryptoTradeSide(state.cryptoPreviewSide || preview?.side || state.lastPrediction?.action_decision || "BUY");
+  head.appendChild(el("span", { class: `pill ${side === "BUY" ? "buy" : "sell"}`, text: side }));
+  dom.cryptoTradePreview.appendChild(head);
+
+  if (!preview) {
+    dom.cryptoTradePreview.appendChild(el("div", {
+      class: "preview-hint",
+      text: es
+        ? "Mueve Qty, símbolo, modo o controles de riesgo para generar un preview antes de enviar la orden."
+        : "Change Qty, symbol, mode or risk controls to generate a preview before sending the order.",
+    }));
+    const guardrailsSummary = formatCryptoRiskControlSummary(getCryptoRiskControlValues(), { es });
+    if (guardrailsSummary) {
+      dom.cryptoTradePreview.appendChild(el("div", { class: "preview-note preview-guardrails", text: guardrailsSummary }));
+    }
+    dom.cryptoTradePreview.appendChild(el("div", {
+      class: "preview-note",
+      text: es
+        ? "La idea es simular la fricción real del libro: spread, slippage y tamaño afectan el fill."
+        : "The idea is to simulate real order-book friction: spread, slippage and size affect the fill.",
+    }));
+    return;
+  }
+
+  const risk = preview.risk && typeof preview.risk === "object" ? preview.risk : {};
+  const riskGate = preview.risk_gate && typeof preview.risk_gate === "object" ? preview.risk_gate : null;
+  const calibrationSizing = formatCryptoCalibrationSizing(riskGate, { es, includeStatus: true });
+  const direction = String(preview.signal_decision || risk.decision || side).toUpperCase();
+  const mode = String(preview.execution_mode || preview.requested_mode || state.cryptoExecutionMode || "simulated").toUpperCase();
+  const tradeLabel = `${side} ${preview.symbol || state.chartSymbol || "BTCUSDT"}`;
+  const qty = Number(preview.quantity ?? dom.chatTradeQty?.value ?? 0);
+  const entry = Number(preview.fill_price ?? preview.price ?? preview.mid_price ?? risk.entry_price);
+  const target = Number(preview.target_price ?? risk.target_price);
+  const stop = Number(preview.stop_price ?? risk.stop_price);
+  const gain = Number(preview.expected_gain_quote);
+  const loss = Number(preview.expected_loss_quote);
+  const rr = Number(preview.risk_reward ?? risk.risk_reward);
+  const spread = Number(preview.spread_bps);
+  const slippage = Number(preview.slippage_bps);
+  const executionDrag = Number(preview.execution_drag_pct ?? risk.execution_drag_pct);
+  const liquidity = String(preview.liquidity_bucket || risk.liquidity_bucket || "").trim() || null;
+  const signalProb = Number(preview.signal_probability_up ?? risk.probability_up);
+  const projectedMove = Number(preview.projected_move_pct ?? risk.projected_move_pct);
+  const netAfterCostsPct = Number(preview.net_expected_profit_after_costs_pct ?? risk.net_expected_profit_after_costs_pct);
+  const netAfterCostsQuote = Number(preview.net_expected_profit_after_costs_quote ?? risk.net_expected_profit_after_costs_quote);
+  const orderNotional = Number(preview.order_notional ?? risk.order_notional);
+  const visibleLiquidity = Number(preview.visible_liquidity_notional ?? risk.visible_liquidity_notional);
+  const sideLiquidity = Number(preview.side_liquidity_notional ?? risk.side_liquidity_notional);
+  const orderSizePct = Number(preview.order_size_pct ?? risk.order_size_pct);
+  const bookConsumptionPct = Number(preview.book_consumption_pct ?? risk.book_consumption_pct);
+  const participationPct = Number(preview.participation_pct ?? risk.participation_pct);
+  const othersPct = Number(preview.others_pct ?? risk.others_pct);
+  const remainingLiquidity = Number(preview.remaining_liquidity ?? risk.remaining_liquidity);
+  const preTradePrice = Number(preview.pre_trade_price ?? risk.pre_trade_price);
+  const postTradeEstimate = Number(preview.post_trade_estimate ?? risk.post_trade_estimate);
+  const impactScore = Number(preview.impact_score ?? risk.impact_score);
+  const suggestedQty = getCryptoCalibrationSuggestedQuantity(riskGate, qty);
+
+  const row = el("div", { class: "preview-body" });
+  row.appendChild(el("span", { class: "pill neutral", text: tradeLabel }));
+  row.appendChild(el("span", { class: `pill ${direction === "BUY" ? "buy" : direction === "SELL" ? "sell" : "neutral"}`, text: `${es ? "Señal" : "Signal"} ${direction}` }));
+  if (Number.isFinite(signalProb)) row.appendChild(el("span", { class: "pill muted", text: `${formatProb(signalProb)}` }));
+  if (Number.isFinite(qty) && qty > 0) row.appendChild(el("span", { class: "pill neutral", text: `${es ? "Qty" : "Qty"} ${qty}` }));
+  if (Number.isFinite(entry)) row.appendChild(el("span", { class: "pill success", text: `${es ? "Fill" : "Fill"} ${formatPrice(entry)}` }));
+  if (Number.isFinite(target)) row.appendChild(el("span", { class: "pill positive", text: `${es ? "Objetivo" : "Target"} ${formatPrice(target)}` }));
+  if (Number.isFinite(stop)) row.appendChild(el("span", { class: "pill danger", text: `${es ? "Stop" : "Stop"} ${formatPrice(stop)}` }));
+  if (Number.isFinite(rr)) row.appendChild(el("span", { class: "pill success", text: `R:R ${rr.toFixed(2)}` }));
+  if (Number.isFinite(spread)) row.appendChild(el("span", { class: "pill muted", text: `${es ? "Spread" : "Spread"} ${spread.toFixed(1)}bps` }));
+  if (Number.isFinite(slippage)) row.appendChild(el("span", { class: "pill muted", text: `${es ? "Slippage" : "Slippage"} ${slippage.toFixed(1)}bps` }));
+  if (Number.isFinite(executionDrag)) row.appendChild(el("span", { class: "pill muted", text: `${es ? "Drag" : "Drag"} ${formatPct(executionDrag, 2)}` }));
+  if (liquidity) row.appendChild(el("span", { class: "pill neutral", text: liquidity }));
+  if (Number.isFinite(projectedMove)) row.appendChild(el("span", { class: "pill muted", text: `${es ? "Move" : "Move"} ${formatPct(projectedMove, 2)}` }));
+  if (Number.isFinite(orderSizePct)) row.appendChild(el("span", { class: "pill success", text: `${es ? "Mi %" : "My %"} ${formatPct(orderSizePct / 100, 2)}` }));
+  if (Number.isFinite(participationPct)) row.appendChild(el("span", { class: "pill neutral", text: `${es ? "Yo / otros" : "Me / others"} ${formatPct(participationPct / 100, 1)} / ${formatPct((othersPct || 0) / 100, 1)}` }));
+  if (Number.isFinite(bookConsumptionPct)) row.appendChild(el("span", { class: "pill muted", text: `${es ? "Consume libro" : "Book use"} ${formatPct(bookConsumptionPct / 100, 1)}` }));
+  if (Number.isFinite(impactScore)) row.appendChild(el("span", { class: "pill warn", text: `${es ? "Impacto" : "Impact"} ${impactScore.toFixed(0)}/100` }));
+  if (Number.isFinite(netAfterCostsQuote)) row.appendChild(el("span", {
+    class: `pill ${netAfterCostsQuote >= 0 ? "positive" : "negative"}`,
+    text: `${es ? "Neto después de costos" : "Net after costs"} ${netAfterCostsQuote >= 0 ? "+" : "-"}${formatPrice(Math.abs(netAfterCostsQuote))}`,
+  }));
+  if (Number.isFinite(netAfterCostsPct)) row.appendChild(el("span", {
+    class: `pill ${netAfterCostsPct >= 0 ? "positive" : "negative"}`,
+    text: `${es ? "Neto %" : "Net %"} ${formatPct(netAfterCostsPct, 2)}`,
+  }));
+  if (Number.isFinite(remainingLiquidity)) row.appendChild(el("span", { class: "pill muted", text: `${es ? "Liquidez rem." : "Remaining liq."} ${formatPrice(remainingLiquidity, { compact: true })}` }));
+  if (Number.isFinite(visibleLiquidity)) row.appendChild(el("span", { class: "pill muted", text: `${es ? "Liquidez visible" : "Visible liq."} ${formatPrice(visibleLiquidity, { compact: true })}` }));
+  if (riskGate) {
+    row.appendChild(el("span", {
+      class: `pill ${riskGate.allowed ? "success" : "danger"}`,
+      text: riskGate.allowed
+        ? (es ? "Risk gate OK" : "Risk gate OK")
+        : `${es ? "Bloqueado" : "Blocked"} • ${String(riskGate.reason || "risk").replace(/_/g, " ")}`,
+    }));
+  }
+  dom.cryptoTradePreview.appendChild(row);
+
+  const comparison = el("div", { class: "preview-note" });
+  const preTradeText = Number.isFinite(preTradePrice) ? formatPrice(preTradePrice) : "—";
+  const postTradeText = Number.isFinite(postTradeEstimate) ? formatPrice(postTradeEstimate) : "—";
+  comparison.textContent = es
+    ? `Pre-trade ${preTradeText} → post-trade ${postTradeText}${Number.isFinite(orderNotional) ? ` • order ${formatPrice(orderNotional, { compact: true })}` : ""}${Number.isFinite(sideLiquidity) ? ` • side depth ${formatPrice(sideLiquidity, { compact: true })}` : ""}`
+    : `Pre-trade ${preTradeText} → post-trade ${postTradeText}${Number.isFinite(orderNotional) ? ` • order ${formatPrice(orderNotional, { compact: true })}` : ""}${Number.isFinite(sideLiquidity) ? ` • side depth ${formatPrice(sideLiquidity, { compact: true })}` : ""}`;
+  dom.cryptoTradePreview.appendChild(comparison);
+
+  if (calibrationSizing) {
+    dom.cryptoTradePreview.appendChild(el("div", {
+      class: `preview-note ${riskGate && riskGate.allowed === false ? "preview-guardrails" : ""}`.trim(),
+      text: `${es ? "Sizing calibrado" : "Calibrated sizing"}: ${calibrationSizing}`,
+    }));
+  }
+
+  const guardrailsSummary = formatCryptoRiskControlSummary(getCryptoRiskControlValues(), { es });
+  if (guardrailsSummary) {
+    dom.cryptoTradePreview.appendChild(el("div", { class: "preview-note preview-guardrails", text: guardrailsSummary }));
+  }
+
+  const noteText = preview.execution_note
+    ? String(preview.execution_note)
+    : (es
+      ? "El preview aplica fricción de libro: más tamaño = más impacto."
+      : "The preview applies order-book friction: larger size means more impact.");
+  const marketStyle = es
+    ? "Flujo tipo STP/ECN: spread + slippage + impacto aproximan fills con LPs o market makers."
+    : "STP/ECN-style flow: spread + slippage + impact approximate LP / market-maker fills.";
+  dom.cryptoTradePreview.appendChild(el("div", { class: "preview-note", text: `${noteText} • ${marketStyle}${mode ? ` • ${mode}` : ""}` }));
+
+  const footer = el("div", { class: "preview-footer" });
+  const pendingKey = getCryptoTradeDraftKey(state.cryptoTradePreviewPendingOrder);
+  const currentKey = getCryptoTradeDraftKey(buildCryptoTradeDraft(side));
+  const canConfirm = !!preview && !!state.cryptoTradePreviewArmed && !!state.cryptoTradePreviewPendingOrder && pendingKey === currentKey && (!riskGate || riskGate.allowed !== false);
+  if (canConfirm) {
+    const confirmBtn = el("button", {
+      class: "preview-confirm-btn",
+      type: "button",
+      text: es ? "Confirmar orden" : "Confirm order",
+    });
+    confirmBtn.addEventListener("click", () => {
+      confirmCryptoTrade().catch((err) => console.error("crypto-confirm", err));
+    });
+    footer.appendChild(confirmBtn);
+    footer.appendChild(el("span", {
+      class: "preview-footer-note",
+      text: es
+        ? "Revisa fill, spread, slippage y modo antes de confirmar."
+        : "Review fill, spread, slippage and mode before confirming.",
+    }));
+  } else {
+    if (Number.isFinite(suggestedQty)) {
+      const adjustBtn = el("button", {
+        class: "preview-confirm-btn preview-adjust-btn",
+        type: "button",
+        text: es
+          ? `Usar qty máx ${formatCryptoQuantityValue(suggestedQty)}`
+          : `Use max qty ${formatCryptoQuantityValue(suggestedQty)}`,
+      });
+      adjustBtn.addEventListener("click", () => {
+        applyCryptoSuggestedQuantity(riskGate, { side }).catch((err) => console.error("crypto-apply-suggested-qty", err));
+      });
+      footer.appendChild(adjustBtn);
+    }
+    footer.appendChild(el("span", {
+      class: "preview-footer-note",
+      text: riskGate && riskGate.allowed === false
+        ? (es
+          ? `Bloqueado por risk gate: ${String(riskGate.reason || "risk").replace(/_/g, " ")}${calibrationSizing ? ` • ${calibrationSizing}` : ""}${Number.isFinite(suggestedQty) ? ` • usa qty ${formatCryptoQuantityValue(suggestedQty)}` : ""}`
+          : `Blocked by risk gate: ${String(riskGate.reason || "risk").replace(/_/g, " ")}${calibrationSizing ? ` • ${calibrationSizing}` : ""}${Number.isFinite(suggestedQty) ? ` • use qty ${formatCryptoQuantityValue(suggestedQty)}` : ""}`)
+        : (es
+          ? "Preview vivo actualizado con Qty, símbolo, modo y controles de riesgo actuales. Pulsa Buy/Sell para armar la orden."
+          : "Live preview updated from current Qty, symbol, mode and risk controls. Click Buy/Sell to arm the order."),
+    }));
+  }
+  dom.cryptoTradePreview.appendChild(footer);
+}
+
+function getCryptoOrderBookSummary() {
+  const cryptoState = state.cryptoState && typeof state.cryptoState === "object" ? state.cryptoState : {};
+  const book = cryptoState.order_book && typeof cryptoState.order_book === "object" ? cryptoState.order_book : null;
+  if (!book) {
+    return { ready: false, raw: null };
+  }
+
+  const bids = Array.isArray(book.bids)
+    ? book.bids.slice(0, 5).map((row) => ({
+        price: Number(row?.price),
+        qty: Number(row?.qty),
+        notional: Number(row?.notional),
+      }))
+    : [];
+  const asks = Array.isArray(book.asks)
+    ? book.asks.slice(0, 5).map((row) => ({
+        price: Number(row?.price),
+        qty: Number(row?.qty),
+        notional: Number(row?.notional),
+      }))
+    : [];
+  const spreadBps = Number.isFinite(Number(book.spread_bps))
+    ? Number(book.spread_bps)
+    : Number.isFinite(Number(book.best_bid)) && Number.isFinite(Number(book.best_ask)) && Number(book.mid_price)
+      ? Math.max(0, ((Number(book.best_ask) - Number(book.best_bid)) / Number(book.mid_price)) * 10000)
+      : NaN;
+  const imbalance = Number.isFinite(Number(book.imbalance)) ? Number(book.imbalance) : 0.5;
+  const bestBid = Number(book.best_bid);
+  const bestAsk = Number(book.best_ask);
+  const mid = Number.isFinite(Number(book.mid_price))
+    ? Number(book.mid_price)
+    : Number.isFinite(bestBid) && Number.isFinite(bestAsk)
+      ? (bestBid + bestAsk) / 2
+      : NaN;
+  const maxNotional = Math.max(
+    1,
+    ...bids.map((row) => (Number.isFinite(row.notional) ? row.notional : 0)),
+    ...asks.map((row) => (Number.isFinite(row.notional) ? row.notional : 0))
+  );
+  return {
+    ready: true,
+    raw: book,
+    source: String(book.source || "").trim() || null,
+    liquidityBucket: String(book.liquidity_bucket || "").trim() || null,
+    spreadBps,
+    spread: Number(book.spread),
+    imbalance,
+    bestBid,
+    bestAsk,
+    mid,
+    bidNotional: Number(book.bid_notional),
+    askNotional: Number(book.ask_notional),
+    bids,
+    asks,
+    maxNotional,
+    note: String(book.note || "").trim() || null,
+    levels: Number(book.levels || 5),
+  };
+}
+
+function renderDepthSide(side, levels, maxNotional) {
+  const sideClass = side === "bids" ? "buy" : "sell";
+  const es = state.lang === LANG.ES;
+  const card = el("div", { class: `depth-side ${sideClass}` });
+  const header = el("div", { class: "depth-side-header" });
+  header.appendChild(el("div", { class: "depth-side-title", text: side === "bids" ? (es ? "Compras" : "Bids") : (es ? "Ventas" : "Asks") }));
+  const totalNotional = levels.reduce((acc, row) => acc + (Number.isFinite(row.notional) ? row.notional : 0), 0);
+  header.appendChild(el("span", { class: "pill neutral", text: `${formatPrice(totalNotional, { compact: true })}` }));
+  card.appendChild(header);
+
+  const rows = el("div", { class: "depth-rows" });
+  if (!levels.length) {
+    rows.appendChild(el("div", { class: "depth-empty", text: es ? "Sin datos." : "No data." }));
+  } else {
+    levels.forEach((row) => {
+      const notional = Number.isFinite(row.notional) ? row.notional : 0;
+      const widthPct = Math.max(6, Math.min(100, (notional / Math.max(maxNotional, 1)) * 100));
+      const line = el("div", { class: `depth-row ${sideClass}` });
+      line.appendChild(el("span", { class: "depth-fill" }));
+      line.lastChild.style.width = `${widthPct}%`;
+      const content = el("div", { class: "depth-row-content" });
+      content.appendChild(el("span", { class: "depth-price", text: formatPrice(row.price) }));
+      content.appendChild(el("span", { class: "depth-qty", text: `${formatPrice(row.qty, { compact: true })}` }));
+      content.appendChild(el("span", { class: "depth-notional", text: `${formatPrice(notional, { compact: true })}` }));
+      line.appendChild(content);
+      rows.appendChild(line);
+    });
+  }
+  card.appendChild(rows);
+  return card;
+}
+
+function renderCryptoOrderBook() {
+  if (!dom.cryptoOrderBook) return;
+  const es = state.lang === LANG.ES;
+  const summary = getCryptoOrderBookSummary();
+  dom.cryptoOrderBook.innerHTML = "";
+
+  const head = el("div", { class: "preview-head" });
+  head.appendChild(el("div", { class: "preview-title", text: es ? "Libro / Liquidez" : "Order book / Liquidity" }));
+  if (!summary.ready) {
+    dom.cryptoOrderBook.appendChild(head);
+    dom.cryptoOrderBook.appendChild(el("div", {
+      class: "preview-hint",
+      text: es
+        ? "Sin order book aún. Cambia símbolo o modo para cargar profundidad real/sintética."
+        : "No order book yet. Change symbol or mode to load real/synthetic depth.",
+    }));
+    return;
+  }
+
+  head.appendChild(el("span", { class: `pill ${summary.source === "binance" ? "success" : "muted"}`, text: summary.source || "—" }));
+  if (summary.liquidityBucket) {
+    head.appendChild(el("span", { class: "pill neutral", text: summary.liquidityBucket }));
+  }
+  dom.cryptoOrderBook.appendChild(head);
+
+  const summaryRow = el("div", { class: "depth-summary-row" });
+  summaryRow.appendChild(el("span", { class: "pill buy", text: `${es ? "Bid" : "Bid"} ${formatPrice(summary.bestBid)}` }));
+  summaryRow.appendChild(el("span", { class: "pill sell", text: `${es ? "Ask" : "Ask"} ${formatPrice(summary.bestAsk)}` }));
+  summaryRow.appendChild(el("span", { class: "pill muted", text: `${es ? "Spread" : "Spread"} ${formatPrice(summary.spreadBps, { compact: true })} bps` }));
+  summaryRow.appendChild(el("span", { class: "pill neutral", text: `${es ? "Imbalance" : "Imbalance"} ${(Number(summary.imbalance) * 100).toFixed(1)}%` }));
+  dom.cryptoOrderBook.appendChild(summaryRow);
+
+  const imbalanceWrap = el("div", { class: "depth-imbalance" });
+  const imbalanceLabel = el("div", { class: "depth-imbalance-label" });
+  imbalanceLabel.appendChild(el("span", { text: es ? "Presión compra" : "Buy pressure" }));
+  imbalanceLabel.appendChild(el("span", { text: `${(Number(summary.imbalance) * 100).toFixed(1)}%` }));
+  const imbalanceBar = el("div", { class: "depth-imbalance-bar" });
+  const imbalanceFill = el("div", { class: "depth-imbalance-fill" });
+  imbalanceFill.style.width = `${Math.max(0, Math.min(100, Number(summary.imbalance) * 100))}%`;
+  imbalanceBar.appendChild(imbalanceFill);
+  imbalanceWrap.appendChild(imbalanceLabel);
+  imbalanceWrap.appendChild(imbalanceBar);
+  dom.cryptoOrderBook.appendChild(imbalanceWrap);
+
+  if (summary.note) {
+    dom.cryptoOrderBook.appendChild(el("div", { class: "preview-note", text: summary.note }));
+  }
+
+  const grid = el("div", { class: "depth-grid" });
+  grid.appendChild(renderDepthSide("bids", summary.bids || [], summary.maxNotional || 1));
+  grid.appendChild(renderDepthSide("asks", summary.asks || [], summary.maxNotional || 1));
+  dom.cryptoOrderBook.appendChild(grid);
+}
+
+function updateCryptoTradePreviewUI() {
+  renderCryptoTradePreview();
+  renderCryptoOrderBook();
+}
+
+function getCryptoStateRequestKey(scope = getCurrentCryptoScope(), executionMode = state.cryptoExecutionMode) {
+  const normalizedScope = scope && typeof scope === "object" ? scope : getCurrentCryptoScope();
+  const mode = normalizeCryptoExecutionMode(executionMode || state.cryptoExecutionMode || "simulated");
+  const rawHorizon = normalizedScope.horizon ?? normalizedScope.horizon_minutes;
+  const horizon = Number.isFinite(Number(rawHorizon)) ? Number(rawHorizon) : 15;
+  return [
+    normalizedScope.symbol || "",
+    horizon,
+    normalizedScope.regime || "",
+    mode,
+  ].join("|");
+}
+
+function applyCryptoStateSnapshot(data, { source = "poll", refreshPreview = true } = {}) {
+  if (!data || typeof data !== "object") return null;
+  state.cryptoState = data;
+  const exec = data.execution && typeof data.execution === "object" ? data.execution : {};
+  const selected = normalizeCryptoExecutionMode(exec.requested_mode || exec.mode || state.cryptoExecutionMode || "simulated");
+  state.cryptoExecutionMode = selected;
+  localStorage.setItem("aegis_crypto_execution_mode", selected);
+  state.lastCryptoStateAt = Date.now();
+  state.lastCryptoStateKey = getCryptoStateRequestKey(data.scope || getCurrentCryptoScope(), selected);
+  state.cryptoStateQueued = false;
+  updateCryptoExecutionUI();
+  if (refreshPreview && (state.chartVisible || state.mode === MODES.CRYPTO)) {
+    scheduleCryptoTradePreviewRefresh({ side: state.cryptoPreviewSide || "BUY", force: false });
+  }
+  if (source !== "stream") {
+    scheduleSnapshot();
+  }
+  updateCryptoStatePolling();
+  return data;
+}
+
+function parseCryptoStreamBlock(rawBlock) {
+  const block = String(rawBlock || "").trim();
+  if (!block) return null;
+  const lines = block.split(/\r?\n/);
+  let eventName = "message";
+  const dataLines = [];
+  for (const line of lines) {
+    if (!line || line.startsWith(":")) continue;
+    if (line.startsWith("event:")) {
+      eventName = line.slice(6).trim() || "message";
+      continue;
+    }
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).replace(/^\s/, ""));
+    }
+  }
+  const dataText = dataLines.join("\n").trim();
+  let payload = null;
+  if (dataText) {
+    try {
+      payload = JSON.parse(dataText);
+    } catch {
+      payload = { raw: dataText };
+    }
+  }
+  return { eventName, payload };
+}
+
+function handleCryptoStreamEvent(eventName, payload) {
+  if (eventName === "crypto_state") {
+    const snapshot = payload && typeof payload === "object" && payload.snapshot && typeof payload.snapshot === "object"
+      ? payload.snapshot
+      : payload;
+    if (snapshot && typeof snapshot === "object") {
+      applyCryptoStateSnapshot(snapshot, { source: "stream", refreshPreview: true });
+    }
+    state.cryptoStateStreamLastHeartbeatAt = Date.now();
+    return true;
+  }
+  if (eventName === "heartbeat") {
+    state.cryptoStateStreamLastHeartbeatAt = Date.now();
+    if (payload && typeof payload === "object" && payload.scope && payload.scope.symbol) {
+      const nextSymbol = String(payload.scope.symbol || "").trim().toUpperCase();
+      if (nextSymbol && nextSymbol !== state.chartSymbol) {
+        state.chartSymbol = nextSymbol;
+      }
+    }
+    updateCryptoExecutionUI();
+    return true;
+  }
+  return false;
+}
+
+function stopCryptoStateLiveStream({ fallback = false } = {}) {
+  if (state.cryptoStateStreamReconnectTimer) {
+    clearTimeout(state.cryptoStateStreamReconnectTimer);
+    state.cryptoStateStreamReconnectTimer = null;
+  }
+  const controller = state.cryptoStateStreamController;
+  state.cryptoStateStreamController = null;
+  state.cryptoStateStreamActive = false;
+  state.cryptoStateStreamInFlight = false;
+  state.cryptoStateStreamLastHeartbeatAt = 0;
+  state.cryptoStateStreamFallbackActive = !!fallback;
+  if (controller) {
+    try {
+      controller.abort();
+    } catch {}
+    unregisterAbortController(controller);
+  }
+  updateStatusCenter();
+}
+
+function scheduleCryptoStateStreamReconnect(delayMs = 5000) {
+  if (state.cryptoStateStreamReconnectTimer) {
+    clearTimeout(state.cryptoStateStreamReconnectTimer);
+  }
+  if (document.hidden || !(state.chartVisible || state.mode === MODES.CRYPTO)) return;
+  state.cryptoStateStreamReconnectTimer = setTimeout(() => {
+    state.cryptoStateStreamReconnectTimer = null;
+    if (document.hidden || !(state.chartVisible || state.mode === MODES.CRYPTO)) return;
+    startCryptoStateLiveStream({ force: true }).catch(() => {});
+  }, Math.max(1000, Number(delayMs) || 5000));
+}
+
+async function startCryptoStateLiveStream({ force = false } = {}) {
+  if (document.hidden || !(state.chartVisible || state.mode === MODES.CRYPTO)) {
+    stopCryptoStateLiveStream();
+    stopCryptoStatePolling();
+    return false;
+  }
+  const streamKey = getCryptoStateRequestKey();
+  if (!force && state.cryptoStateStreamActive && state.cryptoStateStreamKey === streamKey) {
+    return true;
+  }
+  if (state.cryptoStateStreamInFlight) return false;
+  if (state.cryptoStateStreamController && state.cryptoStateStreamKey !== streamKey) {
+    stopCryptoStateLiveStream();
+  }
+
+  state.cryptoStateStreamInFlight = true;
+  state.cryptoStateStreamKey = streamKey;
+  state.cryptoStateStreamFallbackActive = false;
+  state.cryptoStateStreamFailures = force ? 0 : Number(state.cryptoStateStreamFailures || 0);
+  updateStatusCenter();
+
+  const controller = registerAbortController(new AbortController());
+  state.cryptoStateStreamController = controller;
+
+  try {
+    await ensureAccessToken();
+    const scope = getCurrentCryptoScope();
+    const executionMode = normalizeCryptoExecutionMode(
+      state.cryptoExecutionMode || state.cryptoState?.execution?.requested_mode || state.cryptoState?.execution?.mode || "simulated"
+    );
+    const url = new URL(endpoints.cryptoStateStream, location.origin);
+    url.searchParams.set("symbol", scope.symbol);
+    url.searchParams.set("engine", "all");
+    url.searchParams.set("horizon_minutes", String(scope.horizon));
+    url.searchParams.set("execution_mode", executionMode);
+    if (scope.regime) url.searchParams.set("regime", scope.regime);
+
+    const headers = withJsonHeaders({ Accept: "text/event-stream", "Cache-Control": "no-cache" }, "main");
+    let res = await fetch(url.toString(), { headers, signal: controller.signal, credentials: "include" });
+    if (res.status === 401 || res.status === 403) {
+      if (await tryRefreshAccessToken()) {
+        const retryHeaders = withJsonHeaders({ Accept: "text/event-stream", "Cache-Control": "no-cache" }, "main");
+        res = await fetch(url.toString(), { headers: retryHeaders, signal: controller.signal, credentials: "include" });
+      }
+      if (res.status === 401 || res.status === 403) {
+        await markAuthFailure(url, res, { scope: authScopeForUrl(url), keyToUse: cleanKey(state.apiKey) });
+        throw new Error(`HTTP ${res.status}`);
+      }
+    }
+    if (!res.ok || !res.body) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    state.cryptoStateStreamActive = true;
+    state.cryptoStateStreamFailures = 0;
+    state.cryptoStateStreamLastHeartbeatAt = Date.now();
+    stopCryptoStatePolling();
+    updateCryptoExecutionUI();
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      if (controller.signal.aborted || document.hidden || !(state.chartVisible || state.mode === MODES.CRYPTO)) break;
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary !== -1) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const parsed = parseCryptoStreamBlock(block);
+        if (parsed) handleCryptoStreamEvent(parsed.eventName, parsed.payload);
+        boundary = buffer.indexOf("\n\n");
+      }
+    }
+    if (buffer.trim()) {
+      const parsed = parseCryptoStreamBlock(buffer);
+      if (parsed) handleCryptoStreamEvent(parsed.eventName, parsed.payload);
+    }
+    return true;
+  } catch (err) {
+    if (!controller.signal.aborted) {
+      console.error("crypto-state-stream-error", err);
+      state.cryptoStateStreamFailures = Number(state.cryptoStateStreamFailures || 0) + 1;
+      state.cryptoStateStreamFallbackActive = true;
+      startCryptoStatePolling();
+      const backoff = Math.min(20000, 4000 + (state.cryptoStateStreamFailures * 2500));
+      scheduleCryptoStateStreamReconnect(backoff);
+    }
+    return false;
+  } finally {
+    state.cryptoStateStreamInFlight = false;
+    state.cryptoStateStreamActive = false;
+    if (state.cryptoStateStreamController === controller) {
+      state.cryptoStateStreamController = null;
+    }
+    unregisterAbortController(controller);
+    updateCryptoExecutionUI();
+    updateStatusCenter();
+  }
+}
+
+function getCryptoRiskSummary() {
+  const cryptoState = state.cryptoState && typeof state.cryptoState === "object" ? state.cryptoState : {};
+  const risk = cryptoState.risk && typeof cryptoState.risk === "object" ? cryptoState.risk : {};
+  const prediction = state.lastPrediction && typeof state.lastPrediction === "object" ? state.lastPrediction : {};
+  const trade = state.lastTradeQuote && typeof state.lastTradeQuote === "object" ? state.lastTradeQuote : {};
+  const decision = String(risk.decision || prediction.action_decision || prediction.decision || "HOLD").trim().toUpperCase() || "HOLD";
+  const tradeable = risk.tradeable !== undefined ? !!risk.tradeable : decision === "BUY" || decision === "SELL";
+
+  const entry = Number.isFinite(Number(risk.entry_price))
+    ? Number(risk.entry_price)
+    : Number.isFinite(Number(trade.fill_price))
+      ? Number(trade.fill_price)
+      : Number.isFinite(Number(trade.price))
+        ? Number(trade.price)
+        : Number.isFinite(Number(prediction.current_price))
+          ? Number(prediction.current_price)
+          : Number.isFinite(Number(cryptoState.current_price))
+            ? Number(cryptoState.current_price)
+            : NaN;
+  const target = Number.isFinite(Number(risk.target_price))
+    ? Number(risk.target_price)
+    : Number.isFinite(Number(prediction.predicted_price))
+      ? Number(prediction.predicted_price)
+      : NaN;
+  const stop = Number.isFinite(Number(risk.stop_price)) ? Number(risk.stop_price) : NaN;
+  const projectedMovePct = Number.isFinite(Number(risk.projected_move_pct))
+    ? Number(risk.projected_move_pct)
+    : Number.isFinite(entry) && Number.isFinite(target) && entry > 0
+      ? Math.abs((target - entry) / entry)
+      : NaN;
+  const netEdgePct = Number.isFinite(Number(risk.net_edge_pct))
+    ? Number(risk.net_edge_pct)
+    : Number.isFinite(projectedMovePct)
+      ? projectedMovePct
+      : NaN;
+  const netAfterCostsPct = Number.isFinite(Number(risk.net_expected_profit_after_costs_pct))
+    ? Number(risk.net_expected_profit_after_costs_pct)
+    : netEdgePct;
+  const stopLossPct = Number.isFinite(Number(risk.stop_loss_pct)) ? Number(risk.stop_loss_pct) : NaN;
+  const takeProfitPct = Number.isFinite(Number(risk.take_profit_pct))
+    ? Number(risk.take_profit_pct)
+    : Number.isFinite(projectedMovePct)
+      ? projectedMovePct
+      : NaN;
+  const executionDragPct = Number.isFinite(Number(risk.execution_drag_pct)) ? Number(risk.execution_drag_pct) : 0;
+  const riskReward = Number.isFinite(Number(risk.risk_reward))
+    ? Number(risk.risk_reward)
+    : Number.isFinite(takeProfitPct) && Number.isFinite(stopLossPct) && stopLossPct > 0
+      ? takeProfitPct / stopLossPct
+      : NaN;
+  const qty = Number.parseFloat(dom.chatTradeQty?.value || trade.quantity || "0");
+  const gainQuote = tradeable && Number.isFinite(qty) && qty > 0 && Number.isFinite(entry) && Number.isFinite(netEdgePct)
+    ? qty * entry * Math.max(0, netEdgePct)
+    : NaN;
+  const netAfterCostsQuote = tradeable && Number.isFinite(qty) && qty > 0 && Number.isFinite(entry) && Number.isFinite(netAfterCostsPct)
+    ? qty * entry * netAfterCostsPct
+    : Number.isFinite(Number(risk.net_expected_profit_after_costs_quote))
+      ? Number(risk.net_expected_profit_after_costs_quote)
+      : NaN;
+  const lossQuote = tradeable && Number.isFinite(qty) && qty > 0 && Number.isFinite(entry) && Number.isFinite(stopLossPct)
+    ? qty * entry * (stopLossPct + executionDragPct)
+    : NaN;
+  const projectedQuote = Number.isFinite(qty) && qty > 0 && Number.isFinite(entry) && Number.isFinite(projectedMovePct)
+    ? qty * entry * projectedMovePct
+    : NaN;
+  const signalLabel = tradeable ? decision : "WATCH";
+  const mode = String(risk.execution_mode || cryptoState.execution?.mode || state.cryptoExecutionMode || "simulated").trim().toLowerCase() || "simulated";
+  const liquidity = String(risk.liquidity_bucket || trade.liquidity_bucket || "").trim() || null;
+  const livePrice = Number.isFinite(Number(cryptoState.current_price)) ? Number(cryptoState.current_price) : entry;
+
+  return {
+    ready: Number.isFinite(entry) && Number.isFinite(target),
+    decision,
+    tradeable,
+    signalLabel,
+    entry,
+    target,
+    stop,
+    projectedMovePct,
+    netEdgePct,
+    netAfterCostsPct,
+    stopLossPct,
+    takeProfitPct,
+    executionDragPct,
+    riskReward,
+    gainQuote,
+    netAfterCostsQuote,
+    lossQuote,
+    projectedQuote,
+    qty: Number.isFinite(qty) && qty > 0 ? qty : NaN,
+    mode,
+    liquidity,
+    livePrice,
+    raw: risk,
+  };
+}
+
+function startCryptoStatePolling() {
+  if (state.cryptoStateTimer) return;
+  if (state.cryptoStateStreamActive || state.cryptoStateStreamInFlight) return;
+  const tick = () => {
+    if (document.hidden) return;
+    if (!(state.chartVisible || state.mode === MODES.CRYPTO)) return;
+    loadCryptoState();
+  };
+  state.cryptoStateTimer = setInterval(tick, 30000);
+  tick();
+}
+
+function stopCryptoStatePolling() {
+  if (state.cryptoStateTimer) clearInterval(state.cryptoStateTimer);
+  state.cryptoStateTimer = null;
+}
+
+function updateCryptoStatePolling() {
+  if (document.hidden) {
+    stopCryptoStateLiveStream();
+    stopCryptoStatePolling();
+    return;
+  }
+  if (state.chartVisible || state.mode === MODES.CRYPTO) {
+    stopCryptoStatePolling();
+    startCryptoStateLiveStream().catch((err) => console.error("crypto-stream-start", err));
+  } else {
+    stopCryptoStateLiveStream();
+    stopCryptoStatePolling();
+  }
+}
+
+async function loadCryptoState({ force = false } = {}) {
+  const scope = getCurrentCryptoScope();
+  const executionMode = normalizeCryptoExecutionMode(state.cryptoExecutionMode);
+  const requestKey = `${scope.symbol}|${scope.horizon}|${scope.regime || ""}|${executionMode}`;
+  const now = Date.now();
+  if (!force && state.lastCryptoStateKey === requestKey && (now - Number(state.lastCryptoStateAt || 0)) < 12000) {
+    return state.cryptoState;
+  }
+  if (state.cryptoStateInFlight) {
+    state.cryptoStateQueued = true;
+    return state.cryptoState;
+  }
+  state.cryptoStateInFlight = true;
+  state.lastCryptoStateKey = requestKey;
+  state.lastCryptoStateAt = now;
+  try {
+    const url = new URL(endpoints.cryptoState, location.origin);
+    url.searchParams.set("symbol", scope.symbol);
+    url.searchParams.set("engine", "all");
+    url.searchParams.set("horizon_minutes", String(scope.horizon));
+    url.searchParams.set("execution_mode", executionMode);
+    if (scope.regime) url.searchParams.set("regime", scope.regime);
+    const res = await fetchWithTimeout(url.toString(), { headers: { Accept: "application/json" } }, { timeout: 10000, retries: 0 });
+    const data = await safeJson(res);
+    if (res.ok && data && typeof data === "object") {
+      applyCryptoStateSnapshot(data, { source: "poll", refreshPreview: true });
+    }
+  } catch (err) {
+    console.error("crypto-state-error", err);
+  } finally {
+    state.cryptoStateInFlight = false;
+    if (state.cryptoStateQueued) {
+      state.cryptoStateQueued = false;
+      setTimeout(() => loadCryptoState({ force: true }), 0);
+    }
+  }
+  return state.cryptoState;
+}
+
 function parseTradeCommand(text) {
   if (!text) return null;
   const cmd = text.trim();
@@ -7939,48 +9625,54 @@ async function tryHandleTradeCommand(text) {
   if (!cmd) return false;
 
   appendBubble(text, "user");
-  appendBubble(state.lang === LANG.ES ? "Ejecutando orden (test)..." : "Executing order (test)...", "bot");
-
-  try {
-    const res = await fetchWithTimeout(endpoints.cryptoTrade, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ ...cmd, test: true }),
-    }, { timeout: 15000, retries: 0 });
-
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error("HTTP " + res.status);
-
-    const price = data?.price ?? data?.current_price ?? data?.predicted_price;
-    const status = data?.status || "SIMULATED";
-    appendBubble(
-      state.lang === LANG.ES
-        ? `Orden ${cmd.side} ${cmd.symbol} qty=${cmd.quantity} → ${status}${price ? ` @ ${price}` : ""}`
-        : `Order ${cmd.side} ${cmd.symbol} qty=${cmd.quantity} → ${status}${price ? ` @ ${price}` : ""}`,
-      "bot"
-    );
-
-    if (Number.isFinite(price)) {
-      state.tradesOnChart.push({ t: Date.now(), price: parseFloat(price), side: cmd.side });
-      if (state.lastPoints?.length) renderChart(state.lastPoints);
-    }
-  } catch (err) {
-    console.error(err);
-    appendBubble(state.lang === LANG.ES ? "No se pudo enviar la orden (simulada)." : "Failed to send order (simulated).", "error");
+  if (dom.chartSymbol) dom.chartSymbol.value = cmd.symbol;
+  state.chartSymbol = cmd.symbol;
+  if (dom.chatTradeQty) dom.chatTradeQty.value = String(cmd.quantity);
+  state.cryptoPreviewSide = cmd.side;
+  state.cryptoTradePreviewArmed = true;
+  localStorage.setItem("aegis_crypto_preview_side", cmd.side);
+  if (!state.chartVisible) {
+    showCryptoPanelFromToolbar();
   }
+  appendBubble(
+    state.lang === LANG.ES
+      ? `Preview ${cmd.side} cargado para ${cmd.symbol} qty=${cmd.quantity}. Confirma desde el panel de Cripto.`
+      : `${cmd.side} preview loaded for ${cmd.symbol} qty=${cmd.quantity}. Confirm from the Crypto panel.`,
+    "bot"
+  );
+  loadCryptoPrediction({ force: true }).catch(() => {});
+  loadCryptoState({ force: true }).catch(() => {});
+  loadCryptoTradePreview({ side: cmd.side, force: true, arm: true }).catch(() => {});
   return true;
 }
 
-async function submitTrade(side) {
-  const symbol = (dom.chartSymbol?.value || state.chartSymbol || "").trim().toUpperCase();
-  const qty = parseFloat(dom.chatTradeQty?.value || "0");
+async function submitTrade(side, overrides = {}) {
+  const symbol = String(overrides.symbol || dom.chartSymbol?.value || state.chartSymbol || "").trim().toUpperCase();
+  const qtyRaw = overrides.quantity ?? dom.chatTradeQty?.value ?? "0";
+  const qty = parseFloat(qtyRaw);
+  const selectedMode = normalizeCryptoExecutionMode(overrides.executionMode || overrides.execution_mode || state.cryptoExecutionMode);
+  const riskControls = getCryptoRiskControlValues();
 
   if (!symbol) return setTradeStatus(state.lang === LANG.ES ? "Escribe un símbolo." : "Enter a symbol.", true);
   if (!Number.isFinite(qty) || qty <= 0) return setTradeStatus(state.lang === LANG.ES ? "Cantidad inválida." : "Invalid quantity.", true);
 
-  setTradeStatus(state.lang === LANG.ES ? "Enviando orden..." : "Sending order...");
+  setTradeStatus(
+    state.lang === LANG.ES
+      ? `Enviando orden ${side}...`
+      : `Sending ${side} order...`
+  );
   try {
-    const payload = { symbol, side, quantity: qty, test: TRADE_TEST_DEFAULT };
+    const payload = {
+      symbol,
+      side,
+      quantity: qty,
+      test: selectedMode !== "live",
+      execution_mode: selectedMode,
+      stop_loss_pct: overrides.stopLossPct ?? overrides.stop_loss_pct ?? riskControls.stopLossPct,
+      take_profit_pct: overrides.takeProfitPct ?? overrides.take_profit_pct ?? riskControls.takeProfitPct,
+      max_exposure_quote: overrides.maxExposureQuote ?? overrides.max_exposure_quote ?? riskControls.maxExposureQuote,
+      max_order_size_pct: overrides.maxOrderSizePct ?? overrides.max_order_size_pct ?? riskControls.maxOrderSizePct,
+    };
     const res = await fetchWithTimeout(endpoints.cryptoTrade, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -7989,12 +9681,29 @@ async function submitTrade(side) {
 
     const data = await safeJson(res);
     if (!res.ok) throw new Error("HTTP " + res.status);
+    if (data?.status === "REJECTED") {
+      state.lastTradeQuote = data || null;
+      state.cryptoTradePreviewArmed = false;
+      state.cryptoTradePreviewPendingOrder = null;
+      updateCryptoExecutionUI();
+      setTradeStatus(
+        state.lang === LANG.ES
+          ? `Orden bloqueada: ${data?.message || "risk gate"}`
+          : `Order blocked: ${data?.message || "risk gate"}`,
+        true
+      );
+      return false;
+    }
 
-    const tradePrice = parseFloat(data?.price ?? data?.executedPrice ?? data?.avgPrice ?? data?.lastPrice ?? data?.current_price);
+    const tradePrice = parseFloat(data?.fill_price ?? data?.price ?? data?.executedPrice ?? data?.avgPrice ?? data?.lastPrice ?? data?.current_price);
+    state.lastTradeQuote = data || null;
+    state.cryptoTradePreviewArmed = false;
+    state.cryptoTradePreviewPendingOrder = null;
+    updateCryptoExecutionUI();
     setTradeStatus(
       state.lang === LANG.ES
-        ? `Orden ${side} enviada (${qty}). ${data?.status || ""}`.trim()
-        : `${side} order sent (${qty}). ${data?.status || ""}`.trim(),
+        ? `Orden ${side} enviada (${qty}). ${data?.status || ""}${data?.execution_note ? ` • ${data.execution_note}` : ""}`.trim()
+        : `${side} order sent (${qty}). ${data?.status || ""}${data?.execution_note ? ` • ${data.execution_note}` : ""}`.trim(),
       false
     );
 
@@ -8002,9 +9711,12 @@ async function submitTrade(side) {
       state.tradesOnChart.push({ t: Date.now(), price: tradePrice, side });
       if (state.lastPoints?.length) renderChart(state.lastPoints);
     }
+    loadCryptoState({ force: true });
+    return true;
   } catch (err) {
     console.error(err);
     setTradeStatus(state.lang === LANG.ES ? "Fallo la orden." : "Order failed.", true);
+    return false;
   }
 }
 
@@ -8105,54 +9817,112 @@ function renderNewsList(items, momentum) {
 
 function updatePredictionTooltipText() {
   if (!dom.predictionCompareTooltip) return;
-  dom.predictionCompareTooltip.innerHTML =
-    state.lang === LANG.ES
-      ? [
-          "<strong>¿Cómo leer la comparación post-horizonte?</strong>",
-          "<p>Qué es: guarda la señal (BUY/SELL/HOLD), p%, horizonte H y precio base; al vencer H se mide precio real y Δ.</p>",
-          "<p>Flujo cripto: 📈 escribe “BTCUSDT H=2m” o usa el panel Cripto. ⏱️ /crypto/predictions/evaluate fuerza el cierre.</p>",
-          "<p>Iconos: 💹 BUY (sube) · 📉 SELL (baja) · ⏸️ HOLD (plano). “Retorno hipotético” es educativo, no consejo financiero.</p>",
-          "<p>Campos clave:</p>",
-          "<ul style='margin:6px 0 4px 14px; line-height:1.35;'>",
-          "<li>🎯 Signal: BUY/SELL/HOLD + p% + H.</li>",
-          "<li>📊 p%: prob. estimada de subida (50% = neutro).</li>",
-          "<li>⏱️ H: minutos hasta medir el resultado.</li>",
-          "<li>🏁 Base price: precio al emitir la señal.</li>",
-          "<li>📌 Actual price: precio al cerrar H.</li>",
-          "<li>Δ%: cambio real tras H. Regla: BUY gana si Δ&gt;0; SELL si Δ&lt;0; HOLD si |Δ|&lt;1%.</li>",
-          "</ul>",
-          "<p>Cómo compararlo con el gráfico:</p>",
-          "<ul style='margin:6px 0 4px 14px; line-height:1.35;'>",
-          "<li>1) Ubica la hora/base de la señal en el gráfico.</li>",
-          "<li>2) Avanza H minutos y lee el precio (≈ “Actual price”).</li>",
-          "<li>3) Comprueba el signo de Δ vs. la señal: BUY → Δ&gt;0; SELL → Δ&lt;0; HOLD → Δ≈0.</li>",
-          "</ul>",
-          "<p>Ejemplo: BUY • p=92.4% • H=2m | Base=93962.01 → Actual=93897.03 → Δ=-0.07% ⇒ BUY falló.</p>",
-          "<p>Chequeo mental: BUY quiere Δ→↑; SELL Δ→↓; HOLD Δ≈0 (|Δ|&lt;1%).</p>",
-        ].join("")
-      : [
-          "<strong>How to read the post-horizon comparison?</strong>",
-          "<p>What it is: stores the signal (BUY/SELL/HOLD), p%, horizon H, and base price; when H expires it captures actual price and Δ.</p>",
-          "<p>Crypto flow: 📈 type “BTCUSDT H=2m” or use the Crypto panel. ⏱️ /crypto/predictions/evaluate forces closing the horizon.</p>",
-          "<p>Icons: 💹 BUY (up) · 📉 SELL (down) · ⏸️ HOLD (flat). “Hypothetical return” is educational, not financial advice.</p>",
-          "<p>Key fields:</p>",
-          "<ul style='margin:6px 0 4px 14px; line-height:1.35;'>",
-          "<li>🎯 Signal: BUY/SELL/HOLD + p% + H.</li>",
-          "<li>📊 p%: estimated probability up (50% = neutral).</li>",
-          "<li>⏱️ H: minutes until the outcome.</li>",
-          "<li>🏁 Base price: price when the signal fired.</li>",
-          "<li>📌 Actual price: price at horizon close.</li>",
-          "<li>Δ%: real move after H. Rule: BUY wins if Δ&gt;0; SELL if Δ&lt;0; HOLD if |Δ|&lt;1%.</li>",
-          "</ul>",
-          "<p>How to compare with the chart:</p>",
-          "<ul style='margin:6px 0 4px 14px; line-height:1.35;'>",
-          "<li>1) Locate the signal time/base on the chart.</li>",
-          "<li>2) Move forward H minutes and read the price (≈ “Actual price”).</li>",
-          "<li>3) Check Δ sign vs signal: BUY → Δ&gt;0; SELL → Δ&lt;0; HOLD → Δ≈0.</li>",
-          "</ul>",
-          "<p>Example: BUY • p=92.4% • H=2m | Base=93962.01 → Actual=93897.03 → Δ=-0.07% ⇒ BUY failed.</p>",
-          "<p>Mental check: BUY wants Δ→↑; SELL wants Δ→↓; HOLD wants Δ≈0 (|Δ|&lt;1%).</p>",
-        ].join("");
+  const es = state.lang === LANG.ES;
+  const scope = getCurrentCryptoScope();
+  const pred = state.lastPrediction || {};
+  const decision = String(pred.action_decision || pred.model_decision || pred.decision || "HOLD").toUpperCase();
+  const prob = Number.isFinite(Number(pred.p_final ?? pred.prob ?? pred.probability_up))
+    ? Number(pred.p_final ?? pred.prob ?? pred.probability_up)
+    : null;
+  const pText = Number.isFinite(prob) ? formatProb(prob) : "—";
+  const buyThreshold = Number.isFinite(Number(pred.buy_threshold)) ? Number(pred.buy_threshold) : 0.63;
+  const sellThreshold = Number.isFinite(Number(pred.sell_threshold)) ? Number(pred.sell_threshold) : 0.37;
+  const priceSource = String(pred.price_source || dom.priceSourceBadge?.textContent || "demo").toLowerCase();
+  const credibility = pred.credibility_status ? String(pred.credibility_status).toUpperCase() : null;
+  const credibilityScore = Number.isFinite(Number(pred.credibility_score)) ? `${(Number(pred.credibility_score) * 100).toFixed(0)}%` : "—";
+  const model = String(pred.model || state.selectedCryptoModel || "ensemble").toUpperCase();
+  const horizon = Number.isFinite(Number(scope.horizon)) ? `${scope.horizon}m` : "—";
+  const signalRule = es
+    ? `BUY si p ≥ ${formatProb(buyThreshold)} · SELL si p ≤ ${formatProb(sellThreshold)} · HOLD en medio`
+    : `BUY if p ≥ ${formatProb(buyThreshold)} · SELL if p ≤ ${formatProb(sellThreshold)} · HOLD otherwise`;
+  const signalFields = es
+    ? [
+        `Señal actual: <strong>${decision}</strong>`,
+        `Símbolo / horizonte: <strong>${scope.symbol}</strong> · <strong>${horizon}</strong>`,
+        `Probabilidad usada: <strong>${pText}</strong>`,
+        `Modelo: <strong>${model}</strong>`,
+        `Fuente: <strong>${priceSource}</strong>`,
+        credibility ? `Credibilidad: <strong>${credibility}</strong> • score ${credibilityScore}` : "",
+      ].filter(Boolean)
+    : [
+      `Current signal: <strong>${decision}</strong>`,
+      `Symbol / horizon: <strong>${scope.symbol}</strong> · <strong>${horizon}</strong>`,
+      `Probability used: <strong>${pText}</strong>`,
+      `Model: <strong>${model}</strong>`,
+      `Source: <strong>${priceSource}</strong>`,
+      credibility ? `Credibility: <strong>${credibility}</strong> • score ${credibilityScore}` : "",
+    ].filter(Boolean);
+  const keyFields = es
+    ? [
+        "Signal: BUY/SELL/HOLD + p% + H.",
+        "p%: prob. estimada de subida.",
+        "H: minutos hasta medir el resultado.",
+        "Base price: precio cuando se emitió la señal.",
+        "Actual price: precio al cerrar H.",
+        "Δ%: cambio real tras H.",
+        "Regla: BUY gana si Δ > 0; SELL si Δ < 0; HOLD si |Δ| < 1%.",
+      ]
+    : [
+        "Signal: BUY/SELL/HOLD + p% + H.",
+        "p%: estimated probability up.",
+        "H: minutes until the result is measured.",
+        "Base price: price when the signal fired.",
+        "Actual price: price at horizon close.",
+        "Δ%: real move after H.",
+        "Rule: BUY wins if Δ > 0; SELL if Δ < 0; HOLD if |Δ| < 1%.",
+      ];
+
+  const tooltip = dom.predictionCompareTooltip;
+  tooltip.innerHTML = "";
+
+  tooltip.appendChild(el("strong", { text: es ? "Cómo leer la comparación post-horizonte" : "How to read the post-horizon comparison" }));
+  tooltip.appendChild(el("p", { text: signalRule }));
+
+  const scopeLine = el("p");
+  scopeLine.appendChild(document.createTextNode(es ? "Ahora mismo el scope activo es " : "The active scope is "));
+  scopeLine.appendChild(el("strong", { text: scope.symbol }));
+  scopeLine.appendChild(document.createTextNode(es ? " con horizonte " : " with horizon "));
+  scopeLine.appendChild(el("strong", { text: horizon }));
+  scopeLine.appendChild(document.createTextNode("."));
+  tooltip.appendChild(scopeLine);
+
+  const fieldsLine = el("p");
+  fieldsLine.appendChild(document.createTextNode(
+    es
+      ? `Señal actual: ${decision} · Probabilidad usada: ${pText} · Modelo: ${model} · Fuente: ${priceSource}${credibility ? ` · Credibilidad: ${credibility} • score ${credibilityScore}` : ""}`
+      : `Current signal: ${decision} · Probability used: ${pText} · Model: ${model} · Source: ${priceSource}${credibility ? ` · Credibility: ${credibility} • score ${credibilityScore}` : ""}`
+  ));
+  tooltip.appendChild(fieldsLine);
+
+  tooltip.appendChild(
+    el("p", {
+      text: es
+        ? "Flujo cripto: escribe “BTCUSDT H=2m” o usa el panel Cripto. /crypto/predictions/evaluate fuerza el cierre del horizonte."
+        : "Crypto flow: type “BTCUSDT H=2m” or use the Crypto panel. /crypto/predictions/evaluate forces the horizon close.",
+    })
+  );
+  tooltip.appendChild(
+    el("p", {
+      text: es
+        ? "Esta vista compara la señal contra el precio real cuando vence H. No es consejo financiero."
+        : "This view compares the signal against the actual price when H expires. Not financial advice.",
+    })
+  );
+  tooltip.appendChild(el("p", { text: es ? "Campos usados por el panel:" : "Fields used by this panel:" }));
+
+  const list = el("ul");
+  list.style.margin = "6px 0 4px 14px";
+  list.style.lineHeight = "1.35";
+  keyFields.forEach((item) => {
+    list.appendChild(el("li", { text: item }));
+  });
+  tooltip.appendChild(list);
+
+  tooltip.appendChild(
+    el("p", {
+      text: es ? "Chequeo rápido: BUY quiere Δ↑, SELL Δ↓ y HOLD Δ≈0." : "Quick check: BUY wants Δ↑, SELL wants Δ↓ and HOLD wants Δ≈0.",
+    })
+  );
 }
 
 function formatPct(v, digits = 2) {
@@ -8669,10 +10439,12 @@ async function clearCryptoHistory() {
       fetchWithTimeout(endpoints.cryptoTradesClear, { method: "DELETE" }, { timeout: 8000, retries: 0 }),
     ]);
     appendBubble(es ? "Historial cripto borrado." : "Crypto history cleared.", "bot");
+    state.lastTradeQuote = null;
     loadRecentPredictions();
     loadStats();
     loadPnl();
     loadPredictionComparison(state.chartSymbol, { force: true });
+    loadCryptoState({ force: true });
   } catch (err) {
     console.error(err);
     appendBubble(es ? "No se pudo borrar el historial." : "Could not clear history.", "bot");
@@ -8715,6 +10487,7 @@ function renderSnapshotPanel(data, health, readyz = null) {
   const surfaces = data?.api_surfaces || readyz?.api_surfaces || {};
   const healthStatus = health?.status || health?.detail || null;
   const runtimeStatus = readyz?.status || data?.status || "unknown";
+  const cryptoState = state.cryptoState || data?.crypto_state || readyz?.crypto_state || {};
 
   dom.sourcesContent.innerHTML = "";
 
@@ -8853,6 +10626,67 @@ function renderSnapshotPanel(data, health, readyz = null) {
     processCard.appendChild(el("div", { class: "kpi-item", text: `${es ? "Uptime" : "Uptime"}: ${uptime.toFixed(1)}s` }));
   }
   wrap.appendChild(processCard);
+
+  const cryptoCard = el("div", { class: "kpi-card" });
+  const cryptoScope = cryptoState?.scope || {};
+  const cryptoExecution = cryptoState?.execution || {};
+  const cryptoSummary = cryptoState?.summary || {};
+  cryptoCard.appendChild(el("div", { class: "kpi-title", text: es ? "Crypto state" : "Crypto state" }));
+  cryptoCard.appendChild(el("div", {
+    class: "kpi-item",
+    text: `${es ? "Scope" : "Scope"}: ${cryptoScope.symbol || "—"} • ${Number.isFinite(Number(cryptoScope.horizon_minutes)) ? `${Number(cryptoScope.horizon_minutes)}m` : "—"}${cryptoScope.regime ? ` • ${cryptoScope.regime}` : ""}`,
+  }));
+  cryptoCard.appendChild(el("div", {
+    class: "kpi-item",
+    text: `${es ? "Mode" : "Mode"}: ${cryptoExecution.mode || "simulated"}${cryptoExecution.live_enabled ? " • live" : cryptoExecution.testnet_enabled ? " • testnet" : " • sim"}`,
+  }));
+  cryptoCard.appendChild(el("div", {
+    class: "kpi-item",
+    text: `${es ? "Pred/Out/Trades" : "Pred/Out/Trades"}: ${Number(cryptoSummary.predictions_count || 0)}/${Number(cryptoSummary.outcomes_count || 0)}/${Number(cryptoSummary.trades_count || 0)}`,
+  }));
+  if (cryptoState?.latest_prediction_ref?.log_id) {
+    cryptoCard.appendChild(el("div", {
+      class: "kpi-item",
+      text: `${es ? "Última pred" : "Latest pred"}: ${formatCryptoPredictionRef(cryptoState.latest_prediction_ref, { es, includeSource: false })}`,
+    }));
+  }
+  if (cryptoState?.latest_outcome_ref?.log_id) {
+    cryptoCard.appendChild(el("div", {
+      class: "kpi-item",
+      text: `${es ? "Último outcome" : "Latest outcome"}: ${formatCryptoPredictionRef(cryptoState.latest_outcome_ref, { es, includeSource: false })}`,
+    }));
+    const outcomeMetrics = formatCryptoOutcomeRefMetrics(cryptoState.latest_outcome_ref, { es });
+    if (outcomeMetrics) {
+      cryptoCard.appendChild(el("div", {
+        class: "kpi-hint",
+        text: outcomeMetrics,
+      }));
+    }
+  }
+  if (Number.isFinite(Number(cryptoState?.current_price))) {
+    cryptoCard.appendChild(el("div", {
+      class: "kpi-item",
+      text: `${es ? "Precio" : "Price"}: ${formatPrice(Number(cryptoState.current_price))}`,
+    }));
+  }
+  const snapshotRisk = getCryptoRiskSummary();
+  if (snapshotRisk.ready) {
+    const gainLabel = Number.isFinite(snapshotRisk.gainQuote)
+      ? `${snapshotRisk.gainQuote >= 0 ? "+" : ""}${formatPrice(snapshotRisk.gainQuote)}`
+      : "—";
+    const lossLabel = Number.isFinite(snapshotRisk.lossQuote)
+      ? `-${formatPrice(Math.abs(snapshotRisk.lossQuote))}`
+      : "—";
+    cryptoCard.appendChild(el("div", {
+      class: "kpi-item",
+      text: `${es ? "Riesgo" : "Risk"}: ${snapshotRisk.signalLabel} • ${formatPct(snapshotRisk.projectedMovePct, 2)}${Number.isFinite(snapshotRisk.riskReward) ? ` • R:R ${snapshotRisk.riskReward.toFixed(2)}` : ""}`,
+    }));
+    cryptoCard.appendChild(el("div", {
+      class: "kpi-hint",
+      text: `${es ? "Entrada" : "Entry"} ${formatPrice(snapshotRisk.entry)} • ${es ? "Objetivo" : "Target"} ${formatPrice(snapshotRisk.target)}${Number.isFinite(snapshotRisk.stop) ? ` • ${es ? "Stop" : "Stop"} ${formatPrice(snapshotRisk.stop)}` : ""} • ${es ? "Ganancia" : "Gain"} ${gainLabel} / ${es ? "Pérdida" : "Loss"} ${lossLabel}`,
+    }));
+  }
+  wrap.appendChild(cryptoCard);
 
   if (!SNAPSHOT_MINIMAL_VIEW) {
     // Resources + agent internals stay available in debug snapshot mode.
@@ -9105,8 +10939,8 @@ function renderPredictionsList(items) {
 
     // Pre/post notes
     let notePre = "";
-    if (sideRaw === "BUY") notePre = es ? "BUY porque p>63%." : "BUY because p>63%.";
-    else if (sideRaw === "SELL") notePre = es ? "SELL porque p<37%." : "SELL because p<37%.";
+    if (sideRaw === "BUY") notePre = es ? "BUY: el modelo ve más subida que bajada." : "BUY: the model sees more upside than downside.";
+    else if (sideRaw === "SELL") notePre = es ? "SELL: el modelo ve más bajada que subida." : "SELL: the model sees more downside than upside.";
     else notePre = es ? "HOLD: p en zona neutra." : "HOLD: p in neutral band.";
     const notePost = hasOutcome
       ? (hit === true
@@ -9275,6 +11109,8 @@ function renderStatsPanel(data) {
   const grossExp = Number(data.gross_expectancy_pct);
   const positiveNet = Number(data.positive_net_rate);
   const maxDrawdown = Number(data.max_drawdown_pct);
+  const avgProbError = Number(data.avg_probability_error);
+  const brierScore = Number(data.brier_score);
   const tradeCount = Number(data.trade_count);
   const holdCount = Number(data.hold_count);
   const roundTripCostBps = Number(data.round_trip_cost_bps);
@@ -9287,6 +11123,9 @@ function renderStatsPanel(data) {
   const credibilityAssessment = data?.credibility_assessment && typeof data.credibility_assessment === "object"
     ? data.credibility_assessment
     : state.cryptoCredibility || null;
+  const operatorGuidance = data?.operator_guidance && typeof data.operator_guidance === "object"
+    ? data.operator_guidance
+    : null;
   const credibilityScope = data?.credibility_scope && typeof data.credibility_scope === "object"
     ? data.credibility_scope
     : null;
@@ -9297,6 +11136,9 @@ function renderStatsPanel(data) {
   const registryRows = Array.isArray(data?.model_registry) ? data.model_registry : (Array.isArray(state.cryptoModelRegistry) ? state.cryptoModelRegistry : []);
   const currentRegistryRows = getRegistryEntriesForCurrentScope();
   const perModel = data?.per_model && typeof data.per_model === "object" ? data.per_model : {};
+  const perConfidence = data?.per_confidence_bucket && typeof data.per_confidence_bucket === "object"
+    ? data.per_confidence_bucket
+    : {};
   const modelRows = Object.entries(perModel)
     .map(([name, stats]) => ({
       name,
@@ -9305,9 +11147,22 @@ function renderStatsPanel(data) {
     }))
     .sort((a, b) => (b.count || 0) - (a.count || 0) || (b.accuracy || 0) - (a.accuracy || 0))
     .slice(0, 6);
+  const confidenceRows = Object.entries(perConfidence)
+    .map(([name, stats]) => ({
+      name,
+      count: Number(stats?.count),
+      accuracy: Number(stats?.accuracy),
+      avgProbabilityError: Number(stats?.avg_probability_error),
+      brierScore: Number(stats?.brier_score),
+    }))
+    .sort((a, b) => {
+      const rank = { high: 0, medium: 1, low: 2 };
+      return (rank[a.name] ?? 99) - (rank[b.name] ?? 99) || a.name.localeCompare(b.name);
+    });
 
   const grid = el("div", { class: "kpi-grid" });
   const formatWindowTs = (ts) => (Number.isFinite(ts) && ts > 0 ? new Date(ts * 1000).toLocaleString() : "—");
+  const formatGuidanceCode = (value) => String(value || "unknown").replace(/_/g, " ");
   const makeKpi = (label, value, hint, cls = "", badgeText = "", badgeClass = "") => {
     const card = el("div", { class: `kpi-card ${cls}` });
     const head = el("div", { class: "kpi-card-head" });
@@ -9359,6 +11214,24 @@ function renderStatsPanel(data) {
       )
     );
   }
+  if (Number.isFinite(avgProbError)) {
+    grid.appendChild(
+      makeKpi(
+        es ? "Error prob. prom" : "Avg prob error",
+        formatPct(avgProbError, 2),
+        es ? "Distancia media entre p y resultado real" : "Average distance between p and realized outcome"
+      )
+    );
+  }
+  if (Number.isFinite(brierScore)) {
+    grid.appendChild(
+      makeKpi(
+        "Brier",
+        brierScore.toFixed(4),
+        es ? "Menor es mejor" : "Lower is better"
+      )
+    );
+  }
   if (Number.isFinite(tradeCount) || Number.isFinite(holdCount)) {
     grid.appendChild(
       makeKpi(
@@ -9394,7 +11267,7 @@ function renderStatsPanel(data) {
     );
   }
 
-  if (!grid.childNodes.length && !modelRows.length) {
+  if (!grid.childNodes.length && !modelRows.length && !confidenceRows.length) {
     dom.sourcesContent.appendChild(el("div", { class: "sources-empty", text: es ? "Sin datos de stats." : "No stats data." }));
   } else {
     dom.sourcesContent.appendChild(grid);
@@ -9432,7 +11305,73 @@ function renderStatsPanel(data) {
       });
       dom.sourcesContent.appendChild(modelCard);
     }
+    if (confidenceRows.length) {
+      const confidenceCard = el("div", { class: "kpi-card engine-mixed" });
+      confidenceCard.appendChild(el("div", { class: "kpi-title", text: es ? "Calibración por confianza" : "Confidence calibration" }));
+      confidenceRows.forEach((row) => {
+        const line = el("div", { class: "kpi-row wrap" });
+        line.appendChild(el("span", { class: "pill neutral", text: row.name }));
+        line.appendChild(el("span", { class: "pill muted", text: `${es ? "muestras" : "samples"} ${Number.isFinite(row.count) ? row.count : 0}` }));
+        if (Number.isFinite(row.accuracy)) {
+          line.appendChild(el("span", { class: "pill success", text: `${es ? "acc" : "acc"} ${formatPct(row.accuracy, 1)}` }));
+        }
+        if (Number.isFinite(row.avgProbabilityError)) {
+          line.appendChild(el("span", { class: "pill muted", text: `${es ? "err" : "err"} ${formatPct(row.avgProbabilityError, 2)}` }));
+        }
+        if (Number.isFinite(row.brierScore)) {
+          line.appendChild(el("span", { class: "pill neutral", text: `brier ${row.brierScore.toFixed(4)}` }));
+        }
+        confidenceCard.appendChild(line);
+      });
+      dom.sourcesContent.appendChild(confidenceCard);
+    }
     const insightGrid = el("div", { class: "kpi-grid crypto-insight-grid" });
+    const guidanceCard = el("div", { class: "kpi-card crypto-threshold-card" });
+    guidanceCard.appendChild(el("div", { class: "kpi-title", text: es ? "Guía operativa" : "Operating guidance" }));
+    if (operatorGuidance) {
+      const status = String(operatorGuidance.status || "unknown");
+      const action = String(operatorGuidance.action || "unknown");
+      const reasons = Array.isArray(operatorGuidance.reasons) ? operatorGuidance.reasons : [];
+      const probabilitySamples = Number(operatorGuidance.probability_count);
+      const highConfidenceSamples = Number(operatorGuidance.high_confidence_count);
+      const focusBucket = String(operatorGuidance.focus_bucket || "");
+      const weakestBucket = operatorGuidance?.weakest_bucket && typeof operatorGuidance.weakest_bucket === "object"
+        ? operatorGuidance.weakest_bucket
+        : null;
+      const statusClass = status === "trust" ? "success" : status === "abstain" ? "negative" : status === "downgrade" ? "warn" : "muted";
+      const actionClass = action === "keep_trained_scope" ? "positive" : action === "hold_out_until_recalibrated" ? "negative" : "neutral";
+      guidanceCard.appendChild(el("div", {
+        class: "kpi-value",
+        text: formatGuidanceCode(status).toUpperCase(),
+      }));
+      guidanceCard.appendChild(el("div", {
+        class: "kpi-hint",
+        text: `${es ? "Acción" : "Action"}: ${formatGuidanceCode(action)}`,
+      }));
+      const chips = el("div", { class: "kpi-row wrap" });
+      chips.appendChild(el("span", { class: `pill ${statusClass}`, text: `${es ? "Estado" : "Status"}: ${formatGuidanceCode(status)}` }));
+      chips.appendChild(el("span", { class: `pill ${actionClass}`, text: `${es ? "Ruta" : "Route"}: ${formatGuidanceCode(action)}` }));
+      if (Number.isFinite(probabilitySamples)) chips.appendChild(el("span", { class: "pill neutral", text: `${es ? "Muestras p" : "p samples"}: ${probabilitySamples}` }));
+      if (Number.isFinite(highConfidenceSamples)) chips.appendChild(el("span", { class: "pill neutral", text: `${es ? "High conf" : "High conf"}: ${highConfidenceSamples}` }));
+      if (focusBucket) chips.appendChild(el("span", { class: "pill muted", text: `${es ? "Bucket foco" : "Focus bucket"}: ${focusBucket}` }));
+      guidanceCard.appendChild(chips);
+      if (reasons.length) {
+        guidanceCard.appendChild(el("div", {
+          class: "kpi-hint",
+          text: `${es ? "Razones" : "Reasons"}: ${reasons.map((reason) => formatGuidanceCode(reason)).join(" • ")}`,
+        }));
+      }
+      if (weakestBucket && (Number.isFinite(Number(weakestBucket.avg_probability_error)) || Number.isFinite(Number(weakestBucket.brier_score)))) {
+        guidanceCard.appendChild(el("div", {
+          class: "kpi-hint",
+          text: `${es ? "Bucket débil" : "Weak bucket"}: ${weakestBucket.name || focusBucket || "—"} • ${es ? "err" : "err"} ${Number.isFinite(Number(weakestBucket.avg_probability_error)) ? formatPct(Number(weakestBucket.avg_probability_error), 2) : "—"} • brier ${Number.isFinite(Number(weakestBucket.brier_score)) ? Number(weakestBucket.brier_score).toFixed(4) : "—"}`,
+        }));
+      }
+    } else {
+      guidanceCard.appendChild(el("div", { class: "sources-empty", text: es ? "Sin guía operativa todavía." : "No operating guidance yet." }));
+    }
+    insightGrid.appendChild(guidanceCard);
+
     const thresholdCard = el("div", { class: "kpi-card crypto-threshold-card" });
     thresholdCard.appendChild(el("div", { class: "kpi-title", text: es ? "Threshold recomendado" : "Recommended threshold" }));
     if (thresholdRec) {
@@ -9468,6 +11407,64 @@ function renderStatsPanel(data) {
       thresholdCard.appendChild(el("div", { class: "sources-empty", text: es ? "Aún no hay suficiente historial trained para recomendar thresholds." : "Not enough trained history yet to recommend thresholds." }));
     }
     insightGrid.appendChild(thresholdCard);
+
+    const riskView = getCryptoRiskSummary();
+    const riskCard = el("div", { class: "kpi-card crypto-risk-card" });
+    riskCard.appendChild(el("div", { class: "kpi-title", text: es ? "Riesgo / PnL" : "Risk / PnL" }));
+  if (riskView.ready) {
+      const directionText = riskView.tradeable
+        ? riskView.decision
+        : (es ? "OBSERVAR" : "WATCH");
+      const primaryPct = riskView.tradeable
+        ? riskView.netEdgePct
+        : riskView.projectedMovePct;
+      const primaryLabel = riskView.tradeable
+        ? (es ? "Edge neto" : "Net edge")
+        : (es ? "Movimiento" : "Move");
+      riskCard.appendChild(el("div", {
+        class: "kpi-value",
+        text: `${directionText} • ${Number.isFinite(primaryPct) ? formatPct(primaryPct, 2) : "—"}`,
+      }));
+      const chips = el("div", { class: "kpi-row wrap" });
+      chips.appendChild(el("span", { class: "pill neutral", text: `${es ? "Entrada" : "Entry"} ${formatPrice(riskView.entry)}` }));
+      if (Number.isFinite(riskView.target)) {
+        chips.appendChild(el("span", {
+          class: `pill ${riskView.decision === "SELL" ? "sell" : riskView.decision === "BUY" ? "buy" : "neutral"}`,
+          text: `${es ? "Objetivo" : "Target"} ${formatPrice(riskView.target)}`,
+        }));
+      }
+      if (Number.isFinite(riskView.stop)) {
+        chips.appendChild(el("span", { class: "pill danger", text: `${es ? "Stop" : "Stop"} ${formatPrice(riskView.stop)}` }));
+      }
+      if (Number.isFinite(riskView.executionDragPct)) {
+        chips.appendChild(el("span", { class: "pill muted", text: `${es ? "Drag" : "Drag"} ${formatPct(riskView.executionDragPct, 2)}` }));
+      }
+      if (Number.isFinite(riskView.riskReward)) {
+        chips.appendChild(el("span", { class: "pill success", text: `R:R ${riskView.riskReward.toFixed(2)}` }));
+      }
+      if (Number.isFinite(riskView.gainQuote)) {
+        chips.appendChild(el("span", { class: "pill positive", text: `${es ? "Ganancia" : "Gain"} +${formatPrice(riskView.gainQuote)}` }));
+      }
+      if (Number.isFinite(riskView.netAfterCostsQuote)) {
+        chips.appendChild(el("span", {
+          class: `pill ${riskView.netAfterCostsQuote >= 0 ? "positive" : "negative"}`,
+          text: `${es ? "Neto después de costos" : "Net after costs"} ${riskView.netAfterCostsQuote >= 0 ? "+" : "-"}${formatPrice(Math.abs(riskView.netAfterCostsQuote))}`,
+        }));
+      }
+      if (Number.isFinite(riskView.lossQuote)) {
+        chips.appendChild(el("span", { class: "pill negative", text: `${es ? "Pérdida" : "Loss"} -${formatPrice(Math.abs(riskView.lossQuote))}` }));
+      }
+      riskCard.appendChild(chips);
+      riskCard.appendChild(el("div", {
+        class: "kpi-hint",
+        text: riskView.tradeable
+          ? `${primaryLabel}: ${Number.isFinite(primaryPct) ? formatPct(primaryPct, 2) : "—"} • ${es ? "Qty" : "Qty"} ${Number.isFinite(riskView.qty) ? riskView.qty : "—"} • ${es ? "Modo" : "Mode"} ${riskView.mode.toUpperCase()}`
+          : `${es ? "Vista no accionable" : "Watch-only view"} • ${es ? "Movimiento proyectado" : "Projected move"} ${Number.isFinite(primaryPct) ? formatPct(primaryPct, 2) : "—"} • ${es ? "Modo" : "Mode"} ${riskView.mode.toUpperCase()}`,
+      }));
+    } else {
+      riskCard.appendChild(el("div", { class: "sources-empty", text: es ? "Sin señal suficiente para calcular riesgo." : "Not enough signal to calculate risk." }));
+    }
+    insightGrid.appendChild(riskCard);
 
     const credibilityCard = el("div", { class: "kpi-card crypto-threshold-card" });
     credibilityCard.appendChild(el("div", { class: "kpi-title", text: es ? "Credibilidad del scope" : "Scope credibility" }));
@@ -9560,6 +11557,7 @@ function renderStatsPanel(data) {
     insightGrid.appendChild(registryCard);
 
     dom.sourcesContent.appendChild(insightGrid);
+    updatePredictionTooltipText();
     const foot = el("div", { class: "kpi-foot" });
     const scopeNote = engineFilter === "all"
       ? (trainedCount > 0 && demoCount > 0
@@ -9688,8 +11686,8 @@ async function loadConversationList(includeArchived = false) {
   if (!hasAuthForScope("main")) {
     dom.sessionsList.innerHTML = `<li class="sessions-empty">${
       state.lang === LANG.ES
-        ? "Auth requerida. Configura API key (🔑)."
-        : "Auth required. Set API key (🔑)."
+        ? "Auth requerida. Configura la clave de arranque (🔑)."
+        : "Auth required. Set the bootstrap key (🔑)."
     }</li>`;
     return;
   }
@@ -9703,8 +11701,8 @@ async function loadConversationList(includeArchived = false) {
     if (!res.ok && isAuthDeniedStatus(res.status)) {
       dom.sessionsList.innerHTML = `<li class="sessions-empty">${
         state.lang === LANG.ES
-          ? "Auth requerida (401/403). Configura API key (🔑)."
-          : "Auth required (401/403). Set API key (🔑)."
+          ? "Auth requerida (401/403). Configura la clave de arranque (🔑)."
+          : "Auth required (401/403). Set the bootstrap key (🔑)."
       }</li>`;
       return;
     }
@@ -9786,10 +11784,13 @@ async function selectConversation(convId) {
   localStorage.setItem("aegis_conv", convId);
   localStorage.setItem("aegis_use_existing", "1");
   updateConversationIndicators(convId);
-  await syncConversationState(convId);
-  await restoreConversationTranscript(convId, { force: true });
+  const synced = await syncConversationState(convId);
+  if (!synced || state.conversationId !== convId) return false;
+  const restored = await restoreConversationTranscript(convId, { force: true });
+  if (!restored && state.conversationId !== convId) return false;
   appendBubble(state.lang === LANG.ES ? `Sesión ${convId} activada.` : `Conversation ${convId} selected.`, "bot");
   closeSessionsModal();
+  return true;
 }
 
 async function toggleArchiveConversation(convId, currentlyArchived) {
@@ -9825,13 +11826,39 @@ async function deleteConversationById(convId) {
 }
 
 function clearConversation(silent = false) {
+  const previousConvId = String(state.conversationId || "").trim();
   state.conversationId = null;
   state.useExistingConversation = false;
+  state.lastTranscriptConversationId = "";
   localStorage.removeItem("aegis_conv");
   localStorage.removeItem("aegis_use_existing");
+  localStorage.removeItem("aegis_last_transcript_conv");
   updateConversationIndicators(null);
+  stopConversationEventsPolling();
   resetConversationEvents();
+  clearChatTranscript();
+  if (previousConvId && state.selectedConversationIds?.has(previousConvId)) {
+    state.selectedConversationIds.delete(previousConvId);
+    updateConversationBulkActions();
+  }
   if (!silent) appendBubble(state.lang === LANG.ES ? "Sesión local borrada." : "Local session cleared.", "bot");
+}
+
+function handleMissingConversation(convId, { source = "conversation" } = {}) {
+  const missingId = String(convId || state.conversationId || "").trim();
+  clearConversation(true);
+  if (missingId && Array.isArray(state.conversationList) && state.conversationList.length) {
+    const nextList = state.conversationList.filter((item) => String(item?.id || "") !== missingId);
+    if (nextList.length !== state.conversationList.length) {
+      state.conversationList = nextList;
+      renderConversationList(state.conversationList);
+    }
+  }
+  if (hasAuthForScope("main")) {
+    void loadConversationList(state.conversationsIncludeArchived);
+  }
+  console.warn("conversation-missing", { source, conversation_id: missingId });
+  return false;
 }
 
 function resetConversationEvents() {
@@ -10002,6 +12029,9 @@ function renderConversationTurns(items) {
     if (turn.response_context?.current_artifact_focus) addChip(`${es ? "Artefacto" : "Artifact"}: ${turn.response_context.current_artifact_focus}`);
     if (turn.response_context?.current_file_focus) addChip(`${es ? "Archivo" : "File"}: ${turn.response_context.current_file_focus}`);
     if (turn.response_context?.current_symbol_focus) addChip(`${es ? "Símbolo" : "Symbol"}: ${turn.response_context.current_symbol_focus}`);
+    if (turn.response_context?.crypto_prediction_ref) {
+      addChip(`${es ? "Pred" : "Pred"}: ${formatCryptoPredictionRef(turn.response_context.crypto_prediction_ref, { es, includeSource: false })}`);
+    }
     if (turn.response_context?.llm_required === false) addChip("LLM: bypassed");
     if (Array.isArray(turn.response_context?.source_origin) && turn.response_context.source_origin.length) {
       addChip(`${es ? "Origen" : "Origin"}: ${turn.response_context.source_origin.map(prettyOriginLabel).join(", ")}`);
@@ -10035,6 +12065,9 @@ function openTurnDetail(turn) {
   const origins = Array.isArray(turn?.response_context?.source_origin) ? turn.response_context.source_origin : [];
   const missing = Array.isArray(turn?.response_context?.missing_evidence) ? turn.response_context.missing_evidence : [];
   const retryItems = Array.isArray(turn?.items) ? turn.items.filter((it) => it?.kind === "llm_retry") : [];
+  const cryptoPredictionRef = turn?.response_context?.crypto_prediction_ref && typeof turn.response_context.crypto_prediction_ref === "object"
+    ? turn.response_context.crypto_prediction_ref
+    : null;
 
   if (dom.turnDetailSummary) {
     const parts = [];
@@ -10045,6 +12078,7 @@ function openTurnDetail(turn) {
     parts.push(`${es ? "Estado" : "Status"}: ${status}`);
     if (activeProjectId) parts.push(`${es ? "Proyecto" : "Project"}: ${activeProjectId}`);
     if (effectiveTool) parts.push(`${es ? "Tool efectiva" : "Effective tool"}: ${effectiveTool}${effectiveToolStatus ? ` (${effectiveToolStatus})` : ""}`);
+    if (cryptoPredictionRef) parts.push(`${es ? "Pred usada" : "Prediction used"}: ${formatCryptoPredictionRef(cryptoPredictionRef, { es })}`);
     if (origins.length) parts.push(`${es ? "Origen" : "Origin"}: ${origins.map(prettyOriginLabel).join(", ")}`);
     if (missing.length) parts.push(`${es ? "Falta evidencia" : "Missing evidence"}: ${missing.slice(0, 6).join(", ")}`);
     if (retryItems.length) {
@@ -10110,8 +12144,8 @@ function handleConversationPollAuthDenied(status = 401) {
   const es = state.lang === LANG.ES;
   const now = Date.now();
   const msg = es
-    ? "Sesión/log pausados por autenticación (401/403). Actualiza API key (🔑) y reintenta."
-    : "Session/log paused due to authentication (401/403). Update API key (🔑) and retry.";
+    ? "Sesión/log pausados por autenticación (401/403). Actualiza la clave de arranque (🔑) y reintenta."
+    : "Session/log paused due to authentication (401/403). Update the bootstrap key (🔑) and retry.";
 
   stopConversationEventsPolling();
   if (dom.convEventsList) {
@@ -10151,6 +12185,10 @@ async function loadConversationTurns({ force = false } = {}) {
     const url = new URL(endpoints.conversationTurns(convId), location.origin);
     url.searchParams.set("limit", "20");
     const res = await fetchWithTimeout(url.toString(), { headers: { Accept: "application/json" } }, { timeout: 20000, retries: 0 });
+    if (res.status === 404) {
+      handleMissingConversation(convId, { source: "turns" });
+      return;
+    }
     if (!res.ok && isAuthDeniedStatus(res.status)) {
       handleConversationPollAuthDenied(res.status);
       return;
@@ -10193,6 +12231,10 @@ async function loadConversationEvents({ force = false } = {}) {
     }
     url.searchParams.set("limit", "120");
     const res = await fetchWithTimeout(url.toString(), { headers: { Accept: "application/json" } }, { timeout: 20000, retries: 0 });
+    if (res.status === 404) {
+      handleMissingConversation(convId, { source: "events" });
+      return;
+    }
     if (!res.ok && isAuthDeniedStatus(res.status)) {
       handleConversationPollAuthDenied(res.status);
       return;
@@ -10970,8 +13012,8 @@ async function loadProjectTree() {
   if (!dom.projectTree) return;
   if (!hasAuthForScope("files")) {
     dom.projectTree.textContent = state.lang === LANG.ES
-      ? "Auth requerida para explorar archivos. Configura API key (🔑)."
-      : "Auth is required to browse files. Set API key (🔑).";
+      ? "Auth requerida para explorar archivos. Configura la clave de arranque (🔑)."
+      : "Auth is required to browse files. Set the bootstrap key (🔑).";
     return;
   }
   const effectiveRoot = getEffectiveProjectRoot();
@@ -11039,7 +13081,10 @@ function renderTree(tree, container, basePath) {
     row.dataset.path = path;
     row.dataset.kind = isDir ? "dir" : "file";
     if (state.treeSelectionPath === path) row.classList.add("selected");
-    row.innerHTML = `<span class="icon">${isDir ? "📁" : "📄"}</span><span>${name}</span>`;
+    const icon = el("span", { class: "icon", attrs: { "aria-hidden": "true" } });
+    icon.textContent = isDir ? "📁" : "📄";
+    row.appendChild(icon);
+    row.appendChild(el("span", { text: name }));
     container.appendChild(row);
 
     if (isDir) {
@@ -11458,29 +13503,31 @@ async function loadIngestJobs() {
     items.slice(0, 25).forEach((j) => {
       const li = document.createElement("li");
       li.className = "jobs-item";
-      const status = j.status || j.state || "—";
+      const status = String(j.status || j.state || "—");
       const stages = Array.isArray(j?.meta?.stages) ? j.meta.stages : [];
       const lastStage = stages.length ? stages[stages.length - 1] : null;
       const stageLabel = lastStage?.name
         ? `${lastStage.name}${lastStage.status ? ` (${lastStage.status})` : ""}`
         : "";
-      const safeStageLabel = String(stageLabel || "")
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll("\"", "&quot;")
-        .replaceAll("'", "&#039;");
-      const stageLine = stageLabel
-        ? `<div class="jobs-meta">${state.lang === LANG.ES ? "Etapa" : "Stage"}: ${safeStageLabel}</div>`
-        : "";
-      li.innerHTML = `
-        <div class="jobs-item-header">
-          <span>${j.id || "(job)"}</span>
-          <span class="jobs-status ${String(status).toLowerCase()}">${status}</span>
-        </div>
-        <div class="jobs-meta">${j.updated_at ? new Date(j.updated_at * 1000).toLocaleString() : ""}</div>
-        ${stageLine}
-      `;
+      const header = el("div", { class: "jobs-item-header" });
+      header.appendChild(el("span", { text: j.id || "(job)" }));
+      const statusToken = String(status).toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || "unknown";
+      header.appendChild(el("span", { class: `jobs-status ${statusToken}`, text: status }));
+      li.appendChild(header);
+
+      li.appendChild(
+        el("div", {
+          class: "jobs-meta",
+          text: j.updated_at ? new Date(j.updated_at * 1000).toLocaleString() : "",
+        })
+      );
+
+      if (stageLabel) {
+        const stageLine = el("div", { class: "jobs-meta" });
+        stageLine.appendChild(document.createTextNode(state.lang === LANG.ES ? "Etapa: " : "Stage: "));
+        stageLine.appendChild(el("span", { text: stageLabel }));
+        li.appendChild(stageLine);
+      }
       li.addEventListener("click", () => {
         const id = j.id || j.job_id;
         if (!id) return;

@@ -120,7 +120,7 @@ def get_prediction(pid: str) -> Optional[Dict[str, Any]]:
 
 def log_outcome(entry: Dict[str, Any]) -> str:
     ensure_log_dir(LOG_DIR)
-    entry = dict(entry)
+    entry = _enrich_outcome_entry(entry)
     entry.setdefault("id", f"out_{int(time.time()*1e6)}")
     entry.setdefault("ts", int(time.time()))
     with _lock:
@@ -201,6 +201,89 @@ def _normalize_regime(value: Any) -> Optional[str]:
     return text or None
 
 
+def _minutes_bucket_label(value: Any) -> Optional[str]:
+    number = _as_int(value)
+    if number is None or number <= 0:
+        return None
+    return f"{number}m"
+
+
+def _counted_bucket(values: List[str]) -> Dict[str, int]:
+    counts: DefaultDict[str, int] = defaultdict(int)
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        counts[text] += 1
+    return {key: counts[key] for key in sorted(counts.keys())}
+
+
+def _provenance_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not rows:
+        return {
+            "records_with_provenance": 0,
+            "records_missing_provenance": 0,
+            "demo_fallback_count": 0,
+            "trained_horizon_fallback_count": 0,
+            "requested_horizons": {},
+            "trained_horizons": {},
+            "requested_vs_trained": {},
+            "model_intervals": {},
+            "artifact_hashes": {},
+        }
+
+    provenance_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        payload = row.get("prediction_provenance")
+        if isinstance(payload, dict):
+            provenance_rows.append(payload)
+
+    requested_horizons = [
+        label
+        for item in provenance_rows
+        for label in [_minutes_bucket_label(item.get("requested_horizon_minutes"))]
+        if label
+    ]
+    trained_horizons = [
+        label
+        for item in provenance_rows
+        for label in [_minutes_bucket_label(item.get("trained_horizon_minutes"))]
+        if label
+    ]
+    model_intervals = [
+        label
+        for item in provenance_rows
+        for label in [_minutes_bucket_label(item.get("model_interval_minutes"))]
+        if label
+    ]
+    requested_vs_trained = [
+        f"{requested}->{trained}"
+        for item in provenance_rows
+        for requested in [_minutes_bucket_label(item.get("requested_horizon_minutes"))]
+        for trained in [_minutes_bucket_label(item.get("trained_horizon_minutes"))]
+        if requested and trained
+    ]
+    artifact_hashes = [
+        str(item.get("trained_artifact_sha256") or "").strip()
+        for item in provenance_rows
+        if str(item.get("trained_artifact_sha256") or "").strip()
+    ]
+
+    return {
+        "records_with_provenance": len(provenance_rows),
+        "records_missing_provenance": max(0, len(rows) - len(provenance_rows)),
+        "demo_fallback_count": sum(1 for item in provenance_rows if bool(item.get("used_demo_fallback"))),
+        "trained_horizon_fallback_count": sum(
+            1 for item in provenance_rows if bool(item.get("used_trained_horizon_fallback"))
+        ),
+        "requested_horizons": _counted_bucket(requested_horizons),
+        "trained_horizons": _counted_bucket(trained_horizons),
+        "requested_vs_trained": _counted_bucket(requested_vs_trained),
+        "model_intervals": _counted_bucket(model_intervals),
+        "artifact_hashes": _counted_bucket(artifact_hashes),
+    }
+
+
 def _effective_decision(item: Dict[str, Any]) -> str:
     action = str(item.get("action_decision") or "").strip().upper()
     if action in {"BUY", "SELL", "HOLD"}:
@@ -220,6 +303,67 @@ def _signal_return_pct(outcome: Dict[str, Any]) -> Optional[float]:
     if decision == "HOLD":
         return 0.0
     return None
+
+
+def _confidence_bucket(probability_up: Any) -> Optional[str]:
+    probability = _as_float(probability_up)
+    if probability is None:
+        return None
+    confidence = max(probability, 1.0 - probability)
+    if confidence >= 0.8:
+        return "high"
+    if confidence >= 0.62:
+        return "medium"
+    return "low"
+
+
+def _enrich_outcome_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    enriched = dict(entry)
+    decision = _effective_decision(enriched)
+    fee_bps_value = _as_float(enriched.get("fee_bps"))
+    slippage_bps_value = _as_float(enriched.get("slippage_bps"))
+    fee_bps = DEFAULT_FEE_BPS if fee_bps_value is None else max(0.0, fee_bps_value)
+    slippage_bps = DEFAULT_SLIPPAGE_BPS if slippage_bps_value is None else max(0.0, slippage_bps_value)
+    trade_evaluable = decision in {"BUY", "SELL"}
+    round_trip_cost_bps = (fee_bps * 2.0 + slippage_bps * 2.0) if trade_evaluable else 0.0
+    round_trip_cost_pct = round_trip_cost_bps / 10000.0
+    gross_return_pct = _signal_return_pct(enriched)
+    net_return_pct = (gross_return_pct - round_trip_cost_pct) if gross_return_pct is not None else None
+
+    delta_pct = _as_float(enriched.get("delta_pct"))
+    realized_direction: Optional[str] = None
+    realized_up: Optional[bool] = None
+    if delta_pct is not None:
+        if delta_pct > 0:
+            realized_direction = "up"
+            realized_up = True
+        elif delta_pct < 0:
+            realized_direction = "down"
+            realized_up = False
+        else:
+            realized_direction = "flat"
+
+    probability_up = _as_float(enriched.get("probability_up"))
+    probability_error = None
+    brier_component = None
+    if probability_up is not None and realized_up is not None:
+        realized_value = 1.0 if realized_up else 0.0
+        probability_error = abs(probability_up - realized_value)
+        brier_component = (probability_up - realized_value) ** 2
+
+    enriched.setdefault("fee_bps", fee_bps)
+    enriched.setdefault("slippage_bps", slippage_bps)
+    enriched.setdefault("trade_evaluable", trade_evaluable)
+    enriched.setdefault("gross_return_pct", gross_return_pct)
+    enriched.setdefault("round_trip_cost_bps", round_trip_cost_bps)
+    enriched.setdefault("round_trip_cost_pct", round_trip_cost_pct)
+    enriched.setdefault("net_return_pct", net_return_pct)
+    enriched.setdefault("realized_direction", realized_direction)
+    enriched.setdefault("realized_up", realized_up)
+    enriched.setdefault("confidence_bucket", _confidence_bucket(probability_up))
+    enriched.setdefault("probability_error", probability_error)
+    enriched.setdefault("brier_component", brier_component)
+    return enriched
 
 
 def _max_drawdown_pct(returns_pct: List[float]) -> Optional[float]:
@@ -306,6 +450,197 @@ def _trade_eval_stats(
     }
 
 
+def _calibration_eval_stats(outs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    probability_values: List[float] = []
+    probability_errors: List[float] = []
+    brier_values: List[float] = []
+
+    for row in outs:
+        probability_up = _as_float(row.get("probability_up"))
+        if probability_up is None:
+            continue
+        probability_values.append(probability_up)
+
+        probability_error = _as_float(row.get("probability_error"))
+        brier_component = _as_float(row.get("brier_component"))
+        if probability_error is None or brier_component is None:
+            realized_up = row.get("realized_up")
+            if not isinstance(realized_up, bool):
+                delta_pct = _as_float(row.get("delta_pct"))
+                if delta_pct is not None:
+                    if delta_pct > 0:
+                        realized_up = True
+                    elif delta_pct < 0:
+                        realized_up = False
+            if isinstance(realized_up, bool):
+                realized_value = 1.0 if realized_up else 0.0
+                if probability_error is None:
+                    probability_error = abs(probability_up - realized_value)
+                if brier_component is None:
+                    brier_component = (probability_up - realized_value) ** 2
+
+        if probability_error is not None:
+            probability_errors.append(probability_error)
+        if brier_component is not None:
+            brier_values.append(brier_component)
+
+    probability_count = len(probability_values)
+    return {
+        "probability_count": probability_count,
+        "avg_probability_up": (sum(probability_values) / probability_count) if probability_count else None,
+        "avg_probability_error": (sum(probability_errors) / len(probability_errors)) if probability_errors else None,
+        "brier_score": (sum(brier_values) / len(brier_values)) if brier_values else None,
+    }
+
+
+def _operator_guidance_from_calibration(
+    *,
+    probability_count: int,
+    avg_probability_error: Optional[float],
+    brier_score: Optional[float],
+    per_confidence_bucket: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    thresholds = {
+        "min_probability_count": 8,
+        "min_high_confidence_count": 3,
+        "max_avg_probability_error_trust": 0.18,
+        "max_avg_probability_error_abstain": 0.28,
+        "max_brier_score_trust": 0.12,
+        "max_brier_score_abstain": 0.20,
+        "max_high_confidence_error_trust": 0.15,
+        "max_high_confidence_error_abstain": 0.25,
+        "min_high_confidence_accuracy_trust": 0.65,
+        "min_high_confidence_accuracy_abstain": 0.55,
+        "max_high_vs_medium_error_gap": 0.05,
+    }
+    high_bucket = per_confidence_bucket.get("high") or {}
+    medium_bucket = per_confidence_bucket.get("medium") or {}
+    high_count = int(high_bucket.get("count") or 0)
+
+    if probability_count < thresholds["min_probability_count"]:
+        return {
+            "status": "insufficient_history",
+            "action": "observe_only",
+            "reasons": ["not_enough_probability_history"],
+            "probability_count": int(probability_count),
+            "high_confidence_count": high_count,
+            "focus_bucket": "high",
+            "weakest_bucket": None,
+            "thresholds": thresholds,
+        }
+
+    critical_reasons: List[str] = []
+    warning_reasons: List[str] = []
+
+    def mark(reason: str, level: str) -> None:
+        if level == "critical":
+            if reason not in critical_reasons:
+                critical_reasons.append(reason)
+            return
+        if reason not in warning_reasons:
+            warning_reasons.append(reason)
+
+    if high_count < thresholds["min_high_confidence_count"]:
+        mark("high_confidence_sample_thin", "warning")
+
+    if avg_probability_error is None:
+        mark("overall_probability_error_missing", "warning")
+    elif avg_probability_error > thresholds["max_avg_probability_error_abstain"]:
+        mark("overall_probability_error_too_high", "critical")
+    elif avg_probability_error > thresholds["max_avg_probability_error_trust"]:
+        mark("overall_probability_error_elevated", "warning")
+
+    if brier_score is None:
+        mark("brier_score_missing", "warning")
+    elif brier_score > thresholds["max_brier_score_abstain"]:
+        mark("overall_brier_too_high", "critical")
+    elif brier_score > thresholds["max_brier_score_trust"]:
+        mark("overall_brier_elevated", "warning")
+
+    high_error = _as_float(high_bucket.get("avg_probability_error"))
+    high_accuracy = _as_float(high_bucket.get("accuracy"))
+    high_net_expectancy = _as_float(high_bucket.get("net_expectancy_pct"))
+    medium_error = _as_float(medium_bucket.get("avg_probability_error"))
+    medium_accuracy = _as_float(medium_bucket.get("accuracy"))
+
+    if high_count <= 0:
+        mark("high_confidence_bucket_missing", "warning")
+    else:
+        if high_error is None:
+            mark("high_confidence_probability_error_missing", "warning")
+        elif high_error > thresholds["max_high_confidence_error_abstain"]:
+            mark("high_confidence_bucket_miscalibrated", "critical")
+        elif high_error > thresholds["max_high_confidence_error_trust"]:
+            mark("high_confidence_bucket_soft", "warning")
+
+        if high_accuracy is None:
+            mark("high_confidence_accuracy_missing", "warning")
+        elif high_accuracy < thresholds["min_high_confidence_accuracy_abstain"]:
+            mark("high_confidence_accuracy_too_low", "critical")
+        elif high_accuracy < thresholds["min_high_confidence_accuracy_trust"]:
+            mark("high_confidence_accuracy_soft", "warning")
+
+        if high_net_expectancy is not None and high_net_expectancy <= 0.0:
+            mark("high_confidence_net_expectancy_not_positive", "critical")
+
+        if (
+            medium_accuracy is not None
+            and high_accuracy is not None
+            and high_accuracy + 0.05 < medium_accuracy
+        ):
+            mark("high_confidence_underperforming_medium", "critical")
+
+        if (
+            medium_error is not None
+            and high_error is not None
+            and (high_error - medium_error) > thresholds["max_high_vs_medium_error_gap"]
+        ):
+            mark("high_confidence_error_worse_than_medium", "critical")
+
+    weakest_bucket_name: Optional[str] = None
+    weakest_bucket_score: Optional[float] = None
+    weakest_bucket: Optional[Dict[str, Any]] = None
+    for bucket_name, bucket_stats in per_confidence_bucket.items():
+        bucket_count = int(bucket_stats.get("count") or 0)
+        bucket_error = _as_float(bucket_stats.get("avg_probability_error"))
+        bucket_brier = _as_float(bucket_stats.get("brier_score"))
+        if bucket_count <= 0 or bucket_error is None:
+            continue
+        score = bucket_error + max(0.0, float(bucket_brier or 0.0) * 0.5)
+        if weakest_bucket_score is None or score > weakest_bucket_score:
+            weakest_bucket_score = score
+            weakest_bucket_name = str(bucket_name or "").strip().lower() or None
+            weakest_bucket = {
+                "name": weakest_bucket_name,
+                "count": bucket_count,
+                "avg_probability_error": bucket_error,
+                "brier_score": bucket_brier,
+                "accuracy": _as_float(bucket_stats.get("accuracy")),
+            }
+
+    if critical_reasons:
+        status = "abstain"
+        action = "hold_out_until_recalibrated"
+    elif warning_reasons:
+        status = "downgrade"
+        action = "raise_thresholds_or_reduce_size"
+    else:
+        status = "trust"
+        action = "keep_trained_scope"
+
+    reasons = critical_reasons + [reason for reason in warning_reasons if reason not in critical_reasons]
+    return {
+        "status": status,
+        "action": action,
+        "reasons": reasons,
+        "probability_count": int(probability_count),
+        "high_confidence_count": high_count,
+        "focus_bucket": weakest_bucket_name or "high",
+        "weakest_bucket": weakest_bucket,
+        "thresholds": thresholds,
+    }
+
+
 def _group_trade_eval(
     outs: List[Dict[str, Any]],
     *,
@@ -326,6 +661,7 @@ def _group_trade_eval(
         key: {
             **_aggregate_outcome_stats(rows),
             **_trade_eval_stats(rows, fee_bps=fee_bps, slippage_bps=slippage_bps),
+            **_calibration_eval_stats(rows),
         }
         for key, rows in sorted(buckets.items())
     }
@@ -651,6 +987,7 @@ def recent_stats(
         regime=regime_filter,
     )
     if not outs:
+        per_confidence_bucket: Dict[str, Dict[str, Any]] = {}
         return {
             "count": 0,
             "accuracy": None,
@@ -680,6 +1017,18 @@ def recent_stats(
             "demo_count": 0,
             "trained_accuracy": None,
             "demo_accuracy": None,
+            "provenance": _provenance_summary([]),
+            "probability_count": 0,
+            "avg_probability_up": None,
+            "avg_probability_error": None,
+            "brier_score": None,
+            "per_confidence_bucket": per_confidence_bucket,
+            "operator_guidance": _operator_guidance_from_calibration(
+                probability_count=0,
+                avg_probability_error=None,
+                brier_score=None,
+                per_confidence_bucket=per_confidence_bucket,
+            ),
         }
 
     aggregate = _aggregate_outcome_stats(outs)
@@ -702,10 +1051,24 @@ def recent_stats(
         engine: {
             **_aggregate_outcome_stats(rows),
             **_trade_eval_stats(rows, fee_bps=fee_bps, slippage_bps=slippage_bps),
+            **_calibration_eval_stats(rows),
         }
         for engine, rows in per_engine_rows.items()
     }
     trade_eval = _trade_eval_stats(outs, fee_bps=fee_bps, slippage_bps=slippage_bps)
+    calibration_eval = _calibration_eval_stats(outs)
+    per_confidence_bucket = _group_trade_eval(
+        outs,
+        fee_bps=fee_bps,
+        slippage_bps=slippage_bps,
+        key_fn=lambda row: str(row.get("confidence_bucket") or "").strip().lower(),
+    )
+    operator_guidance = _operator_guidance_from_calibration(
+        probability_count=int(calibration_eval.get("probability_count") or 0),
+        avg_probability_error=_as_float(calibration_eval.get("avg_probability_error")),
+        brier_score=_as_float(calibration_eval.get("brier_score")),
+        per_confidence_bucket=per_confidence_bucket,
+    )
 
     with_news = [o for o in outs if o.get("news_sentiment") is not None]
     without_news = [o for o in outs if o.get("news_sentiment") is None]
@@ -716,6 +1079,7 @@ def recent_stats(
 
     trained = per_engine_stats.get("trained") or {"count": 0, "accuracy": None}
     demo = per_engine_stats.get("demo") or {"count": 0, "accuracy": None}
+    provenance = _provenance_summary(outs)
 
     return {
         **aggregate,
@@ -743,11 +1107,14 @@ def recent_stats(
             slippage_bps=slippage_bps,
             key_fn=lambda row: str(row.get("regime") or "").strip().lower(),
         ),
+        "per_confidence_bucket": per_confidence_bucket,
         "engine_filter": engine_filter or "all",
         "horizon_filter": horizon_filter,
         "regime_filter": regime_filter,
         "engines_present": sorted(per_engine_stats.keys()),
         **trade_eval,
+        **calibration_eval,
+        "operator_guidance": operator_guidance,
         "trained_count": trained.get("count", 0),
         "demo_count": demo.get("count", 0),
         "trained_accuracy": trained.get("accuracy"),
@@ -756,6 +1123,7 @@ def recent_stats(
         "without_news_accuracy": _acc(without_news),
         "with_news_count": len(with_news),
         "without_news_count": len(without_news),
+        "provenance": provenance,
     }
 
 

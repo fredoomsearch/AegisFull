@@ -1587,7 +1587,11 @@ body[data-theme="serious"] .send-btn:hover {
   gap: 6px;
   flex-wrap: wrap;
 }
-.chart-controls .chart-mode-hint { order: 2; }
+.chart-controls .chart-mode-hint {
+  order: 2;
+  flex: 1 1 260px;
+  min-width: 220px;
+}
 
 .chart-range-controls {
   display: inline-flex;
@@ -1660,12 +1664,12 @@ body[data-theme="serious"] .send-btn:hover {
 
 .chart-canvas {
   position: relative;
-  height: 320px;
+  height: 360px;
   border: 1px solid rgba(148, 163, 184, 0.30);
   border-radius: 12px;
   padding: 6px;
   background:
-    radial-gradient(120% 80% at 100% 0%, rgba(14, 116, 144, 0.12) 0%, rgba(2, 6, 23, 0) 55%),
+    radial-gradient(120% 80% at 100% 0%, rgba(14, 116, 144, 0.08) 0%, rgba(2, 6, 23, 0) 55%),
     linear-gradient(180deg, rgba(2, 6, 23, 0.86), rgba(2, 6, 23, 0.93));
   box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.45);
 }
@@ -1676,13 +1680,13 @@ body[data-theme="serious"] .send-btn:hover {
   inset: 6px;
   border-radius: 10px;
   pointer-events: none;
-  background: linear-gradient(180deg, rgba(15, 23, 42, 0.0), rgba(15, 23, 42, 0.12));
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.0), rgba(15, 23, 42, 0.07));
 }
 
 .chart-canvas canvas {
   width: 100% !important;
   height: 100% !important;
-  filter: saturate(1.08) contrast(1.03);
+  filter: saturate(1.04) contrast(1.02);
 }
 
 .chart-mode-hint {
@@ -1691,12 +1695,14 @@ body[data-theme="serious"] .send-btn:hover {
   border: 1px solid rgba(148, 163, 184, 0.25);
   background: rgba(15, 23, 42, 0.85);
   color: var(--muted);
-  font-size: 0.72rem;
+  font-size: 0.76rem;
   letter-spacing: 0.01em;
-  max-width: 340px;
+  line-height: 1.25;
+  min-height: 34px;
+  max-width: 420px;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 .signal-bar {
   height: 10px;
@@ -1720,6 +1726,239 @@ body[data-theme="serious"] .send-btn:hover {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.trade-risk-panel {
+  margin-top: 8px;
+  padding: 10px 12px 11px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.72), rgba(2, 6, 23, 0.62));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+}
+
+.trade-risk-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.trade-risk-panel-title {
+  color: #e2e8f0;
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.trade-risk-panel-note {
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.3;
+}
+
+.trade-risk-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.trade-risk-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted-soft);
+  font-size: 0.73rem;
+}
+
+.trade-risk-field span {
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.trade-risk-field input {
+  width: 100%;
+  height: 30px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  border-radius: 8px;
+  background: rgba(2, 6, 23, 0.88);
+  color: #e5e7eb;
+  padding: 4px 8px;
+  font-size: 0.78rem;
+}
+
+.trade-risk-explain {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.trade-execution-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.execution-mode-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 999px;
+  background: rgba(2, 6, 23, 0.84);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+}
+
+.execution-mode-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #cbd5e1;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.execution-mode-btn:hover {
+  border-color: rgba(56, 189, 248, 0.34);
+  color: #e2e8f0;
+}
+
+.execution-mode-btn.active {
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.42), rgba(14, 165, 233, 0.38));
+  border-color: rgba(34, 197, 94, 0.6);
+  color: #f8fafc;
+  box-shadow: 0 0 18px rgba(34, 197, 94, 0.14);
+}
+
+.execution-mode-btn.disabled,
+.execution-mode-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.trade-execution-meta {
+  flex: 1 1 280px;
+  min-width: 220px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(2, 6, 23, 0.65);
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.crypto-trade-preview {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  background: linear-gradient(180deg, rgba(245, 158, 11, 0.08), rgba(2, 6, 23, 0.62));
+  color: #e5e7eb;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+}
+
+.crypto-trade-preview .preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.crypto-trade-preview .preview-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #fde68a;
+}
+
+.crypto-trade-preview .preview-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.crypto-trade-preview .preview-hint {
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.crypto-trade-preview .preview-note {
+  color: #d8f3dc;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.crypto-trade-preview .preview-guardrails {
+  color: #bfdbfe;
+}
+
+.crypto-trade-preview .preview-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.crypto-trade-preview .preview-footer-note {
+  color: var(--muted);
+  font-size: 0.73rem;
+  line-height: 1.35;
+}
+
+.preview-confirm-btn {
+  appearance: none;
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  border-radius: 999px;
+  padding: 0.45rem 0.9rem;
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.22), rgba(14, 165, 233, 0.18));
+  color: #ecfeff;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  transition: transform 0.15s ease, filter 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: 0 0 0 rgba(34, 197, 94, 0);
+}
+
+.preview-confirm-btn:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.06);
+  box-shadow: 0 12px 22px rgba(34, 197, 94, 0.16);
+}
+
+.preview-confirm-btn:active {
+  transform: translateY(0);
+}
+
+.preview-adjust-btn {
+  border-color: rgba(245, 158, 11, 0.35);
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.22), rgba(251, 191, 36, 0.18));
+  color: #fffbeb;
+}
+
+.preview-adjust-btn:hover {
+  box-shadow: 0 12px 22px rgba(245, 158, 11, 0.16);
 }
 
 .trade-inputs {
@@ -2383,6 +2622,164 @@ body[data-theme="serious"] .send-btn:hover {
 .crypto-threshold-card {
   border-color: rgba(56, 189, 248, 0.35);
   background: linear-gradient(180deg, rgba(56, 189, 248, 0.08), rgba(15, 23, 42, 0.64));
+}
+
+.crypto-risk-card {
+  border-color: rgba(245, 158, 11, 0.34);
+  background: linear-gradient(180deg, rgba(245, 158, 11, 0.08), rgba(15, 23, 42, 0.64));
+}
+
+.crypto-risk-card .kpi-value {
+  color: #fde68a;
+}
+
+.crypto-order-book {
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(56, 189, 248, 0.18);
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.92), rgba(15, 23, 42, 0.72));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.depth-summary-row,
+.depth-imbalance-label {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.depth-imbalance {
+  margin-top: 8px;
+  margin-bottom: 10px;
+}
+
+.depth-imbalance-label {
+  justify-content: space-between;
+  margin-bottom: 6px;
+  color: #cbd5e1;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.depth-imbalance-bar {
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.14);
+  overflow: hidden;
+}
+
+.depth-imbalance-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(34, 197, 94, 0.75), rgba(34, 197, 94, 0.95));
+  box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.22);
+}
+
+.depth-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.depth-side {
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  padding: 10px;
+  background: rgba(2, 6, 23, 0.45);
+}
+
+.depth-side.buy {
+  border-color: rgba(34, 197, 94, 0.24);
+}
+
+.depth-side.sell {
+  border-color: rgba(248, 113, 113, 0.24);
+}
+
+.depth-side-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.depth-side-title {
+  font-size: 0.85rem;
+  font-weight: 800;
+  color: #e2e8f0;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.depth-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.depth-row {
+  position: relative;
+  overflow: hidden;
+  min-height: 30px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(148, 163, 184, 0.08);
+}
+
+.depth-row.buy .depth-fill {
+  background: linear-gradient(90deg, rgba(34, 197, 94, 0.16), rgba(34, 197, 94, 0.42));
+}
+
+.depth-row.sell .depth-fill {
+  background: linear-gradient(90deg, rgba(248, 113, 113, 0.16), rgba(248, 113, 113, 0.42));
+}
+
+.depth-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: block;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.depth-row.sell .depth-fill {
+  inset: 0 0 0 auto;
+}
+
+.depth-row-content {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 1.15fr 0.85fr 0.95fr;
+  gap: 8px;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  color: #e2e8f0;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.depth-price {
+  font-variant-numeric: tabular-nums;
+}
+
+.depth-qty,
+.depth-notional {
+  justify-self: end;
+  color: #cbd5e1;
+  font-variant-numeric: tabular-nums;
+}
+
+.depth-empty {
+  padding: 12px;
+  color: var(--muted);
+  font-size: 0.82rem;
 }
 
 .crypto-leaderboard-card {
@@ -3578,6 +3975,7 @@ body.perf-lite .btn-trade.signal-sell {
   .app-title p { white-space: normal; }
   .header-center { display: none; }
   .llm-provider-menu { right: auto; left: 0; width: min(320px, 88vw); }
+  .depth-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 640px) {

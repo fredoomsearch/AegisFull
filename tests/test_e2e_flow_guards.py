@@ -157,3 +157,56 @@ def test_auxiliary_surfaces_check_covers_data_and_notifications_health():
     assert e2e_flow_check.check_auxiliary_surfaces(ctx) is True
     assert ("GET", "/data/health") in ctx.calls
     assert ("GET", "/notifications/health") in ctx.calls
+
+
+class _FakeProjectCtx:
+    def __init__(self):
+        self.conversation_id = "conv-2"
+        self.uploaded_project_id = "proj-2"
+        self.api_key = "k"
+        self.files_api_key = "k"
+        self.timeout = 5.0
+        self.base_url = "http://testserver"
+        self.transport = object()
+        self.strict_capabilities = False
+        self.cleanup_artifacts = False
+        self.calls: list[tuple[str, str, dict | None]] = []
+
+    def request(self, method, path, *, json_body=None, files=None, params=None, files_scope=False):  # noqa: ANN001
+        self.calls.append((method, path, json_body))
+        if path == f"/files/projects/{self.uploaded_project_id}":
+            return _FakeResponse(200, {"manifest": {"ok": True}})
+        if path == f"/files/projects/{self.uploaded_project_id}/entrypoints":
+            return _FakeResponse(200, {"items": []})
+        if path == f"/files/projects/{self.uploaded_project_id}/dependencies":
+            return _FakeResponse(200, {"items": []})
+        if path == f"/files/projects/{self.uploaded_project_id}/configs":
+            return _FakeResponse(200, {"items": []})
+        if path == f"/files/projects/{self.uploaded_project_id}/architecture":
+            return _FakeResponse(200, {"architecture": {"layers": ["backend"]}, "summary": "Detected layers: backend"})
+        if path == f"/files/projects/{self.uploaded_project_id}/symbols":
+            return _FakeResponse(200, {"status": "ok", "items": []})
+        if path == "/files/tree":
+            return _FakeResponse(200, {"items": []})
+        if path == "/files/content":
+            return _FakeResponse(200, {"content": "class AuthService:\n    pass\n"})
+        if path == f"/chat/{self.conversation_id}/project":
+            return _FakeResponse(200, {"ok": True})
+        if path == "/chat" and isinstance(json_body, dict):
+            return _FakeResponse(
+                200,
+                {
+                    "response": "Detected layers: backend, auth, tests\nTop directories: app (1), tests (1)",
+                    "context": {
+                        "source_origin": ["manifest", "local"],
+                        "active_project_id": self.uploaded_project_id,
+                        "web_status": "not-used",
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected request: {method} {path} {json_body!r}")
+
+
+def test_project_context_accepts_manifest_summary_without_repeating_project_id():
+    ctx = _FakeProjectCtx()
+    assert e2e_flow_check.check_project_context(ctx) is True

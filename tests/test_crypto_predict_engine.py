@@ -258,6 +258,8 @@ def test_predict_logs_threshold_fields(monkeypatch):
             "current_price": 200.0,
             "trained_model_type": "ensemble",
             "trained_artifact": "models/rf_model.joblib",
+            "trained_artifact_sha256": "artifact-sha-256",
+            "trained_horizon_minutes": 5,
             "dataset_hash": "hash123",
             "trained_at": "2026-03-16T12:00:00+00:00",
             "validation_mode": "walk_forward",
@@ -293,6 +295,12 @@ def test_predict_logs_threshold_fields(monkeypatch):
     assert captured["entry"]["sell_threshold"] == 0.1
     assert captured["entry"]["predicted_price"] == 203.5
     assert captured["entry"]["threshold_strategy"]["trade_count"] == 12
+    assert captured["entry"]["prediction_provenance"]["requested_horizon_minutes"] == 15
+    assert captured["entry"]["prediction_provenance"]["trained_horizon_minutes"] == 5
+    assert captured["entry"]["prediction_provenance"]["model_interval_minutes"] == 5
+    assert captured["entry"]["prediction_provenance"]["used_demo_fallback"] is False
+    assert captured["entry"]["prediction_provenance"]["used_trained_horizon_fallback"] is True
+    assert captured["entry"]["prediction_provenance"]["trained_artifact_sha256"] == "artifact-sha-256"
 
 
 def test_predict_blocks_weak_scope_with_action_hold(monkeypatch):
@@ -404,6 +412,146 @@ def test_predict_requires_margin_edge_for_cautious_scope(monkeypatch):
     assert resp.additional_info["execution_gate_reason"] == "edge_below_margin"
     assert resp.additional_info["execution_margin"] == pytest.approx(0.05)
     assert resp.additional_info["threshold_edge"] == pytest.approx(0.03)
+
+
+def test_predict_abstains_when_calibration_guidance_blocks_scope(monkeypatch):
+    import app.api.crypto as crypto_api
+
+    monkeypatch.setattr(crypto_api, "_binance_spot_price", lambda _sym: 200.0)
+    monkeypatch.setattr(
+        crypto_api,
+        "_predict_with_trained_models",
+        lambda *_a, **_k: {
+            "model_used": "ensemble",
+            "probability_up": 0.9,
+            "predicted_price": 206.0,
+            "decision": "BUY",
+            "current_price": 200.0,
+            "trained_model_type": "ensemble",
+            "trained_artifact": "models/rf_model.joblib",
+            "dataset_hash": "hash123",
+            "trained_at": "2026-03-16T12:00:00+00:00",
+            "validation_mode": "walk_forward",
+            "interval_minutes": 5,
+            "regime": "bull_high_vol",
+            "per_model_probs": {"rf": 0.91, "dl": 0.89, "xgb": 0.88, "cat": 0.9, "seta": 0.92},
+        },
+    )
+    monkeypatch.setattr(
+        crypto_api,
+        "optimize_thresholds",
+        lambda **_kwargs: {"buy_threshold": 0.8, "sell_threshold": 0.2, "trade_count": 18},
+    )
+    monkeypatch.setattr(
+        crypto_api,
+        "assess_scope_credibility",
+        lambda **_kwargs: {
+            "status": "trusted",
+            "actionable": True,
+            "should_abstain": False,
+            "score": 0.81,
+            "reasons": [],
+            "trade_count": 18,
+            "recommendation": {"buy_threshold": 0.8, "sell_threshold": 0.2, "trade_count": 18},
+        },
+    )
+    monkeypatch.setattr(
+        crypto_api,
+        "recent_stats",
+        lambda **_kwargs: {
+            "operator_guidance": {
+                "status": "abstain",
+                "action": "hold_out_until_recalibrated",
+                "reasons": ["high_confidence_bucket_miscalibrated"],
+                "probability_count": 16,
+                "high_confidence_count": 6,
+                "focus_bucket": "high",
+            }
+        },
+    )
+    monkeypatch.setattr(crypto_api, "fetch_crypto_news", lambda *_a, **_k: {"provider": "stub", "items": []})
+
+    req = crypto_api.PredictRequest(symbol="BTC", horizon_minutes=15, model="ensemble", save=False)
+    resp = crypto_api.predict(req)
+
+    assert resp.decision == "HOLD"
+    assert resp.additional_info["action_decision"] == "HOLD"
+    assert resp.additional_info["actionable"] is False
+    assert resp.additional_info["execution_gate_reason"] == "calibration_abstain"
+    assert resp.additional_info["operator_guidance_status"] == "abstain"
+    assert resp.additional_info["operator_guidance_action"] == "hold_out_until_recalibrated"
+    assert (resp.raw or {}).get("operator_guidance", {}).get("status") == "abstain"
+    assert (resp.additional_info.get("policy") or {}).get("route_reason") == "calibration_abstain"
+
+
+def test_predict_raises_margin_when_calibration_guidance_downgrades_scope(monkeypatch):
+    import app.api.crypto as crypto_api
+
+    monkeypatch.setattr(crypto_api, "_binance_spot_price", lambda _sym: 200.0)
+    monkeypatch.setattr(
+        crypto_api,
+        "_predict_with_trained_models",
+        lambda *_a, **_k: {
+            "model_used": "ensemble",
+            "probability_up": 0.84,
+            "predicted_price": 204.0,
+            "decision": "BUY",
+            "current_price": 200.0,
+            "trained_model_type": "ensemble",
+            "trained_artifact": "models/rf_model.joblib",
+            "dataset_hash": "hash123",
+            "trained_at": "2026-03-16T12:00:00+00:00",
+            "validation_mode": "walk_forward",
+            "interval_minutes": 5,
+            "regime": "bull_high_vol",
+            "per_model_probs": {"rf": 0.88, "dl": 0.85, "xgb": 0.83, "cat": 0.84, "seta": 0.82},
+        },
+    )
+    monkeypatch.setattr(
+        crypto_api,
+        "optimize_thresholds",
+        lambda **_kwargs: {"buy_threshold": 0.8, "sell_threshold": 0.2, "trade_count": 18},
+    )
+    monkeypatch.setattr(
+        crypto_api,
+        "assess_scope_credibility",
+        lambda **_kwargs: {
+            "status": "trusted",
+            "actionable": True,
+            "should_abstain": False,
+            "score": 0.83,
+            "reasons": [],
+            "trade_count": 18,
+            "recommendation": {"buy_threshold": 0.8, "sell_threshold": 0.2, "trade_count": 18},
+        },
+    )
+    monkeypatch.setattr(
+        crypto_api,
+        "recent_stats",
+        lambda **_kwargs: {
+            "operator_guidance": {
+                "status": "downgrade",
+                "action": "raise_thresholds_or_reduce_size",
+                "reasons": ["overall_brier_elevated"],
+                "probability_count": 18,
+                "high_confidence_count": 5,
+                "focus_bucket": "high",
+            }
+        },
+    )
+    monkeypatch.setattr(crypto_api, "fetch_crypto_news", lambda *_a, **_k: {"provider": "stub", "items": []})
+
+    req = crypto_api.PredictRequest(symbol="BTC", horizon_minutes=15, model="ensemble", save=False)
+    resp = crypto_api.predict(req)
+
+    assert resp.decision == "HOLD"
+    assert resp.additional_info["action_decision"] == "HOLD"
+    assert resp.additional_info["execution_gate_reason"] == "edge_below_margin"
+    assert resp.additional_info["execution_margin"] == pytest.approx(0.05)
+    assert resp.additional_info["calibration_margin"] == pytest.approx(0.03)
+    assert resp.additional_info["threshold_edge"] == pytest.approx(0.04)
+    assert resp.additional_info["operator_guidance_status"] == "downgrade"
+    assert (resp.additional_info.get("policy") or {}).get("gates", {}).get("required_support_ratio") == pytest.approx(0.9)
 
 
 def test_predict_keeps_strong_edge_for_cautious_scope(monkeypatch):
@@ -535,6 +683,20 @@ def test_crypto_policy_endpoint_exposes_route_and_gates(monkeypatch):
             "recommendation": {"buy_threshold": 0.78, "sell_threshold": 0.22, "trade_count": 19},
         },
     )
+    monkeypatch.setattr(
+        crypto_api,
+        "recent_stats",
+        lambda **_kwargs: {
+            "operator_guidance": {
+                "status": "downgrade",
+                "action": "raise_thresholds_or_reduce_size",
+                "reasons": ["overall_probability_error_elevated"],
+                "probability_count": 21,
+                "high_confidence_count": 7,
+                "focus_bucket": "high",
+            }
+        },
+    )
 
     resp = crypto_api.crypto_policy(symbol="BTC", horizon_minutes=15, regime="bull_high_vol")
 
@@ -544,8 +706,14 @@ def test_crypto_policy_endpoint_exposes_route_and_gates(monkeypatch):
     assert resp["policy_profile"]["default_buy_threshold"] == crypto_api.CRYPTO_DEFAULT_BUY_THRESHOLD
     assert resp["recommendation"]["buy_threshold"] == 0.78
     assert resp["credibility"]["status"] == "cautious"
+    assert resp["operator_guidance"]["status"] == "downgrade"
     assert resp["summary"]["route_mode"] == "trained"
     assert resp["summary"]["should_abstain"] is False
+    assert resp["summary"]["calibration_status"] == "downgrade"
+    assert resp["summary"]["calibration_action"] == "raise_thresholds_or_reduce_size"
+    assert resp["summary"]["effective_execution_margin"] == pytest.approx(0.08)
+    assert resp["summary"]["effective_required_support_ratio"] == pytest.approx(0.9)
+    assert resp["summary"]["effective_required_max_spread"] == pytest.approx(0.18)
 
 
 def test_recent_stats_separates_trained_and_demo_engines(tmp_path, monkeypatch):
@@ -566,6 +734,14 @@ def test_recent_stats_separates_trained_and_demo_engines(tmp_path, monkeypatch):
             "decision": "BUY",
             "delta_pct": 0.02,
             "hit": True,
+            "prediction_provenance": {
+                "requested_horizon_minutes": 15,
+                "trained_horizon_minutes": 5,
+                "model_interval_minutes": 5,
+                "used_demo_fallback": False,
+                "used_trained_horizon_fallback": True,
+                "trained_artifact_sha256": "artifact-sha-256",
+            },
         }
     )
     pred_log.log_outcome(
@@ -609,6 +785,14 @@ def test_recent_stats_can_filter_single_engine(tmp_path, monkeypatch):
             "decision": "BUY",
             "delta_pct": 0.02,
             "hit": True,
+            "prediction_provenance": {
+                "requested_horizon_minutes": 15,
+                "trained_horizon_minutes": 5,
+                "model_interval_minutes": 5,
+                "used_demo_fallback": False,
+                "used_trained_horizon_fallback": True,
+                "trained_artifact_sha256": "artifact-sha-256",
+            },
         }
     )
     pred_log.log_outcome(
@@ -682,6 +866,67 @@ def test_recent_stats_groups_symbol_horizon_and_regime(tmp_path, monkeypatch):
     assert stats["per_regime"]["bear_low_vol"]["positive_net_rate"] == 1.0
 
 
+def test_recent_stats_groups_confidence_bucket_and_calibration(tmp_path, monkeypatch):
+    from app.services import crypto_prediction_log as pred_log
+
+    log_dir = tmp_path / "pred_logs"
+    monkeypatch.setattr(pred_log, "LOG_DIR", log_dir)
+    monkeypatch.setattr(pred_log, "LOG_FILE", log_dir / "predictions.jsonl")
+    monkeypatch.setattr(pred_log, "OUTCOME_FILE", log_dir / "prediction_outcomes.jsonl")
+    pred_log.clear_predictions_and_outcomes()
+
+    pred_log.log_outcome(
+        {
+            "log_id": "high",
+            "symbol": "BTCUSDT",
+            "horizon_minutes": 15,
+            "model": "ensemble",
+            "engine": "trained",
+            "decision": "BUY",
+            "probability_up": 0.91,
+            "delta_pct": 0.04,
+            "hit": True,
+        }
+    )
+    pred_log.log_outcome(
+        {
+            "log_id": "medium",
+            "symbol": "BTCUSDT",
+            "horizon_minutes": 15,
+            "model": "ensemble",
+            "engine": "trained",
+            "decision": "BUY",
+            "probability_up": 0.68,
+            "delta_pct": 0.01,
+            "hit": True,
+        }
+    )
+    pred_log.log_outcome(
+        {
+            "log_id": "low",
+            "symbol": "BTCUSDT",
+            "horizon_minutes": 15,
+            "model": "ensemble",
+            "engine": "trained",
+            "decision": "BUY",
+            "probability_up": 0.54,
+            "delta_pct": -0.02,
+            "hit": False,
+        }
+    )
+
+    stats = pred_log.recent_stats(limit=10, engine="trained")
+
+    assert stats["probability_count"] == 3
+    assert stats["per_confidence_bucket"]["high"]["count"] == 1
+    assert stats["per_confidence_bucket"]["medium"]["count"] == 1
+    assert stats["per_confidence_bucket"]["low"]["count"] == 1
+    assert stats["per_confidence_bucket"]["high"]["brier_score"] == pytest.approx(0.0081)
+    assert stats["per_confidence_bucket"]["medium"]["avg_probability_error"] == pytest.approx(0.32)
+    assert stats["per_confidence_bucket"]["low"]["brier_score"] == pytest.approx(0.2916)
+    assert stats["avg_probability_error"] == pytest.approx((0.09 + 0.32 + 0.54) / 3.0)
+
+
 def test_recent_stats_prefers_action_decision_over_model_decision(tmp_path, monkeypatch):
     from app.services import crypto_prediction_log as pred_log
 
@@ -712,6 +957,75 @@ def test_recent_stats_prefers_action_decision_over_model_decision(tmp_path, monk
     assert stats["trade_count"] == 0
     assert stats["hold_count"] == 1
     assert stats["net_expectancy_pct"] is None
+
+
+def test_recent_stats_operator_guidance_abstains_on_high_confidence_drift(tmp_path, monkeypatch):
+    from app.services import crypto_prediction_log as pred_log
+
+    log_dir = tmp_path / "pred_logs"
+    monkeypatch.setattr(pred_log, "LOG_DIR", log_dir)
+    monkeypatch.setattr(pred_log, "LOG_FILE", log_dir / "predictions.jsonl")
+    monkeypatch.setattr(pred_log, "OUTCOME_FILE", log_dir / "prediction_outcomes.jsonl")
+    pred_log.clear_predictions_and_outcomes()
+
+    for idx in range(4):
+        pred_log.log_outcome(
+            {
+                "log_id": f"high-{idx}",
+                "symbol": "BTCUSDT",
+                "model": "ensemble",
+                "engine": "trained",
+                "decision": "BUY",
+                "probability_up": 0.88,
+                "delta_pct": -0.02,
+                "hit": False,
+                "horizon_minutes": 15,
+                "regime": "bull_high_vol",
+                "ts": 1_700_000_000 + idx,
+            }
+        )
+    for idx in range(3):
+        pred_log.log_outcome(
+            {
+                "log_id": f"medium-{idx}",
+                "symbol": "BTCUSDT",
+                "model": "ensemble",
+                "engine": "trained",
+                "decision": "BUY",
+                "probability_up": 0.68,
+                "delta_pct": 0.01,
+                "hit": True,
+                "horizon_minutes": 15,
+                "regime": "bull_high_vol",
+                "ts": 1_700_000_100 + idx,
+            }
+        )
+    for idx in range(2):
+        pred_log.log_outcome(
+            {
+                "log_id": f"low-{idx}",
+                "symbol": "BTCUSDT",
+                "model": "ensemble",
+                "engine": "trained",
+                "decision": "BUY",
+                "probability_up": 0.54,
+                "delta_pct": 0.005 if idx == 0 else -0.005,
+                "hit": idx == 0,
+                "horizon_minutes": 15,
+                "regime": "bull_high_vol",
+                "ts": 1_700_000_200 + idx,
+            }
+        )
+
+    stats = pred_log.recent_stats(limit=20, engine="trained")
+
+    assert stats["operator_guidance"]["status"] == "abstain"
+    assert stats["operator_guidance"]["action"] == "hold_out_until_recalibrated"
+    assert stats["operator_guidance"]["high_confidence_count"] == 4
+    assert stats["operator_guidance"]["focus_bucket"] == "high"
+    assert stats["operator_guidance"]["weakest_bucket"]["name"] == "high"
+    assert "high_confidence_bucket_miscalibrated" in stats["operator_guidance"]["reasons"]
+    assert "high_confidence_underperforming_medium" in stats["operator_guidance"]["reasons"]
 
 
 def test_crypto_prediction_stats_export_and_filters(tmp_path, monkeypatch):
@@ -753,6 +1067,14 @@ def test_crypto_prediction_stats_export_and_filters(tmp_path, monkeypatch):
             "decision": "BUY",
             "delta_pct": 0.02,
             "hit": True,
+            "prediction_provenance": {
+                "requested_horizon_minutes": 15,
+                "trained_horizon_minutes": 5,
+                "model_interval_minutes": 5,
+                "used_demo_fallback": False,
+                "used_trained_horizon_fallback": True,
+                "trained_artifact_sha256": "artifact-sha-256",
+            },
         }
     )
     pred_log.log_outcome(
@@ -780,19 +1102,104 @@ def test_crypto_prediction_stats_export_and_filters(tmp_path, monkeypatch):
     assert stats["trained_count"] == 1
     assert stats["demo_count"] == 0
     assert pytest.approx(stats["net_expectancy_pct"], rel=1e-6) == 0.017
+    assert stats["provenance"]["records_with_provenance"] == 1
+    assert stats["provenance"]["trained_horizon_fallback_count"] == 1
+    assert stats["provenance"]["requested_vs_trained"]["15m->5m"] == 1
+    assert stats["provenance"]["model_intervals"]["5m"] == 1
     assert csv_resp.media_type == "text/csv"
     csv_body = csv_resp.body.decode("utf-8")
-    assert "section,name,count,accuracy,avg_delta_pct,net_expectancy_pct,positive_net_rate,max_drawdown_pct" in csv_body
-    assert "engine,trained,1,1.0,0.02,0.017,1.0,0.0" in csv_body
+    assert "section,name,count,accuracy,avg_delta_pct,net_expectancy_pct,positive_net_rate,max_drawdown_pct,avg_probability_error,brier_score" in csv_body
+    assert "engine,trained,1,1.0,0.02,0.017,1.0,0.0,," in csv_body
+    assert "provenance,trained_horizon_fallback,1,,,,,,," in csv_body
+    assert "provenance,requested_vs_trained:15m->5m,1,,,,,,," in csv_body
     assert json_resp.media_type == "application/json"
     json_body = json_resp.body.decode("utf-8")
     assert "\"engine\": \"trained\"" in json_body
     assert "\"net_expectancy_pct\": 0.017" in json_body
+    assert "\"trained_horizon_fallback_count\": 1" in json_body
+    assert "\"15m->5m\": 1" in json_body
+    assert "\"operator_guidance\"" in json_body
+    assert "\"status\": \"insufficient_history\"" in json_body
     assert md_resp.media_type == "text/markdown"
     md_body = md_resp.body.decode("utf-8")
     assert "# AEGIS Crypto Evaluation Report" in md_body
     assert "Engine scope: `trained`" in md_body
     assert "Net expectancy: `1.70%`" in md_body
+    assert "Avg probability error: `n/a`" in md_body
+    assert "Brier score: `n/a`" in md_body
+    assert "## Provenance" in md_body
+    assert "Trained horizon fallback rows: `1`" in md_body
+    assert "Requested -> trained horizons: `15m->5m (1)`" in md_body
+
+
+def test_crypto_prediction_stats_export_markdown_includes_confidence_calibration(tmp_path, monkeypatch):
+    import app.api.crypto as crypto_api
+    from app.services import crypto_prediction_log as pred_log
+
+    log_dir = tmp_path / "pred_logs"
+    monkeypatch.setattr(pred_log, "LOG_DIR", log_dir)
+    monkeypatch.setattr(pred_log, "LOG_FILE", log_dir / "predictions.jsonl")
+    monkeypatch.setattr(pred_log, "OUTCOME_FILE", log_dir / "prediction_outcomes.jsonl")
+    pred_log.clear_predictions_and_outcomes()
+
+    pred_log.log_outcome(
+        {
+            "log_id": "high",
+            "symbol": "BTCUSDT",
+            "model": "ensemble",
+            "engine": "trained",
+            "decision": "BUY",
+            "probability_up": 0.91,
+            "delta_pct": 0.04,
+            "hit": True,
+        }
+    )
+    pred_log.log_outcome(
+        {
+            "log_id": "medium",
+            "symbol": "BTCUSDT",
+            "model": "ensemble",
+            "engine": "trained",
+            "decision": "BUY",
+            "probability_up": 0.68,
+            "delta_pct": 0.01,
+            "hit": True,
+        }
+    )
+    pred_log.log_outcome(
+        {
+            "log_id": "low",
+            "symbol": "BTCUSDT",
+            "model": "ensemble",
+            "engine": "trained",
+            "decision": "BUY",
+            "probability_up": 0.54,
+            "delta_pct": -0.02,
+            "hit": False,
+        }
+    )
+
+    md_resp = crypto_api.export_prediction_stats(limit=10, symbol="BTCUSDT", engine="trained", format="md")
+    md_body = md_resp.body.decode("utf-8")
+    csv_resp = crypto_api.export_prediction_stats(limit=10, symbol="BTCUSDT", engine="trained", format="csv")
+    csv_body = csv_resp.body.decode("utf-8")
+
+    assert "## Confidence Calibration" in md_body
+    assert "Avg probability error: `31.67%`" in md_body
+    assert "Brier score: `0.1340`" in md_body
+    assert "`high`: count=`1`, accuracy=`100.0%`, avg_prob_error=`9.00%`, brier=`0.0081`" in md_body
+    assert "`medium`: count=`1`, accuracy=`100.0%`, avg_prob_error=`32.00%`, brier=`0.1024`" in md_body
+    assert "`low`: count=`1`, accuracy=`0.0%`, avg_prob_error=`54.00%`, brier=`0.2916`" in md_body
+    assert "## Operating Guidance" in md_body
+    assert "Calibration status: `insufficient_history`" in md_body
+    assert "Operator action: `observe_only`" in md_body
+    assert "Reasons: `not_enough_probability_history`" in md_body
+    assert "confidence,high,1,1.0,0.04,0.037,1.0,0.0,0.08999999999999997,0.008099999999999994" in csv_body
+    assert "confidence,medium,1,1.0,0.01,0.007,1.0,0.0,0.31999999999999995,0.10239999999999996" in csv_body
+    assert "confidence,low,1,0.0,-0.02,-0.023,0.0,0.023,0.54,0.2916" in csv_body
+    assert "guidance,status:insufficient_history,3" in csv_body
+    assert "guidance,action:observe_only,1" in csv_body
+    assert "guidance,reason:not_enough_probability_history" in csv_body
 
 
 def test_crypto_prediction_stats_can_filter_horizon_and_regime(tmp_path, monkeypatch):

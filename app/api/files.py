@@ -63,6 +63,7 @@ from app.services.project_store import (
     register_project,
     update_project,
 )
+from app.services.retrieval_service import remove_project_documents
 from app.services.upload_inspector import (
     format_upload_summary,
     inspect_upload_tree,
@@ -82,12 +83,14 @@ UPLOAD_ROOT = Path(os.getenv("FILES_UPLOAD_ROOT", "data/uploads")).resolve()
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 
 MAX_UPLOAD_BYTES = int(os.getenv("FILES_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))  # 50MB default
+FILES_MAX_ZIP_ENTRIES = int(os.getenv("FILES_MAX_ZIP_ENTRIES", "5000"))
+FILES_MAX_UNZIPPED_BYTES = int(os.getenv("FILES_MAX_UNZIPPED_BYTES", str(250 * 1024 * 1024)))
 INGEST_TIMEOUT = int(os.getenv("FILES_INGEST_TIMEOUT", "2000"))
 INGEST_LOG_DIR = Path(os.getenv("FILES_INGEST_LOG_DIR", "logs")).resolve()
 ALLOWED_HOSTS = {"github.com", "gitlab.com", "bitbucket.org"}
 FILES_AV_SCAN = os.getenv("FILES_AV_SCAN", "1") != "0"
 FILES_AV_TIMEOUT = int(os.getenv("FILES_AV_TIMEOUT", "15"))
-FILES_AV_FAIL_OPEN = os.getenv("FILES_AV_FAIL_OPEN", "1") != "0"
+FILES_AV_FAIL_OPEN = os.getenv("FILES_AV_FAIL_OPEN", "0") != "0"
 FILES_AV_RETRIES = max(0, int(os.getenv("FILES_AV_RETRIES", "1") or "1"))
 FILES_ALLOW_ROOT_PARAM = (os.getenv("FILES_ALLOW_ROOT_PARAM", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
 FILES_MAX_EDIT_BYTES = int(os.getenv("FILES_MAX_EDIT_BYTES", str(2 * 1024 * 1024)))
@@ -912,11 +915,47 @@ def _dir_size_mb(path: Path) -> int:
     return int(total / (1024 * 1024))
 
 
+def _cleanup_path(path: Path) -> None:
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except Exception:
+        pass
+
+
 def _av_scan_error_or_open(status: str, detail: str) -> str:
     if FILES_AV_FAIL_OPEN:
         logger.warning("AV scan fail-open (%s): %s", status, detail)
         return f"fail-open:{status}"
     raise HTTPException(status_code=400, detail=detail)
+
+
+def _extract_zip_archive(zf: zipfile.ZipFile, dest: Path) -> tuple[int, int]:
+    entry_count = 0
+    total_uncompressed = 0
+    for member in zf.infolist():
+        entry_count += 1
+        if FILES_MAX_ZIP_ENTRIES and entry_count > FILES_MAX_ZIP_ENTRIES:
+            raise HTTPException(status_code=413, detail="Zip has too many entries")
+
+        member_norm = member.filename.replace("\\", "/")
+
+        # zip-slip protection
+        if member_norm.startswith("/") or ".." in Path(member_norm).parts:
+            raise HTTPException(status_code=400, detail="Invalid zip entry")
+
+        member_size = max(0, int(getattr(member, "file_size", 0) or 0))
+        total_uncompressed += member_size
+        if FILES_MAX_UNZIPPED_BYTES and total_uncompressed > FILES_MAX_UNZIPPED_BYTES:
+            raise HTTPException(status_code=413, detail="Zip expands beyond allowed size")
+
+        target = ensure_under_upload_root(dest / member_norm)
+        if member.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(member) as src, open(target, "wb") as out:
+                shutil.copyfileobj(src, out)
+    return entry_count, total_uncompressed
 
 
 def _av_scan_path(path: Path) -> str:
@@ -1174,33 +1213,24 @@ async def upload_zip(
 
     try:
         with zipfile.ZipFile(io.BytesIO(buf)) as zf:
-            for member in zf.infolist():
-                member_norm = member.filename.replace("\\", "/")
-
-                # zip-slip protection
-                if member_norm.startswith("/") or ".." in Path(member_norm).parts:
-                    raise HTTPException(status_code=400, detail="Invalid zip entry")
-
-                target = ensure_under_upload_root(dest / member_norm)
-                if member.is_dir():
-                    target.mkdir(parents=True, exist_ok=True)
-                else:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    with zf.open(member) as src, open(target, "wb") as out:
-                        shutil.copyfileobj(src, out)
+            _extract_zip_archive(zf, dest)
         av_status = _av_scan_path(dest)
+        remember_last_upload(dest, source="upload-zip")
+        project = register_project(project_id, dest, source="upload-zip", status="uploaded")
+        auto_ingest = await _queue_auto_ingest(project_id)
+        project = get_project(project_id) or project
+        manifest = load_project_manifest(project.get("manifest_path") or project.get("root_path") or "")
+        ready_project = _annotate_project_readiness(project, manifest)
+        auto_status = str((auto_ingest or {}).get("status") or "").strip().lower()
     except HTTPException:
+        _cleanup_path(dest)
         raise
+    except zipfile.BadZipFile as exc:
+        _cleanup_path(dest)
+        raise HTTPException(status_code=400, detail="Corrupt or invalid zip") from exc
     except Exception:
-        raise HTTPException(status_code=400, detail="Corrupt or invalid zip")
-
-    remember_last_upload(dest, source="upload-zip")
-    project = register_project(project_id, dest, source="upload-zip", status="uploaded")
-    auto_ingest = await _queue_auto_ingest(project_id)
-    project = get_project(project_id) or project
-    manifest = load_project_manifest(project.get("manifest_path") or project.get("root_path") or "")
-    ready_project = _annotate_project_readiness(project, manifest)
-    auto_status = str((auto_ingest or {}).get("status") or "").strip().lower()
+        _cleanup_path(dest)
+        raise
 
     return {
         "status": "ok",
@@ -1281,13 +1311,20 @@ async def clone_repo(payload: CloneRequest) -> Dict[str, Any]:
             if size_mb > payload.max_mb:
                 shutil.rmtree(dest, ignore_errors=True)
                 raise HTTPException(status_code=413, detail=f"Repo too large ({size_mb} MB). Increase max_mb or use smaller depth.")
-            av_status = _av_scan_path(dest)
-            remember_last_upload(dest, source="clone")
-            project = register_project(project_id, dest, source="clone", status="uploaded", metadata={"repo_url": repo_url})
-            auto_ingest = await _queue_auto_ingest(project_id)
-            project = get_project(project_id) or project
-            manifest = load_project_manifest(project.get("manifest_path") or project.get("root_path") or "")
-            ready_project = _annotate_project_readiness(project, manifest)
+            try:
+                av_status = _av_scan_path(dest)
+                remember_last_upload(dest, source="clone")
+                project = register_project(project_id, dest, source="clone", status="uploaded", metadata={"repo_url": repo_url})
+                auto_ingest = await _queue_auto_ingest(project_id)
+                project = get_project(project_id) or project
+                manifest = load_project_manifest(project.get("manifest_path") or project.get("root_path") or "")
+                ready_project = _annotate_project_readiness(project, manifest)
+            except HTTPException:
+                _cleanup_path(dest)
+                raise
+            except Exception:
+                _cleanup_path(dest)
+                raise
             return {
                 "status": "ok",
                 "project_id": project_id,
@@ -1307,21 +1344,29 @@ async def clone_repo(payload: CloneRequest) -> Dict[str, Any]:
     cmd2 = ["git", "clone", "--depth", str(depth), repo_url, str(dest)]
     r2 = run(cmd2)
     if r2.returncode != 0:
+        _cleanup_path(dest)
         raise HTTPException(status_code=400, detail=f"git clone failed:\n{(r2.stdout or '')[:3000]}")
 
     used = _detect_default_branch(repo_url) or branch or "unknown"
     size_mb = _dir_size_mb(dest)
     if size_mb > payload.max_mb:
-        shutil.rmtree(dest, ignore_errors=True)
+        _cleanup_path(dest)
         raise HTTPException(status_code=413, detail=f"Repo too large ({size_mb} MB). Increase max_mb or use smaller depth.")
 
-    av_status = _av_scan_path(dest)
-    remember_last_upload(dest, source="clone")
-    project = register_project(project_id, dest, source="clone", status="uploaded", metadata={"repo_url": repo_url})
-    auto_ingest = await _queue_auto_ingest(project_id)
-    project = get_project(project_id) or project
-    manifest = load_project_manifest(project.get("manifest_path") or project.get("root_path") or "")
-    ready_project = _annotate_project_readiness(project, manifest)
+    try:
+        av_status = _av_scan_path(dest)
+        remember_last_upload(dest, source="clone")
+        project = register_project(project_id, dest, source="clone", status="uploaded", metadata={"repo_url": repo_url})
+        auto_ingest = await _queue_auto_ingest(project_id)
+        project = get_project(project_id) or project
+        manifest = load_project_manifest(project.get("manifest_path") or project.get("root_path") or "")
+        ready_project = _annotate_project_readiness(project, manifest)
+    except HTTPException:
+        _cleanup_path(dest)
+        raise
+    except Exception:
+        _cleanup_path(dest)
+        raise
 
     return {
         "status": "ok",
@@ -2219,7 +2264,19 @@ async def delete_project_endpoint(req: DeleteProjectRequest) -> Dict[str, Any]:
         project = get_project(str(req.project_id).strip())
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
-        target = _resolve_registered_project_root(project)
+        root_value = str(project.get("root_path") or "").strip()
+        if not root_value:
+            raise HTTPException(status_code=404, detail="Project root not found")
+        raw_target = Path(root_value)
+        if _is_under_upload_root(raw_target):
+            target = ensure_under_upload_root(raw_target)
+        else:
+            try:
+                target = _ensure_under_project_root(raw_target)
+            except HTTPException:
+                # Old test/runtime registry entries can point outside the current workspace.
+                # In that case allow unregister-only cleanup, but never delete the external path.
+                target = raw_target.resolve()
     elif req.path:
         raw = Path(req.path)
         tentative = raw if raw.is_absolute() else (PROJECT_ROOT / raw)
@@ -2235,6 +2292,11 @@ async def delete_project_endpoint(req: DeleteProjectRequest) -> Dict[str, Any]:
 
     project_id = str((project or {}).get("project_id") or "").strip()
     deleted_path = False
+    retrieval_removed = 0
+
+    if project_id:
+        retrieval_removed = int(remove_project_documents(project_id) or 0)
+
     if _is_under_upload_root(target):
         try:
             shutil.rmtree(target, ignore_errors=False)
@@ -2252,6 +2314,7 @@ async def delete_project_endpoint(req: DeleteProjectRequest) -> Dict[str, Any]:
         "path": str(target),
         "deleted_path": deleted_path,
         "unregistered_only": not deleted_path,
+        "retrieval_removed": retrieval_removed,
     }
 
 

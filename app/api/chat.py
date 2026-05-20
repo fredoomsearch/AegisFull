@@ -49,7 +49,6 @@ from app.models.llm_utils import (
     detect_build_intent,
     is_code_question,
     is_market_question,
-    is_obviously_unsafe_request,
     is_repo_content_question,
     looks_like_low_value_response,
     looks_like_overrefusal,
@@ -607,6 +606,109 @@ def _infer_contextual_project_file_focus(
     return ""
 
 
+def _looks_like_global_project_question(message: str) -> bool:
+    lower = normalize_for_routing(strip_attachment_context(message))
+    if not lower:
+        return False
+    direct_hints = (
+        "active project",
+        "proyecto activo",
+        "this project",
+        "este proyecto",
+        "the project",
+        "el proyecto",
+        "this repo",
+        "este repo",
+        "repositorio clonado",
+        "cloned repository",
+        "project overview",
+        "repo overview",
+        "what does this project do",
+        "what does the project do",
+        "what is this project",
+        "explain the active project",
+        "explain the project",
+        "describe the active project",
+        "describe the project",
+        "describe all you analyze",
+        "describe todo lo que analizas",
+        "explicame el proyecto activo",
+        "explícame el proyecto activo",
+        "explicame el proyecto",
+        "explícame el proyecto",
+        "que es este proyecto",
+        "qué es este proyecto",
+        "que contiene el proyecto",
+        "qué contiene el proyecto",
+        "de forma completa",
+        "forma completa",
+    )
+    if any(token in lower for token in direct_hints):
+        return True
+    has_project_subject = any(
+        token in lower
+        for token in ("project", "proyecto", "repo", "repository", "codebase", "repositorio")
+    )
+    has_overview_intent = any(
+        token in lower
+        for token in (
+            "explain",
+            "explica",
+            "describe",
+            "descripcion",
+            "descripción",
+            "overview",
+            "what is",
+            "what does",
+            "que es",
+            "qué es",
+            "que hace",
+            "qué hace",
+            "que contiene",
+            "qué contiene",
+            "complete",
+            "completo",
+            "completa",
+            "architecture",
+            "arquitectura",
+        )
+    )
+    return has_project_subject and has_overview_intent
+
+
+def _active_project_should_override_attachment(
+    message: str,
+    session_state: Dict[str, Any] | None,
+) -> bool:
+    state = normalize_session_state(session_state)
+    if not str(state.get("active_project_id") or "").strip():
+        return False
+    routing_message = strip_attachment_context(message)
+    if _looks_like_global_project_question(routing_message) or is_architecture_question(routing_message):
+        return True
+
+    manifest = _load_active_project_manifest(state)
+    if not isinstance(manifest, dict):
+        return False
+
+    project_context_live = bool(
+        str(state.get("next_tool") or "").strip().startswith("project_")
+        or str(state.get("next_tool") or "").strip() == "file_search"
+        or str(state.get("current_task") or "").strip()
+        or str(state.get("current_subtask") or "").strip()
+        or str(state.get("current_topic") or "").strip()
+        or str(state.get("current_file_focus") or "").strip()
+        or str(state.get("current_symbol_focus") or "").strip()
+        or str(state.get("current_artifact_focus") or "").strip()
+    )
+    if not project_context_live:
+        return False
+
+    explicit_file_focus = _infer_contextual_project_file_focus(routing_message, manifest, state)
+    explicit_directory_focus = infer_directory_focus(routing_message, manifest)
+    return bool(explicit_file_focus or explicit_directory_focus or _has_explicit_project_scope(routing_message))
+
+
 def _looks_like_pasted_code_or_trace(message: str) -> bool:
     """
     Heuristic detector for pasted code/log blobs.
@@ -1021,7 +1123,11 @@ def _build_attachment_llm_guidance(message: str, lang: str) -> str:
     )
 
 
-def _maybe_attachment_context_response(message: str, lang: str) -> Dict[str, Any] | None:
+def _maybe_attachment_context_response(
+    message: str,
+    lang: str,
+    session_state: Dict[str, Any] | None = None,
+) -> Dict[str, Any] | None:
     payload = _extract_attachment_context_payload(message)
     if not payload:
         return None
@@ -1032,6 +1138,8 @@ def _maybe_attachment_context_response(message: str, lang: str) -> Dict[str, Any
     if wants_links_or_sources(clean_message) or _needs_fresh_web_context(clean_message):
         return None
     if _ATTACHMENT_PROJECT_HINT_RE.search(clean_message):
+        return None
+    if _active_project_should_override_attachment(message, session_state):
         return None
     attachment_named_request = bool(
         re.search(
@@ -1492,6 +1600,7 @@ def _build_response_context(
     effective_tool: str = "",
     effective_tool_status: str = "",
     effective_tool_output: str = "",
+    crypto_prediction_ref: Dict[str, Any] | None = None,
     plan: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     meta = dict(web_meta or {})
@@ -1634,6 +1743,18 @@ def _build_response_context(
         "llm_required": llm_required,
         "routing_confidence": routing_confidence,
         "ambiguous_route": ambiguous_route,
+        "crypto_prediction_ref": (
+            {
+                "log_id": str((crypto_prediction_ref or {}).get("log_id") or "").strip() or None,
+                "symbol": str((crypto_prediction_ref or {}).get("symbol") or "").strip().upper() or None,
+                "horizon_minutes": int((crypto_prediction_ref or {}).get("horizon_minutes") or 0) or None,
+                "ts": int((crypto_prediction_ref or {}).get("ts") or 0) or None,
+                "source": str((crypto_prediction_ref or {}).get("source") or "").strip() or None,
+                "decision": str((crypto_prediction_ref or {}).get("decision") or "").strip().upper() or None,
+            }
+            if isinstance(crypto_prediction_ref, dict)
+            else None
+        ),
     }
     try:
         runtime_metrics.record_chat_source(
@@ -1801,6 +1922,8 @@ def _maybe_active_project_response(message: str, lang: str, session_state: Dict[
             "full architecture",
         )
     ):
+        return summarize_project_architecture_deep(root, manifest, lang=lang)
+    if root and _looks_like_global_project_question(routing_message):
         return summarize_project_architecture_deep(root, manifest, lang=lang)
 
     if project_followup_clarifier:
@@ -2164,6 +2287,11 @@ def _maybe_project_file_response(
             or any(hint in lower for hint in ("defined", "implemented", "declared", "used", "handled", "located"))
         )
     )
+    global_project_reset = bool(
+        _looks_like_global_project_question(routing_message)
+        and not asks_tree
+        and not (explicit_file_focus or explicit_directory_focus or explicit_symbol_focus)
+    )
     project_followup_clarifier = _looks_like_project_followup_prompt(routing_message) and bool(
         planner_next_tool in {"project_manifest", "project_files", "project_symbols", "project_excerpt", "file_search"}
         or state_file_focus
@@ -2193,6 +2321,11 @@ def _maybe_project_file_response(
             asks_symbol_lookup = True
         else:
             asks_manifest = True
+    if global_project_reset:
+        state_file_focus = ""
+        state_symbol_focus = ""
+        state_folder_focus = ""
+        parent_tree_followup = False
     if parent_tree_followup:
         asks_tree = True
     if directory_followup:
@@ -2201,8 +2334,8 @@ def _maybe_project_file_response(
         asks_excerpt = True
     project_intent = bool(
         explicit_project_scope
-        or is_repo_content_question(message)
-        or is_architecture_question(message)
+        or is_repo_content_question(routing_message)
+        or is_architecture_question(routing_message)
         or asks_tree
         or asks_manifest
         or asks_symbol_lookup
@@ -2218,6 +2351,8 @@ def _maybe_project_file_response(
         )
     ) or (project_followup_clarifier and bool(state_file_focus or state_symbol_focus)) or parent_tree_followup
     if not (project_intent or referential_followup):
+        return None
+    if global_project_reset:
         return None
     allow_stale_focus = bool(project_intent or referential_followup)
     file_focus = explicit_file_focus or explicit_directory_focus or (
@@ -2548,6 +2683,12 @@ def _build_turn_plan(
     explicit_project_scope = _has_explicit_project_scope(routing_message)
     explicit_directory_focus = _infer_active_project_directory_focus(routing_message, state) if has_active_project else ""
     explicit_file_focus = _infer_contextual_project_file_focus(routing_message, _load_active_project_manifest(state), state) if has_active_project else ""
+    global_project_reset = bool(
+        has_active_project
+        and _looks_like_global_project_question(routing_message)
+        and not asks_tree
+        and not (explicit_file_focus or explicit_directory_focus or explicit_symbol_focus)
+    )
     project_intent = bool(
         mode_norm == "project"
         or explicit_project_scope
@@ -2606,6 +2747,12 @@ def _build_turn_plan(
             or bool(re.search(r"\b(this|that|it|those|these|same|again|continue|next|previous|above|here|esto|eso|esta|ese|mismo|continuar)\b", lower))
         )
     ) or project_followup_clarifier or parent_tree_followup
+    if global_project_reset:
+        current_file_focus = ""
+        current_folder_focus = ""
+        current_tree_focus = ""
+        parent_tree_followup = False
+        followup = False
     if persisted_next_tool:
         if persisted_next_tool == "web_search" and source_plan in {"web_only", "local+web"}:
             next_tool = "web_search"
@@ -2625,7 +2772,9 @@ def _build_turn_plan(
     )
     if local_project_question and next_tool == "web_search":
         next_tool = "project_manifest"
-    if has_active_project and project_intent and asks_tree:
+    if has_active_project and global_project_reset:
+        next_tool = "project_manifest"
+    elif has_active_project and project_intent and asks_tree:
         next_tool = "project_files"
     elif has_active_project and explicit_file_focus and (project_intent or followup) and (asks_excerpt or followup):
         next_tool = "project_excerpt"
@@ -2656,7 +2805,7 @@ def _build_turn_plan(
         tool_candidates.append("project_manifest")
         if asks_tree:
             tool_candidates.append("project_files")
-        if is_repo_content_question(routing_message) or is_architecture_question(routing_message) or is_code_question(routing_message):
+        if (is_repo_content_question(routing_message) or is_architecture_question(routing_message) or is_code_question(routing_message)) and not global_project_reset:
             steps.append("project_files_symbols")
             tool_candidates.extend(["project_symbols", "project_excerpt"])
         elif explicit_file_focus and (asks_excerpt or followup):
@@ -3937,6 +4086,37 @@ def _extract_crypto_horizon(text: str) -> int | None:
     return None
 
 
+def _extract_crypto_trade_side(text: str) -> str | None:
+    clean = normalize_for_routing(text)
+    if not clean:
+        return None
+    if re.search(r"\b(sell|vendo|vender|venta|salir)\b", clean):
+        return "SELL"
+    if re.search(r"\b(buy|comprar|compro|compra|entrar)\b", clean):
+        return "BUY"
+    return None
+
+
+def _extract_crypto_quantity(text: str) -> float | None:
+    raw = str(text or "")
+    patterns = (
+        r"\b(?:qty|quantity|cantidad)\s*(?:=|:|de)?\s*([0-9]+(?:[.,][0-9]+)?)\b",
+        r"\b(?:sell|buy|vendo|vender|comprar|compro)\s+(?:la\s+cantidad\s+de\s+)?([0-9]+(?:[.,][0-9]+)?)\b",
+        r"\b([0-9]+(?:[.,][0-9]+)?)\s*btc\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, raw, flags=re.IGNORECASE)
+        if not match:
+            continue
+        try:
+            value = float(str(match.group(1)).replace(",", "."))
+        except Exception:
+            continue
+        if value > 0:
+            return value
+    return None
+
+
 def _looks_like_new_crypto_prediction_request(text: str) -> bool:
     clean = normalize_for_routing(text)
     if not clean:
@@ -3963,6 +4143,73 @@ def _looks_like_new_crypto_prediction_request(text: str) -> bool:
     ):
         return True
     return False
+
+
+def _detect_crypto_followup_intent(text: str) -> str:
+    clean = normalize_for_routing(text)
+    if not clean:
+        return ""
+    side = _extract_crypto_trade_side(text)
+    qty = _extract_crypto_quantity(text)
+    if (side or qty is not None) and any(
+        token in clean
+        for token in (
+            "expect",
+            "esperar",
+            "price",
+            "precio",
+            "result",
+            "resultado",
+            "value",
+            "valor",
+            "podria",
+            "podría",
+            "could",
+        )
+    ):
+        return "trade_projection"
+    if any(
+        token in clean
+        for token in (
+            "precio mas aproximado",
+            "precio más aproximado",
+            "precio aproximado",
+            "predicted price",
+            "target price",
+            "approximate price",
+            "cual sera el precio",
+            "cuál será el precio",
+            "cual seria el precio",
+            "cuál sería el precio",
+        )
+    ):
+        return "price"
+    if any(
+        token in clean
+        for token in (
+            "last prediction",
+            "latest prediction",
+            "ultima prediccion",
+            "última predicción",
+            "explica la ultima",
+            "explica la última",
+            "explicame la ultima",
+            "explícame la última",
+            "explica mejor",
+            "explícame mejor",
+            "explicame mejor",
+            "explain better",
+            "explain this prediction",
+            "that prediction",
+            "esa prediccion",
+            "esa predicción",
+            "this prediction",
+        )
+    ):
+        return "explain"
+    if _looks_like_new_crypto_prediction_request(text):
+        return "prediction"
+    return ""
 
 
 def _format_crypto_prediction(pred, lang: str) -> str:
@@ -4010,6 +4257,75 @@ def _latest_crypto_prediction(symbol: str, horizon_minutes: int = 15) -> Dict[st
     if not rows:
         return None
     return rows[0]
+
+
+def _prediction_row_from_object(pred: Any) -> Dict[str, Any]:
+    return {
+        "symbol": str(getattr(pred, "symbol", "") or "").upper(),
+        "horizon_minutes": int(getattr(pred, "horizon_minutes", 15) or 15),
+        "current_price": getattr(pred, "current_price", None),
+        "predicted_price": getattr(pred, "predicted_price", None),
+        "probability_up": getattr(pred, "probability_up", None),
+        "decision": str(getattr(pred, "decision", "HOLD") or "HOLD").upper(),
+        "ts": int(datetime.now(UTC).timestamp()),
+    }
+
+
+def _format_num(value: Any, *, decimals: int = 2) -> str:
+    try:
+        return f"{float(value):.{decimals}f}"
+    except Exception:
+        return "?"
+
+
+def _format_pct_ratio(value: Any, *, decimals: int = 2) -> str:
+    try:
+        return f"{float(value) * 100:.{decimals}f}%"
+    except Exception:
+        return "?"
+
+
+def _prediction_delta(row: Dict[str, Any]) -> tuple[float | None, float | None]:
+    try:
+        current = float(row.get("current_price"))
+        predicted = float(row.get("predicted_price"))
+    except Exception:
+        return None, None
+    delta_abs = predicted - current
+    delta_pct = (delta_abs / current) if current else None
+    return delta_abs, delta_pct
+
+
+def _resolve_crypto_prediction_row(symbol: str, horizon_minutes: int, *, force_fresh: bool) -> tuple[Dict[str, Any] | None, str]:
+    recent_pred = None if force_fresh else _latest_crypto_prediction(symbol, horizon_minutes)
+    if recent_pred:
+        return recent_pred, "history"
+    pred = _maybe_crypto_prediction(symbol, horizon_minutes=horizon_minutes, save=True)
+    if pred:
+        latest = _latest_crypto_prediction(symbol, horizon_minutes) or _prediction_row_from_object(pred)
+        return latest, "fresh"
+    return None, "missing"
+
+
+def _crypto_prediction_ref(row: Dict[str, Any] | None, source: str) -> Dict[str, Any] | None:
+    if not isinstance(row, dict):
+        return None
+    symbol = str(row.get("symbol") or "").strip().upper()
+    if not symbol:
+        return None
+    horizon = int(row.get("horizon_minutes") or 0) or None
+    ts = int(row.get("ts") or 0) or None
+    log_id = str(row.get("id") or row.get("log_id") or "").strip() or None
+    decision = str(row.get("decision") or "").strip().upper() or None
+    source_label = str(source or "").strip() or None
+    return {
+        "log_id": log_id,
+        "symbol": symbol,
+        "horizon_minutes": horizon,
+        "ts": ts,
+        "source": source_label,
+        "decision": decision,
+    }
 
 
 def _prediction_stats(symbol: str, horizon_minutes: int | None = None) -> dict:
@@ -4062,6 +4378,149 @@ def _maybe_crypto_prediction(symbol: str, *, horizon_minutes: int = 15, save: bo
     except Exception:
         logger.debug("Crypto prediction failed for %s", symbol, exc_info=True)
         return None
+
+
+def _maybe_crypto_direct_response(message: str, lang: str) -> Dict[str, Any] | None:
+    intent = _detect_crypto_followup_intent(message)
+    if not intent:
+        return None
+    symbol = _extract_crypto_symbol(message)
+    if not symbol:
+        return None
+    horizon = _extract_crypto_horizon(message) or 15
+    row, source = _resolve_crypto_prediction_row(symbol, horizon, force_fresh=(intent == "prediction"))
+    if not row:
+        return None
+
+    delta_abs, delta_pct = _prediction_delta(row)
+    current = row.get("current_price")
+    predicted = row.get("predicted_price")
+    prob = row.get("probability_up")
+    decision = str(row.get("decision") or "HOLD").upper()
+    outcome = row.get("outcome") if isinstance(row.get("outcome"), dict) else {}
+    quantity = _extract_crypto_quantity(message)
+    side = _extract_crypto_trade_side(message)
+
+    lines: List[str] = []
+    if lang.startswith("es"):
+        lines.append(f"Predicción {symbol} H={horizon}m")
+        lines.append(f"- Precio base: {_format_num(current)}")
+        if predicted is not None:
+            lines.append(f"- Precio estimado: {_format_num(predicted)}")
+        if delta_abs is not None and delta_pct is not None:
+            sign = "+" if delta_abs >= 0 else ""
+            lines.append(f"- Cambio estimado: {sign}{_format_num(delta_abs)} ({sign}{_format_pct_ratio(delta_pct)})")
+        if isinstance(prob, (int, float)):
+            lines.append(f"- Probabilidad de subida: {_format_pct_ratio(prob, decimals=1)}")
+        lines.append(f"- Señal: {decision}")
+        lines.append(f"- Fuente: {'nueva predicción' if source == 'fresh' else 'última predicción guardada'}")
+    else:
+        lines.append(f"Prediction {symbol} H={horizon}m")
+        lines.append(f"- Base price: {_format_num(current)}")
+        if predicted is not None:
+            lines.append(f"- Estimated price: {_format_num(predicted)}")
+        if delta_abs is not None and delta_pct is not None:
+            sign = "+" if delta_abs >= 0 else ""
+            lines.append(f"- Estimated change: {sign}{_format_num(delta_abs)} ({sign}{_format_pct_ratio(delta_pct)})")
+        if isinstance(prob, (int, float)):
+            lines.append(f"- Probability up: {_format_pct_ratio(prob, decimals=1)}")
+        lines.append(f"- Signal: {decision}")
+        lines.append(f"- Source: {'fresh prediction' if source == 'fresh' else 'latest saved prediction'}")
+
+    if intent == "trade_projection" and quantity is not None and side and current is not None and predicted is not None:
+        try:
+            current_value = float(quantity) * float(current)
+            predicted_value = float(quantity) * float(predicted)
+            value_delta = predicted_value - current_value
+        except Exception:
+            current_value = predicted_value = value_delta = None
+        if current_value is not None and predicted_value is not None and value_delta is not None:
+            sign = "+" if value_delta >= 0 else ""
+            if lang.startswith("es"):
+                lines.append("")
+                lines.append(f"Escenario {side} con {_format_num(quantity, decimals=5)} BTC:")
+                lines.append(f"- Valor ahora: {_format_num(current_value)} USDT")
+                lines.append(f"- Valor estimado al horizonte: {_format_num(predicted_value)} USDT")
+                lines.append(f"- Diferencia estimada: {sign}{_format_num(value_delta)} USDT")
+                if side == "SELL":
+                    if value_delta > 0:
+                        lines.append(f"- Si vendes ahora y la predicción se cumple, saldrías antes de una subida estimada de {_format_num(value_delta)} USDT.")
+                    elif value_delta < 0:
+                        lines.append(f"- Si vendes ahora y la predicción se cumple, evitarías una caída estimada de {_format_num(abs(value_delta))} USDT.")
+                    else:
+                        lines.append("- La diferencia estimada es mínima en ese horizonte.")
+                else:
+                    if value_delta > 0:
+                        lines.append(f"- Si compras ahora y la predicción se cumple, la posición ganaría aproximadamente {_format_num(value_delta)} USDT.")
+                    elif value_delta < 0:
+                        lines.append(f"- Si compras ahora y la predicción se cumple, la posición perdería aproximadamente {_format_num(abs(value_delta))} USDT.")
+                    else:
+                        lines.append("- La diferencia estimada es mínima en ese horizonte.")
+            else:
+                lines.append("")
+                lines.append(f"{side} scenario with {_format_num(quantity, decimals=5)} BTC:")
+                lines.append(f"- Value now: {_format_num(current_value)} USDT")
+                lines.append(f"- Estimated value at horizon: {_format_num(predicted_value)} USDT")
+                lines.append(f"- Estimated difference: {sign}{_format_num(value_delta)} USDT")
+
+    if outcome:
+        actual = outcome.get("actual_price")
+        outcome_delta = outcome.get("delta_pct")
+        hit = outcome.get("hit")
+        if lang.startswith("es"):
+            lines.append("")
+            lines.append("Última comparación cerrada:")
+            if actual is not None:
+                lines.append(f"- Precio real al cierre: {_format_num(actual)}")
+            if isinstance(outcome_delta, (int, float)):
+                sign = "+" if float(outcome_delta) >= 0 else ""
+                lines.append(f"- Resultado vs base: {sign}{_format_pct_ratio(outcome_delta)}")
+            if hit is not None:
+                lines.append(f"- ¿Acertó la dirección?: {'sí' if hit else 'no'}")
+        else:
+            lines.append("")
+            lines.append("Last closed comparison:")
+            if actual is not None:
+                lines.append(f"- Real price at horizon: {_format_num(actual)}")
+            if isinstance(outcome_delta, (int, float)):
+                sign = "+" if float(outcome_delta) >= 0 else ""
+                lines.append(f"- Result vs base: {sign}{_format_pct_ratio(outcome_delta)}")
+            if hit is not None:
+                lines.append(f"- Direction hit: {'yes' if hit else 'no'}")
+
+    if intent == "price" and predicted is not None:
+        lines.append("")
+        lines.append(
+            (
+                f"El precio más aproximado al horizonte sería {_format_num(predicted)} si esta predicción se mantiene."
+                if lang.startswith("es")
+                else f"The closest horizon price would be {_format_num(predicted)} if this prediction holds."
+            )
+        )
+    elif intent == "explain":
+        lines.append("")
+        if lang.startswith("es"):
+            if decision == "HOLD":
+                lines.append("Lectura: HOLD significa que el modelo no ve ventaja fuerte para BUY o SELL en este horizonte.")
+            elif decision == "BUY":
+                lines.append("Lectura: BUY significa que el modelo ve sesgo alcista en este horizonte.")
+            else:
+                lines.append("Lectura: SELL significa que el modelo ve sesgo bajista en este horizonte.")
+        else:
+            if decision == "HOLD":
+                lines.append("Interpretation: HOLD means the model does not see a strong BUY or SELL edge at this horizon.")
+            elif decision == "BUY":
+                lines.append("Interpretation: BUY means the model sees bullish bias at this horizon.")
+            else:
+                lines.append("Interpretation: SELL means the model sees bearish bias at this horizon.")
+
+    return {
+        "response": "\n".join(lines).strip(),
+        "tool_kind": f"crypto_{intent}",
+        "used_local": True,
+        "symbol_focus": symbol,
+        "prediction_ref": _crypto_prediction_ref(row, source),
+    }
 
 
 def _append_db_message(
@@ -4536,7 +4995,7 @@ def _maybe_web_evidence_exhausted_response(
     if raw_sources:
         return None
 
-    attachment_response = _maybe_attachment_context_response(message, lang)
+    attachment_response = _maybe_attachment_context_response(message, lang, session_state)
     if attachment_response:
         return attachment_response
 
@@ -5844,7 +6303,7 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
             session_state=conversation_state,
         )
 
-        attachment_tool_response = _maybe_attachment_context_response(new_user_message, lang)
+        attachment_tool_response = _maybe_attachment_context_response(new_user_message, lang, conversation_state)
         if attachment_tool_response:
             response_text = str(attachment_tool_response.get("response") or "")
             append_turn_item(
@@ -6092,6 +6551,81 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
                 context=context,
             )
 
+        crypto_direct_response = _maybe_crypto_direct_response(routing_message, lang) if is_crypto_mode else None
+        if crypto_direct_response:
+            append_turn_item(
+                conv_id,
+                turn_id,
+                kind="tool_call",
+                payload={"tool": crypto_direct_response.get("tool_kind")},
+            )
+            state_updates: Dict[str, Any] = {}
+            if crypto_direct_response.get("symbol_focus"):
+                focused_symbol = str(crypto_direct_response.get("symbol_focus") or "")
+                state_updates["current_symbol_focus"] = focused_symbol
+                state_updates["current_artifact_focus"] = focused_symbol
+            if state_updates:
+                conversation_state = _set_conversation_state(db, crud, conv_id, db_available, **state_updates)
+            response_text = str(crypto_direct_response.get("response") or "")
+            append_turn_item(
+                conv_id,
+                turn_id,
+                kind="tool_result",
+                payload={"tool": crypto_direct_response.get("tool_kind"), "response": response_text},
+            )
+            _append_db_message(db, crud, conv_id, "assistant", response_text)
+            conversation_state = _record_turn_state(
+                db,
+                crud,
+                conv_id,
+                db_available,
+                user_msg=new_user_message,
+                assistant_msg=response_text,
+                mode="crypto",
+                active_project_id=None,
+            )
+            conversation_state = _replan_conversation_state(
+                db,
+                crud,
+                conv_id,
+                db_available,
+                conversation_state,
+                tool_name=str(crypto_direct_response.get("tool_kind") or "crypto_direct"),
+                success=True,
+                mode="crypto",
+                response_emitted=True,
+            )
+            _append_replan_turn_item(
+                conv_id,
+                turn_id,
+                reason=str(crypto_direct_response.get("tool_kind") or "crypto_direct"),
+                state=conversation_state,
+            )
+            record_event(
+                conv_id,
+                "response_completed",
+                data={"kind": str(crypto_direct_response.get("tool_kind") or "crypto_direct")},
+            )
+            context = _build_response_context(
+                source_plan="local_only",
+                active_project_id=None,
+                lang=lang,
+                session_state=conversation_state,
+                used_local=True,
+                effective_tool=str(crypto_direct_response.get("tool_kind") or "crypto_direct"),
+                effective_tool_status="ok",
+                effective_tool_output=response_text,
+                crypto_prediction_ref=crypto_direct_response.get("prediction_ref"),
+                plan=plan,
+            )
+            finish_turn(conv_id, turn_id, assistant_message=response_text, response_context=context)
+            return ChatResponse(
+                response=response_text,
+                conversation_id=conv_id,
+                timestamp=_utcnow_naive(),
+                context=context,
+            )
+
         project_tool_response = None if (source_plan == "web_only" or prefer_web_route) else _maybe_project_file_response(
             routing_message,
             lang,
@@ -6186,6 +6720,16 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
         project_local_response = None if (source_plan == "web_only" or prefer_web_route) else _maybe_active_project_response(routing_message, lang, conversation_state)
         if project_local_response:
             try:
+                if _looks_like_global_project_question(routing_message) or is_architecture_question(routing_message):
+                    conversation_state = _set_conversation_state(
+                        db,
+                        crud,
+                        conv_id,
+                        db_available,
+                        current_file_focus=None,
+                        current_symbol_focus=None,
+                        current_artifact_focus=None,
+                    )
                 append_turn_item(
                     conv_id,
                     turn_id,
@@ -6611,6 +7155,7 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
             messages_for_llm.insert(insert_at, {"role": "system", "content": attachment_llm_guidance})
 
         crypto_summary = ""
+        crypto_prediction_ref = None
         if mode == "crypto":
             sym = _extract_crypto_symbol(user_msg_for_llm)
             horizon = _extract_crypto_horizon(user_msg_for_llm) or 15
@@ -6618,17 +7163,24 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
                 wants_new_prediction = _looks_like_new_crypto_prediction_request(user_msg_for_llm)
                 recent_pred = None if wants_new_prediction else _latest_crypto_prediction(sym, horizon)
                 pred = None
+                crypto_row = recent_pred if isinstance(recent_pred, dict) else None
                 if wants_new_prediction or recent_pred is None:
                     pred = _maybe_crypto_prediction(
                         sym,
                         horizon_minutes=horizon,
                         save=(wants_new_prediction or recent_pred is None),
                     )
+                    if pred:
+                        crypto_row = _latest_crypto_prediction(sym, horizon) or _prediction_row_from_object(pred)
                 context_line = _build_crypto_context(sym, horizon_minutes=horizon)
                 if pred:
                     crypto_summary = _format_crypto_prediction(pred, lang)
                 elif recent_pred:
                     crypto_summary = _format_logged_crypto_prediction(recent_pred, lang)
+                crypto_prediction_ref = _crypto_prediction_ref(
+                    crypto_row,
+                    "fresh" if pred else "history" if crypto_row else "missing",
+                )
                 if crypto_summary:
                     ctx = "Crypto prediction context: " + crypto_summary
                     if context_line:
@@ -6789,6 +7341,7 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
             used_local=bool(active_project_id),
             effective_tool="llm",
             effective_tool_status="failed" if resp.startswith("(error") else "ok",
+            crypto_prediction_ref=crypto_prediction_ref,
             plan=plan,
         )
         finish_turn(conv_id, turn_id, assistant_message=resp, response_context=context)

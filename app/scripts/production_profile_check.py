@@ -52,6 +52,24 @@ def run_checks(*, require_browser: bool, require_image_endpoint: bool) -> Dict[s
         )
     )
 
+    product_track = (os.getenv("AEGIS_PRODUCT_TRACK", "core") or "core").strip().lower()
+    results.append(
+        CheckResult(
+            name="product_track",
+            ok=(product_track == "full"),
+            detail=f"value={product_track}",
+        )
+    )
+
+    start_contract_mode = (os.getenv("AEGIS_START_CONTRACT_MODE", "full") or "full").strip().lower()
+    results.append(
+        CheckResult(
+            name="start_contract_mode",
+            ok=(start_contract_mode == "full"),
+            detail=f"value={start_contract_mode}",
+        )
+    )
+
     auth_mode = (os.getenv("AEGIS_AUTH_MODE", "on") or "on").strip().lower()
     results.append(CheckResult(name="auth_mode", ok=(auth_mode == "on"), detail=f"value={auth_mode}"))
 

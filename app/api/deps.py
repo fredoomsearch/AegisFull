@@ -6,6 +6,7 @@ Central auth dependencies/guards.
 Why this module exists:
 - Enforce API key/JWT auth consistently across routers.
 - Support scope-aware guards (`files`, `admin`, etc.).
+- Accept HttpOnly cookie sessions issued by /auth/token and /auth/refresh.
 """
 
 import os
@@ -20,6 +21,8 @@ except Exception:
     jwt = None
 
 _HEADER_ALIAS = "X-API-Key"
+ACCESS_COOKIE_NAME = os.getenv("AEGIS_AUTH_ACCESS_COOKIE", "aegis_access_token")
+REFRESH_COOKIE_NAME = os.getenv("AEGIS_AUTH_REFRESH_COOKIE", "aegis_refresh_token")
 
 # Auth mode:
 # - "on"    : always require API key
@@ -58,6 +61,15 @@ def _extract_bearer_token(authorization: Optional[str]) -> str:
     if auth.lower().startswith("bearer "):
         return auth.split(" ", 1)[1].strip()
     return ""
+
+
+def _extract_cookie_token(request: Request, cookie_name: str) -> str:
+    """Extract a JWT token from an HttpOnly cookie if present."""
+    try:
+        value = request.cookies.get(cookie_name, "")
+    except Exception:
+        value = ""
+    return str(value or "").strip()
 
 
 def _is_local_request(request: Request) -> bool:
@@ -120,6 +132,7 @@ def _require_key(
     Headers supported:
       - X-API-Key: <key>
       - Authorization: Bearer <key>
+      - aegis_access_token cookie (HttpOnly)
     """
     mode = AUTH_MODE
 
@@ -147,9 +160,15 @@ def _require_key(
     # 5) Otherwise, require a valid key/token
     api_key = _extract_api_key(x_api_key)
     bearer_token = _extract_bearer_token(authorization)
+    cookie_token = _extract_cookie_token(request, ACCESS_COOKIE_NAME)
 
     # Accept raw API key
     if allowed and ((api_key and api_key in allowed) or (bearer_token and bearer_token in allowed)):
+        return
+
+    # Accept cookie-bound JWT issued by /auth/token or /auth/refresh.
+    payload = _decode_jwt_token(cookie_token, required_scope=required_scope)
+    if payload:
         return
 
     # Accept JWT with scope (Authorization bearer token preferred).
@@ -218,6 +237,7 @@ async def require_admin_api_key(
     Headers supported:
       - X-API-Key: <key>
       - Authorization: Bearer <key> (raw key or JWT)
+      - aegis_access_token cookie (HttpOnly)
 
     For JWT, require scope "admin".
     """

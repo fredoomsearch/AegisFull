@@ -204,6 +204,7 @@
           <div class="controls-left">
             <div class="icon-group">
               <button id="chatBtn" class="icon-btn" aria-pressed="true" title="Modo chat" data-i18n-title="mode_chat_title"><i class="fas fa-comment-dots"></i></button>
+              <button id="webBtn" class="icon-btn" aria-pressed="false" title="Modo búsqueda web" data-i18n-title="mode_web_title"><i class="fas fa-globe"></i></button>
               <button id="urlBtn" class="icon-btn" aria-pressed="false" title="Modo leer URL" data-i18n-title="mode_url_title"><i class="fas fa-link"></i></button>
               <button id="cryptoBtn" class="icon-btn" aria-pressed="false" title="Modo cripto" data-i18n-title="mode_crypto_title"><i class="fas fa-coins"></i></button>
               <button id="imgBtn" class="icon-btn" aria-pressed="false" title="Modo imagen" data-i18n-title="mode_image_title"><i class="fas fa-image"></i></button>
@@ -251,8 +252,8 @@
               <button id="chartResetZoom" class="range-btn icon" type="button" aria-pressed="false" title="Reset zoom/pan">↺</button>
             </div>
             <label class="live-toggle"><input id="chartLive" type="checkbox" /><span data-i18n="live_label">Live</span></label>
-            <label class="live-toggle"><input id="newsMarkersToggle" type="checkbox" checked /><span data-i18n="news_label">News</span></label>
-            <div class="chart-mode-hint" id="chartModeHint" title="p>63% BUY • p<37% SELL • otherwise HOLD" data-i18n="chart_mode_hint" data-i18n-title="chart_mode_hint_title">p&gt;63% BUY • p&lt;37% SELL • HOLD en medio</div>
+            <label class="live-toggle"><input id="newsMarkersToggle" type="checkbox" /><span data-i18n="news_label">News</span></label>
+            <div class="chart-mode-hint" id="chartModeHint" title="Price • trades • compare • fills" data-i18n="chart_mode_hint" data-i18n-title="chart_mode_hint_title">Precio • trades • compare • fills</div>
             <span id="priceSourceBadge" class="pill pill-demo" title="Fuente de precio" data-i18n-title="price_source_title">DEMO</span>
             <span id="cryptoContextPill" class="pill pill-muted" title="Contexto cripto" data-i18n-title="crypto_context_title">—</span>
           </div>
@@ -274,6 +275,43 @@
             <button id="sellBtn" class="btn-trade sell" type="button" data-i18n="trade_sell">Sell</button>
           </div>
         </div>
+        <div class="trade-risk-panel" id="cryptoRiskPanel" aria-label="Risk controls">
+          <div class="trade-risk-panel-head">
+            <div class="trade-risk-panel-title" data-i18n="risk_controls_title">Risk controls</div>
+            <div class="trade-risk-panel-note" data-i18n="risk_controls_note">These values feed the risk gate before you confirm the order.</div>
+          </div>
+          <div class="trade-risk-grid">
+            <label class="trade-risk-field" for="cryptoStopLossPct" data-i18n-title="stop_loss_title">
+              <span data-i18n="stop_loss_label">Stop loss %</span>
+              <input id="cryptoStopLossPct" type="number" min="0" step="0.1" placeholder="0.8" data-i18n-placeholder="stop_loss_placeholder" />
+            </label>
+            <label class="trade-risk-field" for="cryptoTakeProfitPct" data-i18n-title="take_profit_title">
+              <span data-i18n="take_profit_label">Take profit %</span>
+              <input id="cryptoTakeProfitPct" type="number" min="0" step="0.1" placeholder="1.5" data-i18n-placeholder="take_profit_placeholder" />
+            </label>
+            <label class="trade-risk-field" for="cryptoMaxExposureQuote" data-i18n-title="max_exposure_title">
+              <span data-i18n="max_exposure_label">Max exposure</span>
+              <input id="cryptoMaxExposureQuote" type="number" min="0" step="1" placeholder="1000" data-i18n-placeholder="max_exposure_placeholder" />
+            </label>
+            <label class="trade-risk-field" for="cryptoMaxOrderSizePct" data-i18n-title="max_order_size_title">
+              <span data-i18n="max_order_size_label">Max order size %</span>
+              <input id="cryptoMaxOrderSizePct" type="number" min="0" step="0.1" placeholder="5" data-i18n-placeholder="max_order_size_placeholder" />
+            </label>
+          </div>
+          <div id="cryptoRiskExplain" class="trade-risk-explain" data-i18n="risk_controls_explain">
+            The risk gate uses these values before you confirm. Stop loss closes the trade if price moves against you. Take profit locks gains. Max exposure caps how much quote currency this trade can use. Max order size % limits how much of the visible book your order may consume.
+          </div>
+        </div>
+        <div class="trade-execution-row">
+          <div id="cryptoExecutionGroup" class="execution-mode-group" role="group" aria-label="Execution mode">
+            <button class="execution-mode-btn" type="button" data-execution-mode="simulated" title="Simulated execution">SIM</button>
+            <button class="execution-mode-btn" type="button" data-execution-mode="testnet" title="Binance testnet execution">TESTNET</button>
+            <button class="execution-mode-btn" type="button" data-execution-mode="live" title="Live Binance execution">LIVE</button>
+          </div>
+          <div id="cryptoExecutionMeta" class="trade-execution-meta">—</div>
+        </div>
+        <div id="cryptoTradePreview" class="crypto-trade-preview" aria-live="polite">—</div>
+        <div id="cryptoOrderBook" class="crypto-order-book" aria-live="polite">—</div>
         <div id="tradeStatus" class="trade-status" aria-live="polite"></div>
 
         <div id="predictionCompare" class="prediction-compare" aria-live="polite">
@@ -466,35 +504,35 @@
             <li>🔗 <strong data-i18n="help_item_url_label">Modo URL</strong>: <span data-i18n="help_item_url_desc">pega una URL; /fetch_url la lee y la ves en Fuentes.</span></li>
             <li>🧠 <strong data-i18n="help_item_code_label">Modo Código</strong>: <span data-i18n="help_item_code_desc">envía preguntas técnicas; usa RAG si hay índice.</span></li>
             <li>🖼️ <strong data-i18n="help_item_image_label">Imagen</strong>: <span data-i18n="help_item_image_desc">sube una imagen y pregunta en chat para usar su contexto.</span></li>
-            <li>📈 <strong data-i18n="help_item_crypto_label">Cripto (señal + horizonte)</strong>: <span data-i18n="help_item_crypto_desc">escribe “BTCUSDT H=2m” o usa el panel Cripto. Genera señal demo y guarda precio base.</span></li>
+            <li>📈 <strong data-i18n="help_item_crypto_label">Cripto (señal + horizonte)</strong>: <span data-i18n="help_item_crypto_desc">escribe “BTCUSDT H=2m” o usa el panel Cripto. Muestra señal BUY/SELL/HOLD, p%, horizonte, thresholds, modo de ejecución (simulated/testnet/live) y comparación post-horizonte sincronizada con el gráfico.</span></li>
           </ul>
         </div>
       </div>
     </div>
 
-    <!-- API KEY MODAL (no browser prompt needed) -->
+    <!-- Auth bootstrap modal (no browser prompt needed) -->
     <div id="apiKeyModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="apiKeyTitle">
       <div class="modal-card">
         <div class="modal-header">
-          <h3 id="apiKeyTitle">API Keys</h3>
+          <h3 id="apiKeyTitle">Auth bootstrap</h3>
           <button id="apiKeyClose" class="icon-btn small" aria-label="Cerrar" type="button">✕</button>
         </div>
         <div class="modal-body">
           <p style="margin-top:0; color: var(--muted); font-size: 0.95rem;">
-            Usa la misma key para <code>AEGIS_API_KEY</code> y <code>FILES_API_KEY</code>. Vacío = borrar.
+            Usa esta clave solo para el bootstrap inicial. Después de autenticar, la UI cambia a una sesión HttpOnly y limpia la clave.
           </p>
           <div class="form-row" style="display:flex; flex-direction:column; gap:10px;">
             <label style="display:flex; flex-direction:column; gap:6px;">
-              <span>Main API key (X-API-Key)</span>
+              <span>Main bootstrap key</span>
               <input id="apiKeyMainInput" type="password" placeholder="my-secret-key" autocomplete="off" />
             </label>
             <label style="display:flex; flex-direction:column; gap:6px;">
-              <span>Files API key (X-API-Key)</span>
+              <span>Files bootstrap key</span>
               <input id="apiKeyFilesInput" type="password" placeholder="(Enter = same as main)" autocomplete="off" />
             </label>
             <label style="display:flex; align-items:center; gap:8px; color: var(--muted);">
               <input id="apiKeyUseSame" type="checkbox" checked />
-              <span>Usar la misma key para Files</span>
+              <span>Usar la misma clave de arranque para Files</span>
             </label>
           </div>
           <div style="display:flex; gap:10px; margin-top:14px;">

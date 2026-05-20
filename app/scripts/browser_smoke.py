@@ -25,6 +25,65 @@ from app.tools import (
 from app.utils.runtime_helpers import print_json as _print
 
 
+def _chat_mode_contract_ready(
+    *,
+    body_mode: str,
+    mode_indicator: str,
+    chat_pressed: str,
+    crypto_pressed: str,
+    send_label: str,
+) -> bool:
+    mode_value = str(body_mode or "").strip().lower()
+    indicator_value = str(mode_indicator or "").strip().lower()
+    chat_on = str(chat_pressed or "").strip().lower() == "true"
+    crypto_on = str(crypto_pressed or "").strip().lower() == "true"
+    send_value = str(send_label or "").strip().lower()
+    return (
+        mode_value == "chat"
+        and "chat" in indicator_value
+        and chat_on
+        and not crypto_on
+        and "predict" not in send_value
+        and "predecir" not in send_value
+    )
+
+
+def _web_mode_contract_ready(*, body_mode: str, mode_indicator: str, web_pressed: str) -> bool:
+    mode_value = str(body_mode or "").strip().lower()
+    indicator_value = str(mode_indicator or "").strip().lower()
+    web_on = str(web_pressed or "").strip().lower() == "true"
+    return mode_value == "web" and "web" in indicator_value and web_on
+
+
+def _chat_only_web_contract_ready(*, body_mode: str, mode_indicator: str, chat_pressed: str) -> bool:
+    mode_value = str(body_mode or "").strip().lower()
+    indicator_value = str(mode_indicator or "").strip().lower()
+    chat_on = str(chat_pressed or "").strip().lower() == "true"
+    return mode_value == "chat" and "chat" in indicator_value and "auto web/local" in indicator_value and chat_on
+
+
+def _new_chat_segment(before: str, after: str) -> str:
+    before_text = str(before or "")
+    after_text = str(after or "")
+    if before_text and after_text.startswith(before_text):
+        return after_text[len(before_text) :].strip()
+    return after_text.strip()
+
+
+def _strict_web_proof_ready(*, web_badge: str, source_cards: int) -> bool:
+    badge_value = str(web_badge or "").strip().lower()
+    cards = max(0, int(source_cards or 0))
+    if cards <= 0:
+        return False
+    if "cache" in badge_value or "cach" in badge_value:
+        return False
+    if "cooldown" in badge_value:
+        return False
+    if "unavailable" in badge_value or "no disp" in badge_value:
+        return False
+    return "live" in badge_value or "vivo" in badge_value
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Headless browser smoke for the AEGIS UI.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
@@ -351,6 +410,62 @@ def main() -> int:
         driver = webdriver.Chrome(service=ChromeService(executable_path=chromedriver_path), options=options)
         wait = WebDriverWait(driver, wait_timeout)
 
+        def _wait_for_idle_chat() -> None:
+            wait.until(
+                lambda d: (
+                    not bool(d.execute_script("return document.getElementById('typing-bubble');"))
+                    and str(d.find_element(By.ID, "sendBtn").get_attribute("disabled") or "").strip().lower() not in {"true", "disabled"}
+                )
+            )
+
+        def _read_chat_mode_contract() -> dict[str, str]:
+            return {
+                "body_mode": str(driver.execute_script("return document.body?.dataset?.mode || '';") or ""),
+                "mode_indicator": driver.find_element(By.ID, "modeIndicator").text,
+                "chat_pressed": str(driver.find_element(By.ID, "chatBtn").get_attribute("aria-pressed") or ""),
+                "crypto_pressed": str(driver.find_element(By.ID, "cryptoBtn").get_attribute("aria-pressed") or ""),
+                "send_label": driver.find_element(By.ID, "sendBtn").text,
+            }
+
+        def _read_web_mode_contract() -> dict[str, str]:
+            return {
+                "body_mode": str(driver.execute_script("return document.body?.dataset?.mode || '';") or ""),
+                "mode_indicator": driver.find_element(By.ID, "modeIndicator").text,
+                "web_pressed": str(driver.find_element(By.ID, "webBtn").get_attribute("aria-pressed") or ""),
+            }
+
+        def _read_chat_only_web_contract() -> dict[str, str]:
+            return {
+                "body_mode": str(driver.execute_script("return document.body?.dataset?.mode || '';") or ""),
+                "mode_indicator": driver.find_element(By.ID, "modeIndicator").text,
+                "chat_pressed": str(driver.find_element(By.ID, "chatBtn").get_attribute("aria-pressed") or ""),
+            }
+
+        def _ensure_chat_mode() -> None:
+            _wait_for_idle_chat()
+            if _chat_mode_contract_ready(**_read_chat_mode_contract()):
+                return
+            chat_btn = driver.find_element(By.ID, "chatBtn")
+            driver.execute_script("arguments[0].click();", chat_btn)
+            wait.until(
+                lambda _d: _chat_mode_contract_ready(**_read_chat_mode_contract())
+            )
+
+        def _ensure_web_mode() -> None:
+            _wait_for_idle_chat()
+            if _chat_only_web_contract_ready(**_read_chat_only_web_contract()):
+                return
+            web_buttons = driver.find_elements(By.ID, "webBtn")
+            if not web_buttons:
+                raise RuntimeError("web mode button is unavailable and chat-only auto-web contract is not active")
+            if _web_mode_contract_ready(**_read_web_mode_contract()):
+                return
+            web_btn = web_buttons[0]
+            driver.execute_script("arguments[0].click();", web_btn)
+            wait.until(
+                lambda _d: _web_mode_contract_ready(**_read_web_mode_contract())
+            )
+
         current_stage = "browser-startup"
         _print({"browser_stage": current_stage})
         driver.get(args.base_url.rstrip("/") + "/")
@@ -373,8 +488,10 @@ def main() -> int:
             )
             driver.execute_script(
                 """
-                window.localStorage.setItem("aegis_api_key", arguments[0]);
-                window.localStorage.setItem("aegis_files_api_key", arguments[1]);
+                window.sessionStorage.setItem("aegis_api_key", arguments[0]);
+                window.sessionStorage.setItem("aegis_files_api_key", arguments[1]);
+                window.localStorage.removeItem("aegis_api_key");
+                window.localStorage.removeItem("aegis_files_api_key");
                 """,
                 api_key,
                 files_key,
@@ -434,7 +551,12 @@ def main() -> int:
                 except Exception:
                     driver.execute_script("arguments[0].click();", send_btn)
 
-        wait.until(lambda d: len(d.find_element(By.ID, "chat").text.strip()) > len(chat_before.strip()))
+        wait.until(
+            lambda d: (
+                len(d.find_element(By.ID, "chat").text.strip()) > len(chat_before.strip())
+                and not bool(d.execute_script("return document.getElementById('typing-bubble');"))
+            )
+        )
         wait.until(EC.presence_of_element_located((By.ID, "modeIndicator")))
         wait.until(EC.presence_of_element_located((By.ID, "activeProjectBadge")))
         try:
@@ -516,6 +638,7 @@ def main() -> int:
         if args.geo_proof:
             current_stage = "geo-proof"
             _print({"browser_stage": current_stage})
+            _ensure_chat_mode()
             geo_chat_before = driver.find_element(By.ID, "chat").text
             geo_msg = driver.find_element(By.ID, "msg")
             geo_msg.clear()
@@ -526,22 +649,29 @@ def main() -> int:
             wait.until(
                 lambda d: (
                     "russia spans eastern europe and northern asia" in d.find_element(By.ID, "chat").text.lower()
+                    or "rusia se extiende entre europa oriental y el norte de asia" in d.find_element(By.ID, "chat").text.lower()
                     or "if you want live sources" in d.find_element(By.ID, "chat").text.lower()
-                    or "web: where is <place>" in d.find_element(By.ID, "chat").text.lower()
+                    or "si quieres fuentes en vivo" in d.find_element(By.ID, "chat").text.lower()
+                    or "web: where is" in d.find_element(By.ID, "chat").text.lower()
                 )
             )
             chat_text = driver.find_element(By.ID, "chat").text
+            new_chat_text = _new_chat_segment(geo_chat_before, chat_text)
             geo_proof = {
                 "question": "where is russia?",
-                "answer_preview": chat_text[-500:],
-                "contains_fast_fact": "russia spans eastern europe and northern asia" in chat_text.lower(),
-                "contains_web_prompt": "web: where is <place>" in chat_text.lower(),
+                "answer_preview": new_chat_text[-500:],
+                "contains_fast_fact": (
+                    "russia spans eastern europe and northern asia" in new_chat_text.lower()
+                    or "rusia se extiende entre europa oriental y el norte de asia" in new_chat_text.lower()
+                ),
+                "contains_web_prompt": "web: where is" in new_chat_text.lower(),
             }
 
         memory_speed_proof = {}
         if args.memory_speed_proof:
             current_stage = "memory-speed-proof"
             _print({"browser_stage": current_stage})
+            _ensure_chat_mode()
             cap_chat_before = driver.find_element(By.ID, "chat").text
             cap_msg = driver.find_element(By.ID, "msg")
             cap_msg.clear()
@@ -556,12 +686,13 @@ def main() -> int:
                 )
             )
             chat_text = driver.find_element(By.ID, "chat").text
+            new_chat_text = _new_chat_segment(cap_chat_before, chat_text)
             memory_speed_proof = {
                 "question": "what is the capital of japan?",
-                "answer_preview": chat_text[-500:],
-                "contains_fast_fact": "tokyo" in chat_text.lower() or "tokio" in chat_text.lower(),
-                "contains_web_prompt": "web: what is the capital of <country>" in chat_text.lower(),
-                "looks_concise": len(chat_text.strip()) <= 1200,
+                "answer_preview": new_chat_text[-500:],
+                "contains_fast_fact": "tokyo" in new_chat_text.lower() or "tokio" in new_chat_text.lower(),
+                "contains_web_prompt": "web: what is the capital of <country>" in new_chat_text.lower(),
+                "looks_concise": len(new_chat_text.strip()) <= 1200,
             }
 
         web_proof = {}
@@ -569,26 +700,68 @@ def main() -> int:
             current_stage = "web-proof"
             _print({"browser_stage": current_stage})
             web_chat_before = driver.find_element(By.ID, "chat").text
+            web_query = f"web: latest python 3.12 release notes {int(time.time())}"
 
-            try:
-                web_btn = driver.find_element(By.ID, "webBtn")
-                if web_btn.is_displayed():
-                    current_stage = "web-proof-click"
-                    _print({"browser_stage": current_stage})
-                    driver.execute_script("arguments[0].click();", web_btn)
-            except Exception:
-                pass
+            def _web_submit_started() -> bool:
+                return bool(
+                    len(driver.find_element(By.ID, "chat").text.strip()) > len(web_chat_before.strip())
+                    or str(driver.find_element(By.ID, "msg").get_attribute("value") or "").strip() == ""
+                    or bool(driver.execute_script("return document.getElementById('typing-bubble');"))
+                )
+
+            _ensure_web_mode()
 
             current_stage = "web-proof-submit"
             _print({"browser_stage": current_stage})
             web_msg = driver.find_element(By.ID, "msg")
             web_msg.clear()
-            web_msg.send_keys("web: latest python 3.12 release notes")
+            web_msg.send_keys(web_query)
+            if not str(web_msg.get_attribute("value") or "").strip():
+                driver.execute_script(
+                    """
+                    const input = document.getElementById("msg");
+                    if (input) {
+                      input.value = arguments[0];
+                      input.dispatchEvent(new Event("input", { bubbles: true }));
+                    }
+                    """,
+                    web_query,
+                )
             web_msg.send_keys(Keys.ENTER)
 
             current_stage = "web-proof-response"
             _print({"browser_stage": current_stage})
-            wait.until(lambda d: len(d.find_element(By.ID, "chat").text.strip()) > len(web_chat_before.strip()))
+            try:
+                wait.until(lambda _d: _web_submit_started())
+            except Exception:
+                driver.execute_script(
+                    """
+                    const input = document.getElementById("msg");
+                    if (input) {
+                      input.dispatchEvent(new KeyboardEvent("keydown", {
+                        key: "Enter",
+                        code: "Enter",
+                        keyCode: 13,
+                        which: 13,
+                        bubbles: true
+                      }));
+                    }
+                    """,
+                )
+                try:
+                    wait.until(lambda _d: _web_submit_started())
+                except Exception:
+                    send_btn = driver.find_element(By.ID, "sendBtn")
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center', inline:'center'});",
+                        send_btn,
+                    )
+                    try:
+                        send_btn.click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", send_btn)
+                    wait.until(lambda _d: _web_submit_started())
+            _wait_for_idle_chat()
             current_stage = "web-proof-sources"
             _print({"browser_stage": current_stage})
             wait.until(
@@ -598,13 +771,18 @@ def main() -> int:
                     or int(d.execute_script("return document.querySelectorAll('#sources-content .source-card').length;") or 0) > 0
                 )
             )
+            web_badge = driver.find_element(By.ID, "webStatusBadge").text
             source_cards = driver.execute_script(
                 "return document.querySelectorAll('#sources-content .source-card').length;"
             )
+            if args.strict and not _strict_web_proof_ready(web_badge=web_badge, source_cards=int(source_cards or 0)):
+                raise AssertionError(
+                    f"strict-web-proof-requires-live-web badge={web_badge!r} source_cards={int(source_cards or 0)}"
+                )
             web_proof = {
-                "question": "where is russia?",
+                "question": web_query.replace("web: ", "", 1),
                 "mode": driver.find_element(By.ID, "modeIndicator").text,
-                "web_badge": driver.find_element(By.ID, "webStatusBadge").text,
+                "web_badge": web_badge,
                 "sources_preview": driver.find_element(By.ID, "sources-content").text[:240],
                 "source_cards": int(source_cards or 0),
             }
@@ -776,9 +954,10 @@ def main() -> int:
         _print(payload)
         return 0
     except Exception as exc:  # noqa: BLE001
-        msg = str(exc)
-        if not msg:
-            msg = f"{current_stage}:{exc.__class__.__name__}"
+        msg = (str(exc) or "").strip()
+        if msg in {"", "Message:", "Message"}:
+            msg = exc.__class__.__name__
+        msg = f"{current_stage}:{msg}"
         # If Chrome/runtime couldn't start (or flaked due to host constraints), treat as environment issue (best-effort)
         # unless strict. Keep the heuristics broad; these failures are common on CI/minimal servers.
         if not args.strict:

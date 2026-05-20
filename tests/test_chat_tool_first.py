@@ -410,6 +410,23 @@ def test_turn_plan_does_not_keep_stale_project_tool_for_unrelated_question():
     assert bool(plan.get("llm_required")) is True
 
 
+def test_turn_plan_prefers_project_manifest_for_global_project_question_after_file_focus():
+    plan = chat_api._build_turn_plan(
+        message="EXPLICAME EL PROYECTO ACTIVO",
+        mode_value="chat",
+        source_plan="local_only",
+        has_active_project=True,
+        force_web=False,
+        session_state={
+            "active_project_id": "demo-project",
+            "current_file_focus": "src/app/app.routes.ts",
+            "current_artifact_focus": "src/app/app.routes.ts",
+            "next_tool": "project_excerpt",
+        },
+    )
+    assert plan.get("next_tool") == "project_manifest"
+
+
 def test_active_project_response_understands_each_part_prompt():
     root = Path("tmp") / f"tool_parts_{uuid.uuid4().hex[:8]}"
     (root / "app").mkdir(parents=True, exist_ok=True)
@@ -427,6 +444,52 @@ def test_active_project_response_understands_each_part_prompt():
         )
         assert isinstance(payload, str)
         assert payload.strip()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        project_store.delete_project(project_id)
+
+
+def test_project_file_response_yields_to_manifest_for_global_project_question():
+    root = Path("tmp") / f"tool_global_project_{uuid.uuid4().hex[:8]}"
+    (root / "src" / "app").mkdir(parents=True, exist_ok=True)
+    (root / "src" / "app" / "app.routes.ts").write_text(
+        "export const routes = [];\n",
+        encoding="utf-8",
+    )
+    (root / "src" / "app" / "app.module.ts").write_text(
+        "export class AppModule {}\n",
+        encoding="utf-8",
+    )
+    (root / "README.md").write_text("# Angular Front\n", encoding="utf-8")
+    project_id = root.name
+    save_project_manifest(root, project_id, chunk_count=3, chunked_files=3)
+    project_store.register_project(project_id, root, source="workspace", status="ingested")
+
+    try:
+        payload = chat_api._maybe_project_file_response(
+            "EXPLICAME EL PROYECTO ACTIVO",
+            "es",
+            {
+                "active_project_id": project_id,
+                "current_file_focus": "src/app/app.routes.ts",
+                "current_artifact_focus": "src/app/app.routes.ts",
+                "next_tool": "project_excerpt",
+            },
+            preferred_tool="project_excerpt",
+        )
+        assert payload is None
+        manifest_payload = chat_api._maybe_active_project_response(
+            "EXPLICAME EL PROYECTO ACTIVO",
+            "es",
+            {
+                "active_project_id": project_id,
+                "current_file_focus": "src/app/app.routes.ts",
+                "current_artifact_focus": "src/app/app.routes.ts",
+                "next_tool": "project_excerpt",
+            },
+        )
+        assert isinstance(manifest_payload, str)
+        assert "Desglose por carpetas:" in manifest_payload
     finally:
         shutil.rmtree(root, ignore_errors=True)
         project_store.delete_project(project_id)
@@ -567,6 +630,12 @@ def test_extract_crypto_horizon_reads_h_notation_and_minutes_text():
     assert chat_api._extract_crypto_horizon("explain last prediction") is None
 
 
+def test_detect_crypto_followup_intent_handles_price_explain_and_trade_projection():
+    assert chat_api._detect_crypto_followup_intent("BTCUSDT H=5m cual sera el precio mas aproximado") == "price"
+    assert chat_api._detect_crypto_followup_intent("BTCUSDT H=2m explica la ultima prediccion") == "explain"
+    assert chat_api._detect_crypto_followup_intent("BTCUSDT H=5m si vendo 0.111 btc que podria esperar") == "trade_projection"
+
+
 def test_build_crypto_context_filters_by_horizon(monkeypatch):
     captured = {}
 
@@ -584,3 +653,63 @@ def test_build_crypto_context_filters_by_horizon(monkeypatch):
     assert captured["symbol"] == "BTCUSDT"
     assert captured["horizon_minutes"] == 2
     assert "last BTCUSDT: HOLD" in context
+
+
+def test_crypto_direct_response_explains_latest_prediction_without_llm(monkeypatch):
+    monkeypatch.setattr(
+        chat_api,
+        "_resolve_crypto_prediction_row",
+        lambda symbol, horizon_minutes, force_fresh=False: (
+            {
+                "id": "pred_1234567890",
+                "symbol": symbol,
+                "horizon_minutes": horizon_minutes,
+                "current_price": 68180.0,
+                "predicted_price": 68203.07,
+                "probability_up": 0.522,
+                "decision": "HOLD",
+                "ts": 1712000000,
+                "outcome": {"actual_price": 68183.33, "delta_pct": 0.0003, "hit": True},
+            },
+            "history",
+        ),
+    )
+    payload = chat_api._maybe_crypto_direct_response("BTCUSDT H=2m explica la ultima prediccion", "es")
+    assert payload is not None
+    assert payload["tool_kind"] == "crypto_explain"
+    assert "Predicción BTCUSDT H=2m" in payload["response"]
+    assert "Precio estimado: 68203.07" in payload["response"]
+    assert "Última comparación cerrada:" in payload["response"]
+    assert "Lectura: HOLD" in payload["response"]
+    assert payload["prediction_ref"]["log_id"] == "pred_1234567890"
+    assert payload["prediction_ref"]["symbol"] == "BTCUSDT"
+    assert payload["prediction_ref"]["horizon_minutes"] == 2
+    assert payload["prediction_ref"]["source"] == "history"
+
+
+def test_crypto_direct_response_projects_sell_quantity(monkeypatch):
+    monkeypatch.setattr(
+        chat_api,
+        "_resolve_crypto_prediction_row",
+        lambda symbol, horizon_minutes, force_fresh=False: (
+            {
+                "symbol": symbol,
+                "horizon_minutes": horizon_minutes,
+                "current_price": 68242.19,
+                "predicted_price": 68264.01,
+                "probability_up": 0.521,
+                "decision": "HOLD",
+            },
+            "history",
+        ),
+    )
+    payload = chat_api._maybe_crypto_direct_response(
+        "BTCUSDT H=5m si vendo 0.11111 btc que podria esperar",
+        "es",
+    )
+    assert payload is not None
+    assert payload["tool_kind"] == "crypto_trade_projection"
+    assert "Escenario SELL con 0.11111 BTC:" in payload["response"]
+    assert "Valor ahora:" in payload["response"]
+    assert "Valor estimado al horizonte:" in payload["response"]
+    assert "saldrías antes de una subida estimada" in payload["response"]

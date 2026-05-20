@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from app.services import crypto_prediction_log, project_store
+
 
 os.environ["DATABASE_URL"] = "postgresql+psycopg2://postgres:postgres@localhost:5432/test_aegis"
 os.environ["AEGIS_SEARCH_WARMUP_ON_START"] = "0"
@@ -34,3 +36,20 @@ def client():
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def isolate_project_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(project_store, "UPLOAD_ROOT", upload_root)
+    monkeypatch.setattr(project_store, "STORE_FILE", upload_root / ".aegis_projects.json")
+
+
+@pytest.fixture(autouse=True)
+def isolate_crypto_prediction_logs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    log_root = tmp_path / "crypto_pred_logs"
+    log_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(crypto_prediction_log, "LOG_DIR", log_root)
+    monkeypatch.setattr(crypto_prediction_log, "LOG_FILE", log_root / "predictions.jsonl")
+    monkeypatch.setattr(crypto_prediction_log, "OUTCOME_FILE", log_root / "prediction_outcomes.jsonl")

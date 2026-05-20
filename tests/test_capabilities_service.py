@@ -1,6 +1,22 @@
 from __future__ import annotations
 
+from app.services import capabilities_service, embedding_service
 from app.services.capabilities_service import summarize_runtime_capabilities
+
+
+def test_embedding_status_probe_does_not_force_model_load(monkeypatch):
+    seen: dict[str, object] = {}
+
+    def fake_get_embedding_status(*, ensure_loaded: bool = False) -> dict:
+        seen["ensure_loaded"] = ensure_loaded
+        return {"status": "ok", "loaded": False, "mode": None}
+
+    monkeypatch.setattr(embedding_service, "get_embedding_status", fake_get_embedding_status)
+
+    data = capabilities_service._embedding_status()
+
+    assert data["status"] == "ok"
+    assert seen["ensure_loaded"] is False
 
 
 def test_summarize_runtime_capabilities_reports_degraded_with_project_tools(monkeypatch):
