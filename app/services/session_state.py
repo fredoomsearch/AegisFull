@@ -64,6 +64,8 @@ class SessionState(TypedDict, total=False):
     current_file_focus: Optional[str]
     current_symbol_focus: Optional[str]
     entities: List[str]
+    mentioned_entities: List[str]
+    conversation_graph: Dict[str, Any]
     constraints: List[str]
     open_questions: List[str]
     previous_decisions: List[str]
@@ -79,6 +81,8 @@ class SessionState(TypedDict, total=False):
     last_web_findings: List[str]
     last_user_request: str
     last_mode: str
+    previous_mode: str
+    mode_changed: bool
     conversation_act: str
     conversation_subject: str
     source_policy: str
@@ -271,6 +275,8 @@ def default_session_state() -> SessionState:
         "current_file_focus": None,
         "current_symbol_focus": None,
         "entities": [],
+        "mentioned_entities": [],
+        "conversation_graph": {},
         "constraints": [],
         "open_questions": [],
         "previous_decisions": [],
@@ -286,6 +292,8 @@ def default_session_state() -> SessionState:
         "last_web_findings": [],
         "last_user_request": "",
         "last_mode": "",
+        "previous_mode": "",
+        "mode_changed": False,
         "conversation_act": "other",
         "conversation_subject": "",
         "source_policy": "local",
@@ -353,7 +361,7 @@ def normalize_session_state(raw: Optional[Dict[str, Any]]) -> SessionState:
             "source_policy",
         }:
             base[key] = None
-    for key in ("entities", "constraints", "open_questions", "previous_decisions", "missing_evidence", "last_web_sources", "last_web_findings", "recent_tool_failures"):
+    for key in ("entities", "mentioned_entities", "constraints", "open_questions", "previous_decisions", "missing_evidence", "last_web_sources", "last_web_findings", "recent_tool_failures"):
         value = raw.get(key)
         if isinstance(value, list):
             base[key] = _unique_trimmed_strings(value)
@@ -480,6 +488,7 @@ def update_session_state(
 
     for entity in _extract_entities(lower):
         _add_unique(state["entities"], entity)
+        _add_unique(state["mentioned_entities"], entity)
 
     for constraint in _extract_constraints(lower):
         _add_unique(state["constraints"], constraint)
@@ -538,11 +547,11 @@ def update_session_state(
         state["last_artifact"] = _trim_text(
             state.get("last_artifact")
             or state.get("current_artifact_focus")
-            or state.get("current_topic")
-            or state.get("goal")
-            or user_clean
-        )
-        state["last_artifact_kind"] = state.get("last_artifact_kind") or artifact_kind or detect_artifact_kind(user_clean)
+or state.get("current_topic")
+                or state.get("goal")
+                or user_clean
+            )
+    state["last_artifact_kind"] = state.get("last_artifact_kind") or artifact_kind or detect_artifact_kind(user_clean)
 
     if web_query:
         state["last_web_query"] = _trim_text(web_query)
@@ -565,7 +574,22 @@ def update_session_state(
     state["allow_run"] = bool(semantic.get("allow_run"))
     state["override_memory"] = bool(semantic.get("override_memory"))
     state["last_user_request"] = user_clean
-    state["last_mode"] = _trim_text(mode) if mode else _trim_text(str(state.get("last_mode") or ""))
+    current_mode = _trim_text(mode) if mode else _trim_text(str(state.get("last_mode") or ""))
+    state["previous_mode"] = state.get("last_mode") or ""
+    state["mode_changed"] = current_mode != state.get("last_mode", "")
+    state["last_mode"] = current_mode
+
+    # Mode transition logging for debugging (Phase 4 - Optional)
+    if state.get("mode_changed"):
+        import logging
+        _mode_logger = logging.getLogger("aegis.mode_transition")
+        if _mode_logger.isEnabledFor(logging.DEBUG):
+            _mode_logger.debug(
+                "mode_transition: %s -> %s",
+                state.get("previous_mode"),
+                current_mode
+            )
+
     state["answer_style"] = _derive_answer_style(state, user_clean, mode=mode, followup=followup)
     plan = _derive_planner_state(state, user_clean, mode=mode)
     state["next_step"] = plan["next_step"]

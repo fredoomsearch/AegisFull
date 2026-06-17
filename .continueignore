@@ -1,0 +1,10 @@
+catboost_info/
+artifacts/
+data/
+.pytest_cache/
+__pycache__/
+*.zip
+*.tar.gz
+# Ignorar entornos y librerías
+venv/
+.env*

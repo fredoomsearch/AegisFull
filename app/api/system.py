@@ -34,6 +34,16 @@ from app.services.capabilities_service import (
 from app.models.llm_utils import llm_contract_snapshot
 from app.services.validation_state import snapshot as validation_runtime_snapshot
 from app.utils.runtime_helpers import product_track_default as _product_track_default
+from app.services.progress_snapshot_service import emit_progress_snapshot
+from app.services.progress_tracker import snapshot_progress, read_progress_file
+from app.services.phase_progress_manager import snapshot_stage_state, sync_phase_percentages
+
+
+class ProgressUpdateRequest(BaseModel):
+    phase_label: str
+    percent: int
+    note: str | None = None
+
 
 router = APIRouter(prefix="/system", tags=["system"], dependencies=[Depends(require_api_key)])
 
@@ -174,6 +184,102 @@ def _resources_snapshot(capabilities: Dict[str, Any] | None = None) -> Dict[str,
             "contract": llm_contract_snapshot(),
         },
     }
+
+
+@router.get("/progress")
+def progress_status() -> Dict[str, Any]:
+    """Return the current phase progress snapshot, stage state, and raw markdown."""
+    try:
+        snap = snapshot_progress()
+        stage = snapshot_stage_state()
+        raw = read_progress_file()
+    except Exception:
+        snap = {}
+        stage = {}
+        raw = ""
+    # compute global average progress across phases when available
+    global_avg = None
+    try:
+        if snap:
+            vals = [int(v) for v in snap.values()]
+            if vals:
+                global_avg = int(round(sum(vals) / len(vals)))
+    except Exception:
+        global_avg = None
+
+    return {
+        "ok": True,
+        "phase_progress": snap,
+        "global_phase_progress": global_avg,
+        "stage_state": stage,
+        "raw": raw,
+    }
+
+
+@router.post("/progress/update")
+def progress_update(req: ProgressUpdateRequest, admin: str = Depends(require_admin_api_key)) -> Dict[str, Any]:
+    """Admin-protected endpoint to update a phase percentage in PROGRESO_FASES.md."""
+    label = str(req.phase_label or "").strip()
+    try:
+        pct = int(req.percent)
+    except Exception:
+        raise HTTPException(status_code=400, detail="percent must be an integer")
+    if pct < 0 or pct > 100:
+        raise HTTPException(status_code=400, detail="percent must be between 0 and 100")
+    try:
+        ok = __import__("app.services.progress_tracker", fromlist=["update_phase_percentage"]).update_phase_percentage(label, pct, note=req.note)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to update progress: {exc}")
+    snap = snapshot_progress()
+    global_avg = None
+    try:
+        if snap:
+            vals = [int(v) for v in snap.values()]
+            if vals:
+                global_avg = int(round(sum(vals) / len(vals)))
+    except Exception:
+        global_avg = None
+    return {"ok": bool(ok), "phase_progress": snap, "global_phase_progress": global_avg}
+
+
+@router.post("/progress/sync")
+def progress_sync(admin: str = Depends(require_admin_api_key)) -> Dict[str, Any]:
+    """Admin-protected endpoint to synchronize phase percentages from stage state."""
+    try:
+        ok = sync_phase_percentages()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to sync progress: {exc}")
+    snap = snapshot_progress()
+    global_avg = None
+    try:
+        if snap:
+            vals = [int(v) for v in snap.values()]
+            if vals:
+                global_avg = int(round(sum(vals) / len(vals)))
+    except Exception:
+        global_avg = None
+    raw = read_progress_file()
+    return {"ok": bool(ok), "phase_progress": snap, "global_phase_progress": global_avg, "raw": raw}
+
+
+@router.post("/progress/emit")
+def progress_emit(admin: str = Depends(require_admin_api_key)) -> Dict[str, Any]:
+    """Admin-protected endpoint to emit an automatic progress snapshot block."""
+    try:
+        ok = emit_progress_snapshot()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to emit progress snapshot: {exc}")
+    snap = snapshot_progress()
+    global_avg = None
+    try:
+        if snap:
+            vals = [int(v) for v in snap.values()]
+            if vals:
+                global_avg = int(round(sum(vals) / len(vals)))
+    except Exception:
+        global_avg = None
+    raw = read_progress_file()
+    return {"ok": bool(ok), "phase_progress": snap, "global_phase_progress": global_avg, "raw": raw}
 
 
 def _agent_profile_snapshot() -> Dict[str, Any]:

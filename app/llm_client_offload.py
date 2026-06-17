@@ -633,6 +633,53 @@ def _generate_groq_response(
     )
 
 
+def _analyze_routing_requirements(
+    messages: List[Dict[str, str]],
+    max_new_tokens: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Analyze message content to determine optimal routing.
+    Returns requirements that guide provider selection.
+    """
+    combined = " ".join(
+        str(m.get("content") or "") for m in messages
+    ).lower()
+    
+    # Analyze requirements
+    requires_speed = any(
+        token in combined
+        for token in ("rápido", "rápida", "fast", "quick", "inmediato", "immediate", "ahora", "now")
+    )
+    requires_big_context = (
+        (max_new_tokens or MAX_NEW_TOKENS) > 2048
+        or "analiza" in combined
+        or "analyze" in combined
+        or "explica" in combined
+        or "explain" in combined
+        or len(combined) > 3000
+    )
+    requires_code_reasoning = any(
+        token in combined
+        for token in (
+            "código", "code", "function", "class", "debug", "error", "bug",
+            "implementa", "implementation", "refactor", "review", "inspect"
+        )
+    )
+    requires_privacy = any(
+        token in combined
+        for token in ("privado", "private", "confidencial", "confidential", "sensitive")
+    )
+    # Short queries favor speed
+    short_query = len(combined) < 200
+    
+    return {
+        "requires_speed": requires_speed or short_query,
+        "requires_big_context": requires_big_context,
+        "requires_code_reasoning": requires_code_reasoning,
+        "requires_privacy": requires_privacy,
+    }
+
+
 def generate_response(
     messages: List[Dict[str, str]],
     max_new_tokens: Optional[int] = None,
@@ -648,10 +695,19 @@ def generate_response(
     - Caps tokens using MAX_NEW_TOKENS.
     - Routes between local llama.cpp and Groq when configured.
     - On failure, returns a safe placeholder instead of crashing.
+    
+    Smart routing based on task requirements:
+    - requires_speed → Groq (faster)
+    - requires_big_context → Groq (larger context)
+    - requires_privacy → local only
+    - requires_code_reasoning → local (better for code)
     """
     profile_provider = _configured_provider()
     profile_remote_ready = bool(_remote_api_key() and _remote_model_name())
     route_provider = _normalize_provider_choice(preferred_provider) or profile_provider
+    
+    # Analyze requirements for smart routing
+    requirements = _analyze_routing_requirements(messages, max_new_tokens)
 
     if max_new_tokens is None or max_new_tokens <= 0:
         max_tokens = int(MAX_NEW_TOKENS)
@@ -663,11 +719,28 @@ def generate_response(
 
     messages = sanitize_messages(messages)
 
-    if route_provider == "groq":
+    # Smart routing based on requirements
+    if route_provider and route_provider not in {"auto", "hybrid"}:
+        # Explicit provider selection
+        attempt_order = [route_provider]
+    elif requirements.get("requires_privacy"):
+        # Privacy requirement → local only
+        attempt_order = ["local"]
+    elif requirements.get("requires_speed") and profile_remote_ready:
+        # Speed requirement → Groq first
+        attempt_order = ["groq", "local"]
+    elif requirements.get("requires_code_reasoning"):
+        # Code reasoning → local (better for code tasks)
+        attempt_order = ["local", "groq"] if profile_remote_ready else ["local"]
+    elif requirements.get("requires_big_context") and profile_remote_ready:
+        # Big context → Groq (larger context window)
+        attempt_order = ["groq", "local"]
+    elif route_provider == "groq":
         attempt_order = ["groq"]
     elif route_provider == "local":
         attempt_order = ["local", "groq"] if profile_remote_ready else ["local"]
     else:
+        # Default: local first, then groq fallback
         attempt_order = ["local", "groq"] if profile_remote_ready else ["local"]
 
     last_error = ""

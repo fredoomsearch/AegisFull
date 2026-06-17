@@ -2309,3 +2309,67 @@ def build_symbol_rename_plan(
 def is_architecture_question(text: str) -> bool:
     lower = (text or "").lower()
     return any(hint in lower for hint in _ARCH_QUESTION_HINTS)
+
+
+def infer_architecture(manifest: Dict[str, Any], *, lang: str = "es") -> str:
+    """
+    Convenience wrapper for architecture inference.
+    Returns a human-readable architecture summary.
+    """
+    if not isinstance(manifest, dict):
+        return ""
+    profile = build_architecture_profile(manifest)
+    return summarize_architecture(profile, lang=lang)
+
+
+def detect_frontend_type(manifest: Dict[str, Any]) -> str | None:
+    """
+    Detect frontend framework/type from project manifest.
+    Returns: 'react', 'vue', 'angular', 'nextjs', 'nuxt', 'thymeleaf', 'jsp', 'static', or None.
+    """
+    if not isinstance(manifest, dict):
+        return None
+    
+    file_tree = [str(path).lower() for path in (manifest.get("file_tree") or []) if isinstance(path, str)]
+    frameworks = [str(f).lower() for f in (manifest.get("frameworks") or [])]
+    
+    # Check frameworks first
+    if "react" in frameworks:
+        return "react"
+    if "vue" in frameworks or "vuejs" in frameworks:
+        return "vue"
+    if "angular" in frameworks:
+        return "angular"
+    if "next" in frameworks:
+        return "nextjs"
+    if "nuxt" in frameworks:
+        return "nuxt"
+    
+    # Check file tree patterns
+    has_react = any("react" in f or "/components" in f for f in file_tree)
+    has_vue = any("vue" in f or ".vue" in f for f in file_tree)
+    has_angular = any("angular" in f for f in file_tree)
+    has_next = any("next" in f or "pages/" in f for f in file_tree)
+    has_nuxt = any("nuxt" in f for f in file_tree)
+    has_thymeleaf = any("thymeleaf" in f or "templates/" in f for f in file_tree)
+    has_jsp = any(".jsp" in f for f in file_tree)
+    has_static = any("index.html" in f or "static/" in f for f in file_tree)
+    
+    if has_react or "src/components" in file_tree:
+        return "react"
+    if has_vue or ".vue" in file_tree:
+        return "vue"
+    if has_angular:
+        return "angular"
+    if has_next or "pages/" in file_tree:
+        return "nextjs"
+    if has_nuxt:
+        return "nuxt"
+    if has_thymeleaf or "templates/" in file_tree:
+        return "thymeleaf"
+    if has_jsp:
+        return "jsp"
+    if has_static or any("ui/" in f or "assets/" in f for f in file_tree):
+        return "static"
+    
+    return None

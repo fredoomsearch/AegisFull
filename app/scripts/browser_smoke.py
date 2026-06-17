@@ -59,7 +59,12 @@ def _chat_only_web_contract_ready(*, body_mode: str, mode_indicator: str, chat_p
     mode_value = str(body_mode or "").strip().lower()
     indicator_value = str(mode_indicator or "").strip().lower()
     chat_on = str(chat_pressed or "").strip().lower() == "true"
-    return mode_value == "chat" and "chat" in indicator_value and "auto web/local" in indicator_value and chat_on
+    return (
+        mode_value == "chat"
+        and "chat" in indicator_value
+        and chat_on
+        and any(sub in indicator_value for sub in ("auto web/local", "local only", "solo local"))
+    )
 
 
 def _new_chat_segment(before: str, after: str) -> str:

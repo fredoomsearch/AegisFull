@@ -104,6 +104,9 @@ export AEGIS_RUNTIME_PROFILE=strict
 export AEGIS_PRODUCT_TRACK=full
 export AEGIS_AUTH_MODE=on
 export AEGIS_START_CONTRACT_MODE=full
+export AEGIS_WEB_AUTO_DEFAULT_ON=0
+export AEGIS_WEB_AUTO_DEFAULT_ON=false
+
 
 export AEGIS_LLM_PROVIDER=groq
 export AEGIS_GROQ_API_KEY="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"
@@ -136,9 +139,7 @@ python -m app.scripts.readme_exports --copy
 python -m app.scripts.readme_exports --copy --contract-mode strict
 python -m app.scripts.readme_exports --write-env-file --contract-mode none
 
-./start_contract_strict.sh
-./start_no_contract.sh
-./start_aegis.sh --contract-mode full
+
 ./start_aegis.sh --contract-mode strict
 ./start_aegis.sh --contract-mode none
 #################################################

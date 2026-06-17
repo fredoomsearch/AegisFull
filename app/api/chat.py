@@ -49,6 +49,7 @@ from app.models.llm_utils import (
     detect_build_intent,
     is_code_question,
     is_market_question,
+    is_obviously_unsafe_request,
     is_repo_content_question,
     looks_like_low_value_response,
     looks_like_overrefusal,
@@ -100,6 +101,7 @@ from app.services.crypto_prediction_log import pair_predictions_with_outcomes
 from app.services.crypto_trade_log import compute_pnl, list_trades
 from app.services import health_state, runtime_metrics
 from app.services.durable_memory import get_durable_memory_summary, update_durable_memory
+from app.services.validation_layer import check_framework_exists
 from app.services.project_manifest import (
     infer_file_focus,
     load_project_manifest,
@@ -218,15 +220,16 @@ ROUTER_CONFIDENCE_FAIL_CLOSED_THRESHOLD = max(
     0.0,
     min(1.0, float(os.getenv("AEGIS_ROUTER_CONFIDENCE_FAIL_CLOSED_THRESHOLD", "0.45"))),
 )
-WEB_AUTO_DEFAULT_ON = (os.getenv("AEGIS_WEB_AUTO_DEFAULT_ON", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+WEB_AUTO_DEFAULT_ON = (os.getenv("AEGIS_WEB_AUTO_DEFAULT_ON", "1") or "1").strip().lower() in {"1", "FALSE", "yes", "on"}
 
-_VALID_MODES = {"general", "chat", "code", "web", "url", "crypto", "project", "image", "agent"}
+_VALID_MODES = {"general", "chat", "code", "web", "url", "crypto", "project", "image", "agent", "auto"}
 _MODE_SOURCE_PLAN_FORCE = {
     "web": "web_only",
     "url": "web_only",
     "crypto": "local_only",
     "project": "local_only",
     "image": "local_only",
+    "auto": "local+web",
 }
 _MODE_LLM_DEFAULT = {
     "url": False,

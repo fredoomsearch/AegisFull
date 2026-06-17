@@ -9,7 +9,7 @@ try {
   window.__AEGIS_UI_BOOT_ERROR__ = null;
 } catch {}
 
-const MODES = { CHAT: "chat", WEB: "web", URL: "url", CRYPTO: "crypto", IMAGE: "image" };
+const MODES = { CHAT: "chat", WEB: "web", URL: "url", CRYPTO: "crypto", IMAGE: "image", AUTO: "auto" };
 const LANG = { ES: "es", EN: "en" };
 
 // Frontend should not cut model responses by default.
@@ -34,6 +34,7 @@ const endpoints = {
   archiveConversation: (id) => `/chat/${id}/archive`,
   unarchiveConversation: (id) => `/chat/${id}/unarchive`,
   deleteConversation: (id) => `/chat/${id}`,
+  deleteAllConversations: "/chat/all",
   analyzeAttachment: "/analyze_attachment",
   conversationEvents: (id) => `/chat/${id}/events`,
 
@@ -207,7 +208,16 @@ const state = {
   authCookieExp: Number(readSecretItem("aegis_auth_cookie_exp") || "0"),
   imageReferenceFile: null,
   chatAttachment: null,
-  chatAttachmentAutoWeb: JSON.parse(localStorage.getItem("aegis_attachment_auto_web") || "true"),
+
+  // Phase 3: Cache state tracking
+  cacheHistory: [],
+  cachePanelVisible: localStorage.getItem("aegis_cache_panel_visible") === "1",
+  cacheAvailable: false,
+  lastCacheKey: "",
+  
+  // Phase 4: Mode logging
+  modeLogEnabled: localStorage.getItem("aegis_mode_logging") === "1",
+  lastModeLog: null,
 
   pending: false,
   activeControllers: new Set(),
@@ -332,8 +342,18 @@ const state = {
   conversationsIncludeArchived: false,
   lastTranscriptConversationId: "",
 
-  // logs
+// logs
   logPath: null,
+
+  // cache tracking for sidebar UI
+  cacheHistory: [],
+  lastCacheKey: "",
+  cacheAvailable: false,
+  cachePanelVisible: false,
+
+  // mode logging for debug
+  lastModeLog: null,
+  modeLogEnabled: false,
 
   // alerts
   seenAlerts: new Set(),
@@ -494,14 +514,14 @@ function cacheDom() {
   dom.webBtn = document.getElementById("webBtn");
   dom.urlBtn = document.getElementById("urlBtn");
   dom.cryptoBtn = document.getElementById("cryptoBtn");
-  dom.imgBtn = document.getElementById("imgBtn");
+dom.imgBtn = document.getElementById("imgBtn");
+  dom.autoBtn = document.getElementById("autoBtn");
   dom.attachBtn = document.getElementById("attachBtn");
   dom.layoutToggle = document.getElementById("layoutToggle");
   dom.imgInput = document.getElementById("imgInput");
   dom.attachmentInput = document.getElementById("attachmentInput");
   dom.chatAttachmentBar = document.getElementById("chatAttachmentBar");
   dom.chatAttachmentLabel = document.getElementById("chatAttachmentLabel");
-  dom.chatAttachmentAutoWeb = document.getElementById("chatAttachmentAutoWeb");
   dom.chatAttachmentClear = document.getElementById("chatAttachmentClear");
   dom.imageQuickBar = document.getElementById("imageQuickBar");
   dom.imageModeGuide = document.getElementById("imageModeGuide");
@@ -622,13 +642,16 @@ function cacheDom() {
   dom.chatCol = document.querySelector(".chat-col");
   dom.appSidebar = document.querySelector(".app-sidebar");
 
-  dom.batchApplyModal = document.getElementById("batchApplyModal");
+dom.batchApplyModal = document.getElementById("batchApplyModal");
   dom.batchApplyClose = document.getElementById("batchApplyClose");
   dom.batchApplyInput = document.getElementById("batchApplyInput");
   dom.batchApplyPreview = document.getElementById("batchApplyPreview");
   dom.batchApplyPreviewBtn = document.getElementById("batchApplyPreviewBtn");
   dom.batchApplyRun = document.getElementById("batchApplyRun");
   dom.batchApplyTemplate = document.getElementById("batchApplyTemplate");
+
+  // erase all history
+  dom.eraseAllHistoryBtn = document.getElementById("eraseAllHistoryBtn");
 
   // crypto controls
   dom.cryptoModelSelect = document.getElementById("cryptoModelSelect");
@@ -721,7 +744,6 @@ function initState() {
     renderActiveProjectSelect();
   }
   if (state.conversationId && hasAuthForScope("main")) syncConversationState(state.conversationId);
-  if (dom.chatAttachmentAutoWeb) dom.chatAttachmentAutoWeb.checked = !!state.chatAttachmentAutoWeb;
   if (dom.newsMarkersToggle) dom.newsMarkersToggle.checked = !!state.showNewsMarkers;
   updateChatAttachmentBar();
   updateImageQuickBar();
@@ -803,7 +825,8 @@ function wireUI() {
   // mode buttons
   dom.chatBtn?.addEventListener("click", () => setMode(MODES.CHAT));
   dom.webBtn?.addEventListener("click", () => setMode(MODES.WEB));
-  dom.urlBtn?.addEventListener("click", () => setMode(state.mode === MODES.URL ? MODES.CHAT : MODES.URL));
+dom.urlBtn?.addEventListener("click", () => setMode(state.mode === MODES.URL ? MODES.CHAT : MODES.URL));
+  dom.autoBtn?.addEventListener("click", () => setMode(state.mode === MODES.AUTO ? MODES.CHAT : MODES.AUTO));
   dom.cryptoBtn?.addEventListener("click", () => setMode(state.mode === MODES.CRYPTO ? MODES.CHAT : MODES.CRYPTO));
   dom.imgBtn?.addEventListener("click", () => {
     const enteringImage = state.mode !== MODES.IMAGE;
@@ -839,12 +862,6 @@ function wireUI() {
     e.preventDefault();
     clearChatAttachment({ clearImageRef: true });
     appendBubble(state.lang === LANG.ES ? "Adjunto limpiado." : "Attachment cleared.", "bot");
-  });
-
-  dom.chatAttachmentAutoWeb?.addEventListener("change", () => {
-    state.chatAttachmentAutoWeb = !!dom.chatAttachmentAutoWeb?.checked;
-    localStorage.setItem("aegis_attachment_auto_web", JSON.stringify(state.chatAttachmentAutoWeb));
-    updateChatAttachmentBar();
   });
 
   dom.llmProviderBtn?.addEventListener("click", (e) => {
@@ -1808,27 +1825,37 @@ function setMode(mode) {
   if (state.chatOnlyExperience && mode !== MODES.CHAT) {
     mode = MODES.CHAT;
   }
+  // Log mode transition (Phase 4)
+  const prevMode = state.mode;
   state.mode = mode;
   document.body.dataset.mode = state.mode;
+  
+  // Trigger mode logging if enabled
+  if (prevMode && prevMode !== mode) {
+    logModeTransition(prevMode, mode);
+  }
+  
   updateModeIndicator();
   updateModeButtons();
   updateImageQuickBar();
   updateComposeUI();
   updateTogglesVisibility();
   applyPanelVisibility();
-  notifyStatus(
+notifyStatus(
     state.lang === LANG.ES
       ? `Modo: ${
           state.mode === MODES.WEB ? "Web" :
           state.mode === MODES.URL ? "URL" :
           state.mode === MODES.CRYPTO ? "Cripto" :
-          state.mode === MODES.IMAGE ? "Imagen" : "Chat"
+          state.mode === MODES.IMAGE ? "Imagen" :
+          state.mode === MODES.AUTO ? "Auto" : "Chat"
         }`
       : `Mode: ${
           state.mode === MODES.WEB ? "Web" :
           state.mode === MODES.URL ? "URL" :
           state.mode === MODES.CRYPTO ? "Crypto" :
-          state.mode === MODES.IMAGE ? "Image" : "Chat"
+          state.mode === MODES.IMAGE ? "Image" :
+          state.mode === MODES.AUTO ? "Auto" : "Chat"
         }`,
     { kind: "info", key: `mode:${state.mode}`, dedupeMs: 1500, ttlMs: 1800 }
   );
@@ -1857,16 +1884,17 @@ function setMode(mode) {
 
 function updateModeIndicator() {
   if (!dom.modeIndicator) return;
-  const label = state.chatOnlyExperience
-    ? (state.lang === LANG.ES ? "Modo: Chat (auto web/local)" : "Mode: Chat (auto web/local)")
+const label = state.chatOnlyExperience
+    ? (state.lang === LANG.ES ? "Modo: Chat" : "Mode: Chat")
     : (
       state.mode === MODES.WEB ? (state.lang === LANG.ES ? "Modo: Web" : "Mode: Web") :
       state.mode === MODES.URL ? (state.lang === LANG.ES ? "Modo: URL" : "Mode: URL") :
       state.mode === MODES.CRYPTO ? (state.lang === LANG.ES ? "Modo: Cripto" : "Mode: Crypto") :
       state.mode === MODES.IMAGE ? (state.lang === LANG.ES ? "Modo: Imagen" : "Mode: Image") :
+      state.mode === MODES.AUTO ? (state.lang === LANG.ES ? "Modo: Auto" : "Mode: Auto") :
       (state.lang === LANG.ES ? "Modo: Chat" : "Mode: Chat")
     );
-  const showHint = state.chatOnlyExperience ? true : [MODES.CHAT, MODES.WEB, MODES.URL].includes(state.mode);
+  const showHint = state.chatOnlyExperience ? true : [MODES.CHAT, MODES.WEB, MODES.URL, MODES.AUTO].includes(state.mode);
   const hint = showHint ? formatModeRuntimeHint(state.lastChatContext) : "";
   dom.modeIndicator.textContent = hint ? `${label} • ${hint}` : label;
   updateRuntimeStatusBadge();
@@ -1948,15 +1976,15 @@ function updateWebStatusBadge() {
 
   let label = es ? "WEB: —" : "WEB: —";
   let title = es
-    ? "Estado web (auto). Usa `web:` para forzar búsqueda."
-    : "Web status (auto). Use `web:` to force search.";
+    ? "Estado web. Usa `web:` o el modo Web para forzar búsqueda."
+    : "Web status. Use `web:` or Web mode to force search.";
   let cls = "muted";
 
   if (ctx.using_live_web) {
     label = es ? "WEB: vivo" : "WEB: live";
     title = es
-      ? "Última respuesta usó web en vivo (auto o forzada con `web:`)."
-      : "Last answer used live web (auto or forced with `web:`).";
+      ? "Última respuesta usó web en vivo (forzada con `web:` o modo Web)."
+      : "Last answer used live web (forced with `web:` or Web mode).";
     cls = "success";
   } else if (ctx.using_cached_web || ctx.using_stale_cache) {
     label = es ? "WEB: caché" : "WEB: cache";
@@ -1983,20 +2011,20 @@ function updateWebStatusBadge() {
         ? `Web no disponible; respondiendo en local. ${providerSummary.summaryText}.`
         : `Web is unavailable; answering locally. ${providerSummary.summaryText}.`;
     } else if (status === "not-used") {
-      label = es ? "WEB: auto/local" : "WEB: auto/local";
+      label = es ? "WEB: no usada" : "WEB: not used";
       cls = "muted";
       title = es
-        ? "Esta respuesta se resolvió en local; la web sigue en modo automático."
-        : "This answer was resolved locally; web remains in automatic mode.";
+        ? "Esta respuesta se resolvió en local; la web no se utilizó."
+        : "This answer was resolved locally; web was not used.";
     } else if (status) {
       label = `WEB: ${status}`;
       cls = "muted";
     } else {
-      label = es ? "WEB: auto" : "WEB: auto";
+      label = es ? "WEB: sin usar" : "WEB: inactive";
       cls = "muted";
       title = es
-        ? "Web en modo automático; esta respuesta no necesitó web."
-        : "Web is in automatic mode; this response did not need web.";
+        ? "La web no se utilizó en esta respuesta. Usa el modo Web para forzar búsqueda."
+        : "Web was not used for this response. Use Web mode to force search.";
     }
   }
 
@@ -2559,10 +2587,10 @@ function localizeUI() {
     ready_label: es ? "Listo" : "Ready",
     help_item_chat_label: es ? "Chat" : "Chat",
     help_item_chat_desc: es ? "conversación normal con memoria. Usa modo Código/Cripto si aplica." : "normal conversation with memory. Use Code/Crypto mode when needed.",
-    help_item_web_label: es ? "Web (auto)" : "Web (auto)",
+    help_item_web_label: es ? "Web" : "Web",
     help_item_web_desc: es
-      ? "el contexto web está activo en automático; usa `web:` para forzar búsqueda y ver fuentes."
-      : "web context is auto-on; use `web:` to force search and show sources.",
+      ? "Selecciona este modo para forzar búsqueda web y ver fuentes."
+      : "Select this mode to force web search and show sources.",
     help_item_url_label: es ? "Modo URL" : "URL mode",
     help_item_url_desc: state.chatOnlyExperience
       ? (es ? "usa `url:https://...` para leer y resumir un enlace." : "use `url:https://...` to read and summarize a link.")
@@ -2574,7 +2602,7 @@ function localizeUI() {
     attach_mode_title: es ? "Adjuntar imagen/documento para chat" : "Attach image/document for chat",
     attachment_button_title: es ? "Adjuntar archivo, documento o imagen al chat" : "Attach file, document, or image to chat",
     image_upload_chat_title: es ? "Subir imagen de referencia para analizar" : "Upload reference image for analysis",
-    attachment_auto_web: es ? "Enriquecer con web (si hace falta)" : "Enrich with web (if needed)",
+    attachment_auto_web: es ? "Enriquecer con web" : "Enrich with web",
     attachment_clear_title: es ? "Quitar adjunto" : "Clear attachment",
     help_item_crypto_label: es ? "Cripto (señal + horizonte)" : "Crypto (signal + horizon)",
     help_item_crypto_desc: es
@@ -2705,8 +2733,8 @@ function localizeHelp() {
       ? "Preguntas generales, debugging local o instrucciones paso a paso."
       : "General questions, local debugging, and step-by-step help.",
     hint_web: es
-      ? "El contexto web está en automático por defecto. Agrega web: para forzar búsqueda cuando necesites fuentes recientes o enlaces citables."
-      : "Web context is automatic by default. Add web: to force search when you need fresh sources or citable links.",
+      ? "Usa el modo Web o web: para forzar búsqueda cuando necesites fuentes recientes o enlaces citables."
+      : "Use Web mode or web: to force search when you need fresh sources or citable links.",
     hint_url: es
       ? "Usa url:https://... para leer y resumir un enlace específico."
       : "Use url:https://... to read and summarize a specific link.",
@@ -3253,6 +3281,137 @@ function clearSources() {
   if (!dom.sourcesContent) return;
   dom.sourcesContent.innerHTML = "";
   dom.sourcesContent.appendChild(el("div", { text: state.lang === LANG.ES ? "Sin recursos externos aún." : "No external resources yet." }));
+}
+
+// =========================
+// Cache Sidebar Functions (Phase 3)
+// =========================
+
+function renderCachePanel() {
+  if (!dom.sourcesContent) return;
+  const es = state.lang === LANG.ES;
+  dom.sourcesContent.innerHTML = "";
+  
+  // Cache history header
+  const header = el("div", { class: "sources-section-header" });
+  header.appendChild(el("strong", { text: es ? "Historial de Caché" : "Cache History" }));
+  dom.sourcesContent.appendChild(header);
+  
+  // Show cache status indicator
+  const statusChip = el("span", {
+    class: `mini-chip ${state.cacheAvailable ? "success" : "muted"}`,
+    text: state.cacheAvailable 
+      ? (es ? "Caché disponible" : "Cache available")
+      : (es ? "Sin caché" : "No cache")
+  });
+  dom.sourcesContent.appendChild(statusChip);
+  
+  // Render cached items if available
+  if (state.cacheHistory && state.cacheHistory.length > 0) {
+    const list = el("div", { class: "cache-list" });
+    state.cacheHistory.slice(0, 10).forEach((item) => {
+      const chip = el("span", {
+        class: "mini-chip",
+        text: item.query ? `${item.query.slice(0, 20)}...` : (es ? "Sin query" : "No query")
+      });
+      chip.title = item.timestamp ? formatAgo(item.timestamp) : "";
+      list.appendChild(chip);
+    });
+    dom.sourcesContent.appendChild(list);
+  } else {
+    const emptyMsg = el("div", { 
+      class: "sources-empty",
+      text: es ? "No hay historial de caché" : "No cache history"
+    });
+    dom.sourcesContent.appendChild(emptyMsg);
+  }
+  
+  // Toggle button
+  const toggleBtn = el("button", {
+    class: "action-btn",
+    text: state.cachePanelVisible 
+      ? (es ? "Ocultar panel" : "Hide panel")
+      : (es ? "Mostrar panel" : "Show panel"),
+    attrs: { type: "button" }
+  });
+  toggleBtn.addEventListener("click", toggleCachePanel);
+  dom.sourcesContent.appendChild(toggleBtn);
+}
+
+function toggleCachePanel() {
+  state.cachePanelVisible = !state.cachePanelVisible;
+  if (state.cachePanelVisible) {
+    renderCachePanel();
+  } else {
+    clearSources();
+  }
+  localStorage.setItem("aegis_cache_panel_visible", state.cachePanelVisible ? "1" : "0");
+}
+
+function updateCacheState(queryKey, available) {
+  state.lastCacheKey = queryKey;
+  state.cacheAvailable = available;
+  
+  // Add to history
+  if (!state.cacheHistory) state.cacheHistory = [];
+  state.cacheHistory.unshift({
+    query: queryKey,
+    timestamp: Date.now(),
+    available: available
+  });
+  
+  // Keep only last 20
+  if (state.cacheHistory.length > 20) {
+    state.cacheHistory = state.cacheHistory.slice(0, 20);
+  }
+}
+
+function clearCacheHistory() {
+  state.cacheHistory = [];
+  state.lastCacheKey = "";
+  state.cacheAvailable = false;
+  if (state.cachePanelVisible) {
+    renderCachePanel();
+  }
+}
+
+// =========================
+// Mode Logging Functions (Phase 4)
+// =========================
+
+function logModeTransition(prevMode, newMode) {
+  if (!state.modeLogEnabled) return;
+  
+  const logEntry = {
+    timestamp: Date.now(),
+    prevMode: prevMode,
+    newMode: newMode,
+    conversationId: state.conversationId
+  };
+  
+  state.lastModeLog = logEntry;
+  
+  // Log to console in debug mode
+  if (state.debugTraceEnabled) {
+    console.log(`[Mode Transition] ${prevMode} → ${newMode}`, logEntry);
+  }
+}
+
+function setModeLoggingEnabled(enabled) {
+  state.modeLogEnabled = !!enabled;
+  localStorage.setItem("aegis_mode_logging", state.modeLogEnabled ? "1" : "0");
+  
+  const es = state.lang === LANG.ES;
+  notifyStatus(
+    state.modeLogEnabled 
+      ? (es ? "Mode logging activado" : "Mode logging enabled")
+      : (es ? "Mode logging desactivado" : "Mode logging disabled"),
+    { kind: "info", key: "mode-logging", dedupeMs: 800, ttlMs: 2200 }
+  );
+}
+
+function getModeLog() {
+  return state.lastModeLog;
 }
 
 function getDomainFromUrl(url) {
@@ -5346,7 +5505,6 @@ function updateChatAttachmentBar() {
   dom.chatAttachmentLabel.textContent = es
     ? `Adjunto ${kindLabel}: ${name}`
     : `Attached ${kindLabel}: ${name}`;
-  if (dom.chatAttachmentAutoWeb) dom.chatAttachmentAutoWeb.checked = !!state.chatAttachmentAutoWeb;
 }
 
 function setChatAttachment(attachment) {
@@ -5608,7 +5766,7 @@ async function onSend() {
   const t0 = performance.now();
   try {
     if (modeForThis === MODES.WEB) {
-      if ((!explicitWebPrefix || explicitLocalPrefix) && shouldKeepLocalInWebMode(text, "web")) {
+      if (explicitLocalPrefix) {
         await handleChat(text, { mode: "general" });
       } else {
         await handleWeb(text);
@@ -5792,44 +5950,6 @@ function messageNeedsFreshWeb(text) {
   ].some((kw) => lower.includes(kw));
 }
 
-function attachmentKeepsLocalRouting(text, mode = "general") {
-  const modeValue = String(mode || "").trim().toLowerCase();
-  if (modeValue === "crypto" || modeValue === "url") return false;
-  const attachment = state.chatAttachment && typeof state.chatAttachment === "object" ? state.chatAttachment : null;
-  if (!attachment) return false;
-  if (!messageTargetsAttachmentContext(text)) return false;
-  const kind = String(attachment.kind || "").trim().toLowerCase();
-  if (looksProjectScopedMessage(text)) return true;
-  if (kind === "image") return true;
-  if (messageNeedsFreshWeb(text)) return false;
-  return true;
-}
-
-function projectKeepsLocalRouting(text, mode = "general") {
-  const modeValue = String(mode || "").trim().toLowerCase();
-  if (modeValue === "crypto" || modeValue === "url") return false;
-  if (!looksProjectScopedMessage(text)) return false;
-  return !messageNeedsFreshWeb(text);
-}
-
-function shouldKeepLocalInWebMode(text, mode = "general") {
-  return looksExplicitLocalOnlyMessage(text) || looksLocalSocialMessage(text) || projectKeepsLocalRouting(text, mode) || attachmentKeepsLocalRouting(text, mode);
-}
-
-function shouldAutoUseWebForMessage(text, mode = "general") {
-  const modeValue = String(mode || "").trim().toLowerCase();
-  if (modeValue === "crypto" || modeValue === "url") return false;
-  const raw = String(text || "").trim();
-  if (!raw) return false;
-  if (looksExplicitLocalOnlyMessage(raw)) return false;
-  if (modeValue === "web") return !looksLocalSocialMessage(raw);
-  if (looksLocalSocialMessage(raw)) return false;
-  // Keep project-introspection turns local-first to avoid forcing web-only
-  // when the user is clearly asking about the active repo/files/symbols.
-  if (looksProjectScopedMessage(raw)) return false;
-  return true;
-}
-
 function buildSourceUsageNotice(context = null) {
   if (!context || typeof context !== "object") return "";
   const es = state.lang === LANG.ES;
@@ -5847,7 +5967,7 @@ function buildSourceUsageNotice(context = null) {
     return es ? "Fuente usada: datos locales (web no disponible)." : "Source used: local data (web unavailable).";
   }
   if (webStatus === "not-used") {
-    return es ? "Fuente usada: local (web automática, no requerida)." : "Source used: local (web automatic, not required).";
+    return es ? "Fuente usada: local (web inactiva)." : "Source used: local (web inactive).";
   }
   const origins = Array.isArray(context.source_origin) ? context.source_origin.map((v) => String(v || "").trim()) : [];
   if (origins.includes("local") || origins.includes("manifest") || String(context.active_project_id || "").trim()) {
@@ -6093,26 +6213,14 @@ async function handleAgentContinue({ useWeb = false, synthesize = true } = {}) {
 async function handleChat(text, { mode = "general" } = {}) {
   const modeValue = String(mode || "general").trim().toLowerCase();
   const scopedText = modeValue === "crypto" ? buildCryptoScopedMessage(text) : text;
-  const autoByMessage = shouldAutoUseWebForMessage(scopedText, modeValue);
-  const localFirstTurn = shouldKeepLocalInWebMode(scopedText, modeValue);
-  const attachmentPrefersWeb = !!(
-    state.chatAttachment
-    && state.chatAttachmentAutoWeb
-    && modeValue !== "url"
-    && modeValue !== "crypto"
-    && !localFirstTurn
-    && messageNeedsFreshWeb(scopedText)
-  );
-  const autoUseWeb = !localFirstTurn && (modeValue === "web" || autoByMessage || attachmentPrefersWeb);
-  const effectiveMode = localFirstTurn
-    ? "general"
-    : ((modeValue === "web" || autoByMessage) ? "web" : modeValue);
+  const explicitLocalPrefix = /^local:\s*/i.test(scopedText);
+  const effectiveMode = modeValue === "web" && explicitLocalPrefix ? "general" : modeValue;
   const messageForBackend = buildMessageWithAttachment(scopedText, effectiveMode);
   const payload = {
     message: messageForBackend,
     lang: state.lang,
     mode: effectiveMode,
-    use_web: autoUseWeb,
+    use_web: effectiveMode === "web",
     active_project_id: state.activeProjectId || "",
     conversation_id: state.conversationId || undefined,
     use_existing: !!state.conversationId,
@@ -6558,15 +6666,15 @@ function prettyOriginLabel(origin) {
 function prettyWebStatusLabel(context) {
   const es = state.lang === LANG.ES;
   const source = String(context?.web_source || "").trim();
-  const status = String(context?.web_status || "").trim();
-  const labels = {
+const status = String(context?.web_status || "").trim();
+const labels = {
     live: es ? "web en vivo" : "live web",
     cache: es ? "web en caché" : "cached web",
     "stale-cache": es ? "caché web vieja" : "stale web cache",
     cooldown: es ? "web en cooldown" : "web cooldown",
-    unavailable: es ? "solo local (web no disponible)" : "local only (web unavailable)",
-    error: es ? "solo local (error web)" : "local only (web error)",
-    "not-used": es ? "web auto (solo local)" : "web auto (local only)",
+    unavailable: es ? "datos locales (web no disp.)" : "local data (web unavailable)",
+    error: es ? "datos locales (error web)" : "local data (web error)",
+    "not-used": es ? "datos locales" : "local data",
   };
   return labels[source || status] || labels[status] || "";
 }
@@ -6657,11 +6765,11 @@ function formatModeRuntimeHint(context) {
   if (String(context.web_status || "") === "unavailable") {
     return es ? "web no disp. → local" : "web unavailable → local";
   }
-  if (String(context.web_status || "") === "not-used" && context.active_project_id) {
-    return es ? "web auto → proyecto local" : "web auto → local project";
+if (String(context.web_status || "") === "not-used" && context.active_project_id) {
+    return es ? "proyecto activo" : "active project";
   }
   if (String(context.web_status || "") === "not-used") {
-    return es ? "web auto → local" : "web auto → local";
+    return es ? "datos locales" : "local data";
   }
   return "";
 }

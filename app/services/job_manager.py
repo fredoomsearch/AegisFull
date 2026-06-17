@@ -13,6 +13,31 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from threading import Lock, Thread
 from typing import Any, Callable, Dict, Optional
+from app.services.progress_tracker import snapshot_progress
+from app.services.phase_progress_manager import set_stage_progress
+from app.services.progress_snapshot_service import emit_progress_snapshot
+
+
+# Map common job stage name fragments to formal phase headings in PROGRESO_FASES.md
+# The keys are lowercase fragments to match against stage names; values are exact headings
+PHASE_NAME_MAP: Dict[str, str] = {
+    "context": "Fase 1 — Context Aggregator",
+    "validation": "Fase 2 — Validation Layer (Anti-hallucination)",
+    "project": "Fase 3 — Project Knowledge Graph",
+    "memory": "Fase 4 — Unified Memory Layer",
+    "hybrid": "Fase 5 — Hybrid Model Reasoning",
+    "tool": "Fase 6 — Tool Result Persistence / Cache",
+}
+
+
+def _map_stage_to_phase(stage_name: str) -> str | None:
+    if not stage_name:
+        return None
+    lower = str(stage_name).lower()
+    for frag, heading in PHASE_NAME_MAP.items():
+        if frag in lower:
+            return heading
+    return None
 
 
 @dataclass
@@ -70,6 +95,11 @@ def start_stage(job_id: str, name: str, *, detail: str = "") -> None:
             }
         )
         job.updated_at = now
+        try:
+            # Record stage progress at start (0%) using phase_progress_manager
+            set_stage_progress(str(name), 0, note="stage started")
+        except Exception:
+            pass
 
 
 def finish_stage(job_id: str, name: str, *, status: str = "success", detail: str = "") -> None:
@@ -98,6 +128,12 @@ def finish_stage(job_id: str, name: str, *, status: str = "success", detail: str
         if detail:
             target["detail"] = str(detail)
         job.updated_at = now
+        try:
+            # Record stage progress at finish (100% or 0 on failure)
+            pct = 100 if str(status) == "success" else 0
+            set_stage_progress(str(name), pct, note=str(detail) or "stage finished")
+        except Exception:
+            pass
 
 
 def start_job(

@@ -146,9 +146,12 @@
           </div>
 
           <div class="sources-box sessions-inline compact">
-            <div class="sessions-header">
+<div class="sessions-header">
               <div class="sessions-left">
                 <h3 data-i18n="tab_session">Sesión</h3>
+                <button id="eraseAllHistoryBtn" class="icon-btn small danger" title="Borrar todo el historial" data-i18n-title="erase_all_history_title" type="button">
+                  <i class="fa-solid fa-trash"></i>
+                </button>
                 <div class="session-id"><span data-i18n="session_id_label">ID:</span> <span id="conv-id-display">—</span></div>
                 <div class="session-actions-inline">
                   <button id="copyConvId" class="icon-btn small" title="Copiar ID" data-i18n-title="copy_id_title"><i class="fa-solid fa-copy"></i></button>
@@ -163,8 +166,9 @@
               </div>
             </div>
             <div class="sessions-body">
-              <div class="sessions-list-wrap">
+<div class="sessions-list-wrap">
                 <div class="sessions-subtitle" data-i18n="session_history_title">Historial</div>
+                <button id="clearAllHistBtn" class="icon-btn small danger" title="Borrar todo el historial" data-i18n-title="clear_all_history_title" type="button" style="margin-left:4px;margin-bottom:2px;"><i class="fa-solid fa-trash"></i></button>
                 <ul id="sessionsList" class="sessions-list"></ul>
               </div>
               <div class="sessions-events-wrap">
@@ -191,10 +195,6 @@
         <div id="sourceOriginBar" class="source-origin-bar" aria-live="polite"></div>
         <div id="chatAttachmentBar" class="chat-attachment-bar" hidden>
           <span id="chatAttachmentLabel" class="chat-attachment-label">Adjunto: —</span>
-          <label class="small-toggle chat-attachment-toggle">
-            <input id="chatAttachmentAutoWeb" type="checkbox" />
-            <span data-i18n="attachment_auto_web">Enriquecer con web (si hace falta)</span>
-          </label>
           <button id="chatAttachmentClear" class="icon-btn small danger" type="button" title="Quitar adjunto" data-i18n-title="attachment_clear_title">
             <i class="fa-solid fa-xmark"></i>
           </button>
