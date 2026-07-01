@@ -191,7 +191,8 @@ def _content_security_policy() -> str:
             "object-src 'none'",
             "frame-ancestors 'none'",
             "form-action 'self'",
-            "script-src 'self' https://cdn.jsdelivr.net 'sha256-iGhDcs7OUCUrpCKaz2b4qwzTg0KGPmY++8uL8bSftbY=' 'sha256-mxyk4rLYJtWSIWOLOr40iJLGy05iFiGFx9okxGJO0hk=' 'unsafe-hashes';",
+            # REMOVED the semicolon after 'unsafe-hashes' below:
+            "script-src 'self' https://cdn.jsdelivr.net 'sha256-iGhDcs7OUCUrpCKaz2b4qwzTg0KGPmY++8uL8bSftbY=' 'sha256-mxyk4rLYJtWSIWOLOr40iJLGy05iFiGFx9okxGJO0hk=' 'unsafe-hashes'",
             "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com",
             "font-src 'self' data: https://cdnjs.cloudflare.com https://fonts.gstatic.com",
             "img-src 'self' data: blob: https:",
