@@ -1781,7 +1781,8 @@ function getSendButtonLabel() {
 
 function getPendingBubbleLabel(mode = state.mode, text = "") {
   const es = state.lang === LANG.ES;
-  if (mode === MODES.WEB) return es ? "Buscando en web…" : "Searching web…";
+  // Web mode now writes directly like chat mode (no "Buscando en web..." indicator)
+  if (mode === MODES.WEB) return es ? "Escribiendo…" : "Typing…";
   if (mode === MODES.URL) return es ? "Leyendo URL…" : "Reading URL…";
   if (mode === MODES.CRYPTO) return es ? "Calculando señal…" : "Calculating signal…";
   if (mode === MODES.IMAGE) {
@@ -1980,16 +1981,12 @@ function updateWebStatusBadge() {
     : "Web status. Use `web:` or Web mode to force search.";
   let cls = "muted";
 
-  if (ctx.using_live_web) {
-    label = es ? "WEB: vivo" : "WEB: live";
+if (ctx.using_live_web || ctx.using_cached_web || ctx.using_stale_cache) {
+    label = es ? "WEB: active" : "WEB: active";
     title = es
-      ? "Última respuesta usó web en vivo (forzada con `web:` o modo Web)."
-      : "Last answer used live web (forced with `web:` or Web mode).";
+      ? "Búsqueda web utilizada en la última respuesta."
+      : "Web search used in last response.";
     cls = "success";
-  } else if (ctx.using_cached_web || ctx.using_stale_cache) {
-    label = es ? "WEB: caché" : "WEB: cache";
-    title = es ? "Última respuesta usó caché web." : "Last answer used web cache.";
-    cls = "warn";
   } else {
     const status = String(ctx.web_status || readyzWeb.status || "").trim();
     if (status === "ready") {
@@ -2816,16 +2813,58 @@ function showFilesPanelFromToolbar() {
 }
 
 function toggleSidebarVisibility() {
+  const wasVisible = state.sidebarVisible;
   state.sidebarVisible = !state.sidebarVisible;
   localStorage.setItem("aegis_sidebar_visible", state.sidebarVisible ? "1" : "0");
+  // When closing the sidebar (project panel), deactivate project mode and switch to chat mode
+  if (wasVisible) {
+    deactivateProjectMode();
+  }
   applyPanelVisibility();
 }
 
 function toggleChartVisibility() {
+  const wasVisible = state.chartVisible;
   state.chartVisible = !state.chartVisible;
   localStorage.setItem("aegis_chart_visible", state.chartVisible ? "1" : "0");
+  // When closing the crypto panel, switch to chat mode if it was open
+  if (wasVisible && state.mode === MODES.CRYPTO) {
+    state.mode = MODES.CHAT;
+    document.body.dataset.mode = state.mode;
+    updateModeIndicator();
+    updateModeButtons();
+  }
   applyPanelVisibility();
   updateCryptoStatePolling();
+}
+
+/**
+ * Deactivate project mode - clears active project context and optionally switches to chat mode.
+ * This function is called when closing the project panel to ensure clean state transition.
+ */
+function deactivateProjectMode() {
+  const es = state.lang === LANG.ES;
+  // If currently in project mode, switch back to chat mode
+  if (state.mode === MODES.CHAT) {
+    // Already in chat mode, just clear project
+  } else {
+    // Switch to chat mode when deactivating project
+    state.mode = MODES.CHAT;
+    document.body.dataset.mode = state.mode;
+    updateModeIndicator();
+    updateModeButtons();
+  }
+  // Clear active project context
+  state.activeProjectId = "";
+  localStorage.removeItem("aegis_active_project_id");
+  // Refresh UI
+  applyPanelVisibility();
+  renderActiveProjectBadge();
+  renderProjectMeta();
+  appendBubble(
+    es ? "Proyecto cierre: volver a chat." : "Project closed: back to chat.",
+    "bot"
+  );
 }
 
 function applyPanelVisibility() {
@@ -4389,7 +4428,7 @@ function renderProjectMeta() {
     return;
   }
 
-  const summaryText = detail.summary || detail.context?.project_summary || "—";
+const summaryText = detail.summary || detail.context?.project_summary_conversational || detail.context?.project_summary || "—";
   const grid = el("div", { class: "project-meta-grid" });
 
   const summaryCard = el("div", { class: "project-meta-card" });
@@ -5469,8 +5508,8 @@ async function setActiveProject(projectId, { rootPath = null, bindConversation =
   else if (!state.activeProjectId) {
     state.activeProjectDetail = null;
     state.activeProjectImpact = null;
-  }
-  loadProjectTree();
+}
+loadProjectTree();
   if (bindConversation && state.conversationId) {
     try {
       await bindConversationProject(state.activeProjectId || null);
@@ -5478,7 +5517,7 @@ async function setActiveProject(projectId, { rootPath = null, bindConversation =
       console.error("bind-project-error", err);
     }
   }
-  return true;
+return true;
 }
 
 function trimAttachmentAnalysis(text, maxChars = 2400) {
@@ -5953,11 +5992,8 @@ function messageNeedsFreshWeb(text) {
 function buildSourceUsageNotice(context = null) {
   if (!context || typeof context !== "object") return "";
   const es = state.lang === LANG.ES;
-  if (context.using_live_web) {
-    return es ? "Fuente usada: web en vivo." : "Source used: live web.";
-  }
-  if (context.using_cached_web || context.using_stale_cache) {
-    return es ? "Fuente usada: caché web." : "Source used: web cache.";
+if (context.using_live_web || context.using_cached_web || context.using_stale_cache) {
+    return es ? "Fuente usada: web." : "Source used: web.";
   }
   const webStatus = String(context.web_status || "").trim();
   if (webStatus === "cooldown") {
@@ -6386,7 +6422,7 @@ function deriveContextFromAgentStep(step) {
 
   // keep existing project summary context when present
   if (state.activeProjectDetail && typeof state.activeProjectDetail === "object") {
-    ctx.project_summary = String(state.activeProjectDetail.summary || "").trim();
+ctx.project_summary = String(state.activeProjectDetail.summary || state.activeProjectDetail.project_summary_conversational || "").trim();
     ctx.entrypoints = state.activeProjectDetail.entrypoints || [];
     ctx.dependencies = state.activeProjectDetail.dependencies || [];
     ctx.configs = state.activeProjectDetail.configs || [];
@@ -6509,10 +6545,10 @@ async function handleWeb(query) {
     web_provider: meta?.provider || "",
     web_results: meta?.results || results.length,
     using_live_web: meta?.source === "live",
-    using_cached_web: meta?.source === "cache",
+using_cached_web: meta?.source === "cache",
     using_stale_cache: meta?.source === "stale-cache",
     data_notice: buildDataNoticeFromMeta(meta, !!state.activeProjectId),
-    project_summary: state.activeProjectDetail?.summary || "",
+    project_summary: state.activeProjectDetail?.summary || state.activeProjectDetail?.project_summary_conversational || "",
     entrypoints: state.activeProjectDetail?.entrypoints || [],
     dependencies: state.activeProjectDetail?.dependencies || [],
     configs: state.activeProjectDetail?.configs || [],
@@ -6588,11 +6624,11 @@ async function handleUrl(urlText) {
   // Show as a “source”
   const title = data?.title || "";
   const snippet = (data?.summary || data?.text || data?.content || "").slice(0, 800);
-  renderResponseSources(url, [{ url, title, snippet }], {
+renderResponseSources(url, [{ url, title, snippet }], {
     source_plan: "web_only",
     source_origin: ["web"],
     active_project_id: state.activeProjectId || null,
-    project_summary: state.activeProjectDetail?.summary || "",
+    project_summary: state.activeProjectDetail?.summary || state.activeProjectDetail?.project_summary_conversational || "",
   }, data);
 
   appendBubble(
@@ -6668,13 +6704,13 @@ function prettyWebStatusLabel(context) {
   const source = String(context?.web_source || "").trim();
 const status = String(context?.web_status || "").trim();
 const labels = {
-    live: es ? "web en vivo" : "live web",
-    cache: es ? "web en caché" : "cached web",
-    "stale-cache": es ? "caché web vieja" : "stale web cache",
-    cooldown: es ? "web en cooldown" : "web cooldown",
-    unavailable: es ? "datos locales (web no disp.)" : "local data (web unavailable)",
-    error: es ? "datos locales (error web)" : "local data (web error)",
-    "not-used": es ? "datos locales" : "local data",
+    live: es ? "web" : "web",
+    cache: es ? "web" : "web",
+    "stale-cache": es ? "web" : "web",
+    cooldown: es ? "cooldown" : "cooldown",
+    unavailable: es ? "no disponible" : "unavailable",
+    error: es ? "error" : "error",
+    "not-used": es ? "local" : "local",
   };
   return labels[source || status] || labels[status] || "";
 }
@@ -6734,9 +6770,7 @@ function buildDataNoticeFromMeta(meta, hasLocalProject = false) {
   const es = state.lang === LANG.ES;
   const source = String(meta?.source || "").trim();
   const status = String(meta?.status || "").trim();
-  if (source === "live") return es ? "Usando fuentes web en vivo." : "Using live web sources.";
-  if (source === "cache") return es ? "Usando fuentes web en caché." : "Using cached web sources.";
-  if (source === "stale-cache") return es ? "La web en vivo no estuvo disponible; usando caché almacenada." : "Live web was unavailable; using stored cache.";
+if (source === "live" || source === "cache" || source === "stale-cache") return es ? "Usando fuentes web." : "Using web sources.";
   if (status === "cooldown") {
     if (hasLocalProject) {
       return es ? "La web está en cooldown; respondiendo con datos locales del proyecto (y/o caché)." : "Web is in cooldown; answering with local project data (and/or cache).";
@@ -6756,16 +6790,15 @@ function buildDataNoticeFromMeta(meta, hasLocalProject = false) {
 function formatModeRuntimeHint(context) {
   if (!context || typeof context !== "object") return "";
   const es = state.lang === LANG.ES;
-  if (context.using_live_web) return es ? "web en vivo" : "live web";
-  if (context.using_cached_web) return es ? "web en caché" : "cached web";
-  if (context.using_stale_cache) return es ? "caché web" : "web cache";
+  // Simplified: just show "web" without live/cached distinction
+  if (context.using_live_web || context.using_cached_web || context.using_stale_cache) return "web";
   if (String(context.web_status || "") === "cooldown") {
     return es ? "cooldown → local" : "cooldown → local";
   }
   if (String(context.web_status || "") === "unavailable") {
     return es ? "web no disp. → local" : "web unavailable → local";
   }
-if (String(context.web_status || "") === "not-used" && context.active_project_id) {
+  if (String(context.web_status || "") === "not-used" && context.active_project_id) {
     return es ? "proyecto activo" : "active project";
   }
   if (String(context.web_status || "") === "not-used") {
@@ -6788,12 +6821,12 @@ function renderSourceOriginBar(context = null) {
   };
 
   const addNote = (text) => {
-    const value = String(text || "").trim();
+const value = String(text || "").trim();
     if (!value) return;
     dom.sourceOriginBar.appendChild(el("div", { class: "origin-note", text: value }));
   };
 
-  if (debugMode && context.source_plan) {
+if (debugMode && context.source_plan) {
     dom.sourceOriginBar.appendChild(el("span", { class: "origin-pill plan", text: `${es ? "Plan" : "Plan"}: ${prettySourcePlan(context.source_plan)}` }));
   }
   const origins = Array.isArray(context.source_origin) ? context.source_origin : [];
@@ -6802,12 +6835,10 @@ function renderSourceOriginBar(context = null) {
   });
   const webStatusLabel = prettyWebStatusLabel(context);
   if (webStatusLabel) {
+    // Simplified: use single "web" class without live/cached distinction
     const webStatusClass =
-      context.using_live_web ? "web-live" :
-      context.using_cached_web ? "web-cache" :
-      context.using_stale_cache ? "web-stale" :
       String(context.web_status || "") === "unavailable" ? "web-unavailable" :
-      "web-local";
+      "web";
     dom.sourceOriginBar.appendChild(el("span", { class: `origin-pill ${webStatusClass}`, text: webStatusLabel }));
   }
   if (debugMode && context.web_provider) {
@@ -6933,15 +6964,15 @@ function renderResponseSources(query, results, context = null, raw = null) {
     let warn = "";
     if (src === "unavailable" || src === "error") {
       warn = esWarn(
-        "Web no disponible ahora mismo; respondiendo con datos locales/caché.",
+"Web no disponible ahora mismo; respondiendo con datos locales/caché.",
         "Web is unavailable right now; answering with local/cache data."
       );
     } else if (src === "stale-cache") {
       warn = esWarn(
-        "Web en vivo no estuvo disponible; usando caché almacenada.",
-        "Live web was unavailable; using stored cache."
+        "Web no estuvo disponible; usando caché.",
+        "Web was unavailable; using stored cache."
       );
-    } else if (src === "not-used" && !context.using_live_web && !context.using_cached_web) {
+    } else if (src === "not-used") {
       warn = esWarn(
         "Estás en modo Web, pero no se usó web en esta respuesta.",
         "You are in Web mode, but web was not used for this response."
@@ -7306,7 +7337,7 @@ function renderResponseSources(query, results, context = null, raw = null) {
   const sourcePlan = String(context?.source_plan || "").trim();
   const showProjectContext = sourcePlan === "local_only";
 
-  const summary = showProjectContext ? String(context?.project_summary || "").trim() : "";
+const summary = showProjectContext ? String(context?.project_summary_conversational || context?.project_summary || "").trim() : "";
   if (summary) {
     const summaryCard = el("div", { class: "project-meta-card" });
     summaryCard.appendChild(el("strong", { text: es ? "Proyecto activo" : "Active project" }));

@@ -1,0 +1,53 @@
+{
+  "project_id": "workspace_ingest_18ac6812",
+  "root_path": "/home/h/Documents/python/whioutoKn/tmp/workspace_ingest_18ac6812",
+  "generated_at": 1782279020,
+  "stats": {
+    "files": 1,
+    "dirs": 1,
+    "bytes": 29,
+    "chunk_count": 4,
+    "chunked_files": 2,
+    "skipped": {}
+  },
+  "file_tree": [
+    "app/service.py"
+  ],
+  "languages": [
+    {
+      "name": "python",
+      "count": 1
+    }
+  ],
+  "frameworks": [],
+  "entrypoints": [],
+  "package_files": [],
+  "config_files": [],
+  "key_files": [],
+  "readme_summary": "",
+  "architecture": {
+    "layers": [],
+    "top_dirs": [
+      {
+        "name": "app",
+        "count": 1
+      }
+    ],
+    "backend": false,
+    "frontend": false,
+    "auth": false,
+    "database": false,
+    "tests": false,
+    "infra": false,
+    "serverless": false,
+    "ci": false,
+    "monitoring": false,
+    "ai_rag": false,
+    "image": false,
+    "crypto": false,
+    "security": false,
+    "entrypoints": [],
+    "config_files": [],
+    "key_files": []
+  }
+}

@@ -18,7 +18,12 @@ class Language(str, Enum):
 # ---------------------------------------------------------------------------
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1, description="User message")
+    message: str = Field(
+        ..., 
+        min_length=1, 
+        max_length=8000,
+        description="User message"
+    )
     use_existing: Optional[bool] = Field(
         False, description="Use conversation_id only when explicitly selected"
     )

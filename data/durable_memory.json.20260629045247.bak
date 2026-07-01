@@ -1,0 +1,49 @@
+{
+  "anonymous": {
+    "subject": "anonymous",
+    "facts": [],
+    "preferences": [
+      "prefers concise answers"
+    ],
+    "notes": [
+      "active_project: proj_2acdf5",
+      "active_project: proj_f07b21",
+      "active_project: proj_d4e487",
+      "mode: code",
+      "mode: project",
+      "mode: general",
+      "mode: auto",
+      "mode: url",
+      "active_project: proj_b550ff",
+      "active_project: proj_a48cf5",
+      "active_project: proj_d6411c",
+      "active_project: proj_ca5210",
+      "mode: agent",
+      "active_project: aegis_unified_patch_9d86ee",
+      "active_project: Archive_1b4343",
+      "mode: crypto",
+      "recuerdas que al principio te salude ?",
+      "TL;DR: Sí, recuerdo que al principio te saludé como AEGIS, un asistente técnico.\n\nSteps:\n\n* Al principio de la conversación, te saludé como AEGIS.\n* Después de eso, respondí a tus preguntas sobre cómo comenzó la conversación y cuál fue tu p",
+      "recuerdas que te pregunte cosas de un proyecto?",
+      "Necesito un proyecto activo o una ruta de archivo concreta para responder con evidencia local. Activa un proyecto, registra un root del workspace o indica un archivo específico.",
+      "recuerdas que te pregunte cosas de un proyecto, es una pregunta, no una idea o solucion necesaria. Para algun proyecto, es solo para saber, es correcto ?",
+      "**TL;DR:** Recuerdas que te pregunté cosas de un proyecto, es una pregunta, no una idea o solución necesaria, y es correcto preguntar para saber.\n\n**Respuesta:** Sí, recuerdo que te preguntaste cosas de un proyecto. En ese momento, mi objet",
+      "mode: web",
+      "mode: chat"
+    ],
+    "created_at_ms": 1781670929769,
+    "updated_at_ms": 1782708623703
+  },
+  "api:783ae79de79a5d8a": {
+    "subject": "api:783ae79de79a5d8a",
+    "facts": [],
+    "preferences": [
+      "prefers concise answers"
+    ],
+    "notes": [
+      "mode: chat"
+    ],
+    "created_at_ms": 1782276742929,
+    "updated_at_ms": 1782624163144
+  }
+}

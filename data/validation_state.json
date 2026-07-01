@@ -1,0 +1,69 @@
+{
+  "last_updated_ms": 1782877288033,
+  "flows": {
+    "startup_gate": {
+      "status": "passed",
+      "detail": "startup-gates-passed",
+      "started_at_ms": 1782877280967,
+      "finished_at_ms": 1782877288033,
+      "updated_at_ms": 1782877288033,
+      "steps": {
+        "host-prereq": {
+          "status": "passed",
+          "detail": "ok",
+          "updated_at_ms": 1782877280967
+        },
+        "pytest-smoke": {
+          "status": "skipped",
+          "detail": "contract-mode=strict",
+          "updated_at_ms": 1782877280970
+        },
+        "agent-evals": {
+          "status": "passed",
+          "detail": "ok",
+          "updated_at_ms": 1782877282592
+        },
+        "preflight-e2e": {
+          "status": "skipped",
+          "detail": "contract-mode=strict",
+          "updated_at_ms": 1782877282593
+        },
+        "healthz": {
+          "status": "passed",
+          "detail": "ok",
+          "updated_at_ms": 1782877284610
+        },
+        "host-e2e": {
+          "status": "skipped",
+          "detail": "contract-mode=strict",
+          "updated_at_ms": 1782877284610
+        },
+        "readyz": {
+          "status": "passed",
+          "detail": "readyz ready=true",
+          "updated_at_ms": 1782877287864
+        },
+        "ui-contract": {
+          "status": "passed",
+          "detail": "ok",
+          "updated_at_ms": 1782877288029
+        },
+        "hard-contract": {
+          "status": "skipped",
+          "detail": "contract-mode=strict",
+          "updated_at_ms": 1782877288029
+        },
+        "no-loop-stress": {
+          "status": "skipped",
+          "detail": "contract-mode=strict",
+          "updated_at_ms": 1782877288033
+        },
+        "browser-smoke": {
+          "status": "skipped",
+          "detail": "contract-mode=strict",
+          "updated_at_ms": 1782877288033
+        }
+      }
+    }
+  }
+}

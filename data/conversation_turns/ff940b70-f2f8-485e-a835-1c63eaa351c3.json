@@ -1,0 +1,156 @@
+[
+  {
+    "turn_id": "06c2b75791ad",
+    "created_at": 1782877328312,
+    "finished_at": 1782877329162,
+    "status": "success",
+    "mode": "web",
+    "source_plan": "local_only",
+    "active_project_id": null,
+    "user_message": "hola",
+    "items": [
+      {
+        "item_id": "70989e600ee4",
+        "ts": 1782877328312,
+        "kind": "plan",
+        "status": "ok",
+        "payload": {
+          "mode": "web",
+          "source_plan": "local_only",
+          "force_web": true,
+          "current_task": "ok that's good, can u please take info about crypto mode last predicttion , Señal HOLD • p=50.5% • H=2m ensemble Precio base 59944 • 23:19 Resultado Δ -0.09% Precio real 59890.0...",
+          "current_subtask": "WHO ARE U?",
+          "next_step": "WHO ARE U?",
+          "next_tool": null,
+          "missing_evidence": [],
+          "tool_candidates": [],
+          "tool_risks": {},
+          "approval_required": [],
+          "actions": [],
+          "next_action": null,
+          "llm_required": true,
+          "steps": [
+            "llm_synthesis"
+          ],
+          "routing_confidence": 0.4,
+          "ambiguous_route": false
+        }
+      },
+      {
+        "item_id": "e896c4057216",
+        "ts": 1782877328312,
+        "kind": "source_selection",
+        "status": "ok",
+        "payload": {
+          "source_plan": "local_only",
+          "next_tool": null,
+          "tool_candidates": [],
+          "llm_required": true
+        }
+      },
+      {
+        "item_id": "bdd05fcaedf5",
+        "ts": 1782877328322,
+        "kind": "llm_request",
+        "status": "ok",
+        "payload": {
+          "mode": "web",
+          "prompt_chars": 5000
+        }
+      },
+      {
+        "item_id": "15e7c5f0c943",
+        "ts": 1782877329160,
+        "kind": "replan",
+        "status": "ok",
+        "payload": {
+          "reason": "llm_synthesis",
+          "next_step": "continue refining WHO ARE U?",
+          "next_tool": "web_search",
+          "missing_evidence": [],
+          "recent_tool_failures": [
+            "missing_evidence:missing required evidence"
+          ]
+        }
+      }
+    ],
+    "assistant_message": "TL;DR: Hola, I'm here to help with any questions or topics you'd like to discuss.\n\nSteps:\n\n* I can provide information on a wide range of topics, from science and technology to history and culture.\n* I can help with language-related tasks, such as translation and grammar correction.\n* I can engage in conversation and respond to questions and statements.\n* I can also provide code examples and help with programming-related tasks.\n\nAssumptions/edge cases:\n\n* I'm a large language model, I don't have personal experiences or emotions.\n* My responses are generated based on my training data and may not always be 100% accurate.\n* I can only provide information on topics within my knowledge domain and may not be able to answer questions on highly specialized or technical subjects.",
+    "response_context": {
+      "source_plan": "local_only",
+      "source_origin": [
+        "model"
+      ],
+      "active_project_id": null,
+      "effective_tool": "llm",
+      "effective_tool_status": "ok",
+      "effective_tool_output": null,
+      "web_query": "",
+      "web_status": "not-used",
+      "web_source": "none",
+      "web_provider": "",
+      "web_results": 0,
+      "web_attempted": false,
+      "using_live_web": false,
+      "using_cached_web": false,
+      "using_stale_cache": false,
+      "data_notice": "Respondiendo con contexto local del modelo.",
+      "architecture_summary": "",
+      "current_task": "ok that's good, can u please take info about crypto mode last predicttion , Señal HOLD • p=50.5% • H=2m ensemble Precio base 59944 • 23:19 Resultado Δ -0.09% Precio real 59890.0...",
+      "current_subtask": "WHO ARE U?",
+      "current_file_focus": null,
+      "current_symbol_focus": null,
+      "last_artifact": "WHO ARE U?",
+      "last_artifact_kind": "ui_component",
+      "current_artifact_focus": "WHO ARE U?",
+      "recent_tool_failures": [
+        "missing_evidence:missing required evidence"
+      ],
+      "web_findings": [],
+      "next_step": "continue refining WHO ARE U?",
+      "next_tool": "web_search",
+      "missing_evidence": [],
+      "tool_candidates": [],
+      "tool_risks": {},
+      "approval_required": [],
+      "actions": [],
+      "next_action": null,
+      "llm_required": true,
+      "routing_confidence": 0.4,
+      "ambiguous_route": false,
+      "crypto_prediction_ref": null,
+      "pending_approval": null,
+      "comp": {
+        "controller": "comp",
+        "act": "greeting",
+        "subject": "hola",
+        "source_policy": "web",
+        "web_required": false,
+        "allow_run": false,
+        "override_memory": false,
+        "route_mode": "web",
+        "route_reason": "planner:web_search",
+        "provider": null,
+        "effective_provider": null,
+        "next_tool": "web_search",
+        "next_step": "continue refining WHO ARE U?",
+        "planner": {
+          "llm_required": true,
+          "routing_confidence": 0.4,
+          "ambiguous_route": false
+        },
+        "quantitative": {
+          "routing_confidence": 0.4,
+          "confidence_bucket": "low",
+          "gate": "escalate",
+          "ambiguous_route": false
+        },
+        "memory": {
+          "active_project_id": null,
+          "current_file_focus": null,
+          "current_symbol_focus": null,
+          "current_artifact_focus": "WHO ARE U?"
+        }
+      }
+    }
+  }
+]

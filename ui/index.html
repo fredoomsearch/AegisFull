@@ -147,11 +147,8 @@
 
           <div class="sources-box sessions-inline compact">
 <div class="sessions-header">
-              <div class="sessions-left">
+<div class="sessions-left">
                 <h3 data-i18n="tab_session">Sesión</h3>
-                <button id="eraseAllHistoryBtn" class="icon-btn small danger" title="Borrar todo el historial" data-i18n-title="erase_all_history_title" type="button">
-                  <i class="fa-solid fa-trash"></i>
-                </button>
                 <div class="session-id"><span data-i18n="session_id_label">ID:</span> <span id="conv-id-display">—</span></div>
                 <div class="session-actions-inline">
                   <button id="copyConvId" class="icon-btn small" title="Copiar ID" data-i18n-title="copy_id_title"><i class="fa-solid fa-copy"></i></button>
@@ -168,7 +165,6 @@
             <div class="sessions-body">
 <div class="sessions-list-wrap">
                 <div class="sessions-subtitle" data-i18n="session_history_title">Historial</div>
-                <button id="clearAllHistBtn" class="icon-btn small danger" title="Borrar todo el historial" data-i18n-title="clear_all_history_title" type="button" style="margin-left:4px;margin-bottom:2px;"><i class="fa-solid fa-trash"></i></button>
                 <ul id="sessionsList" class="sessions-list"></ul>
               </div>
               <div class="sessions-events-wrap">
@@ -202,13 +198,13 @@
 
         <div class="chat-controls">
           <div class="controls-left">
-            <div class="icon-group">
+<div class="icon-group">
               <button id="chatBtn" class="icon-btn" aria-pressed="true" title="Modo chat" data-i18n-title="mode_chat_title"><i class="fas fa-comment-dots"></i></button>
               <button id="webBtn" class="icon-btn" aria-pressed="false" title="Modo búsqueda web" data-i18n-title="mode_web_title"><i class="fas fa-globe"></i></button>
-              <button id="urlBtn" class="icon-btn" aria-pressed="false" title="Modo leer URL" data-i18n-title="mode_url_title"><i class="fas fa-link"></i></button>
-              <button id="cryptoBtn" class="icon-btn" aria-pressed="false" title="Modo cripto" data-i18n-title="mode_crypto_title"><i class="fas fa-coins"></i></button>
-              <button id="imgBtn" class="icon-btn" aria-pressed="false" title="Modo imagen" data-i18n-title="mode_image_title"><i class="fas fa-image"></i></button>
-              <button id="attachBtn" class="icon-btn image-upload-inline-btn" aria-pressed="false" title="Adjuntar archivo o imagen" data-i18n-title="attachment_button_title"><i class="fas fa-upload"></i></button>
+              <button id="urlBtn" class="icon-btn" aria-pressed="false" title="Modo leer URL" data-i18n-title="mode_url_title" hidden><i class="fas fa-link"></i></button>
+              <button id="cryptoBtn" class="icon-btn" aria-pressed="false" title="Modo cripto" data-i18n-title="mode_crypto_title" hidden><i class="fas fa-coins"></i></button>
+              <button id="imgBtn" class="icon-btn" aria-pressed="false" title="Modo imagen" data-i18n-title="mode_image_title" hidden><i class="fas fa-image"></i></button>
+<button id="attachBtn" class="icon-btn image-upload-inline-btn" aria-pressed="false" title="Adjuntar archivo o imagen" data-i18n-title="attachment_button_title"><i class="fas fa-upload"></i></button>
               <button id="layoutToggle" class="icon-btn" aria-pressed="false" title="Ocultar paneles laterales" data-i18n-title="layout_toggle_title"><i class="fas fa-up-right-and-down-left-from-center"></i></button>
             </div>
           </div>

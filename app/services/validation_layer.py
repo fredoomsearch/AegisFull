@@ -141,6 +141,23 @@ _GEO_NON_GEO_HINTS = (
     "import ",
 )
 
+# Time question prefixes - added for Issue #3 enhancement
+_TIME_QUESTION_PREFIXES = (
+    "what time is it",
+    "what's the time",
+    "whats the time",
+    "current time",
+    "que hora es",
+    "qué hora es",
+    "hora actual",
+    "dime la hora",
+    "hora tiene",
+    "current date",
+    "what date is it",
+    "fecha actual",
+    "que fecha es",
+)
+
 
 def _looks_like_geography_question(message: str) -> bool:
     normalized = normalize_for_routing(strip_attachment_context(message)).lstrip("¿¡")
@@ -182,6 +199,19 @@ def _extract_capital_subject(message: str) -> str:
     return ""
 
 
+def _looks_like_time_question(message: str) -> bool:
+    """Detect time/date questions that should use web for live data."""
+    normalized = normalize_for_routing(strip_attachment_context(message)).lstrip("¿¡")
+    if not normalized:
+        return False
+    if is_code_question(message) or is_market_question(message):
+        return False
+    # Exclude project/symbol questions
+    if any(token in normalized for token in ("file", "function", "class", "module", "project", "repo", "symbol")):
+        return False
+    return any(normalized.startswith(prefix) for prefix in _TIME_QUESTION_PREFIXES)
+
+
 def _looks_like_code_heavy_answer(text: str) -> bool:
     candidate = str(text or "")
     if not candidate.strip():
@@ -213,6 +243,88 @@ def _looks_like_code_heavy_answer(text: str) -> bool:
             if line_hits >= 4:
                 return True
     return False
+
+
+# Generic refusal/leak patterns for web queries - Issue #3 enhancement
+_GENERIC_REFUSAL_PATTERNS = (
+    "i cannot browse",
+    "i can't browse",
+    "i dont have access to the internet",
+    "i don't have access to the internet",
+    "i do not have access to the internet",
+    "i cannot access external",
+    "i can't access external",
+    "unable to browse",
+    "unable to access web",
+    "no tengo acceso a internet",
+    "no puedo navegar",
+    "no puedo acceder a internet",
+    "unable to fetch",
+    "cannot fetch url",
+    "no se pudo obtener",
+    "fallo al obtener",
+    "could not access",
+    "no fue posible acceder",
+)
+
+# Leak patterns that indicate model is reverting to training rather than using web
+_LEAK_WEB_PATTERNS = (
+    "as an ai language model",
+    "i'm an ai",
+    "i am an ai",
+    "as a language model",
+    "my training data",
+    "my knowledge cutoff",
+    "knowledge cutoff",
+    "after my training",
+    "trained on",
+    "fui entrenado",
+    "soy un modelo",
+    "mi conocimiento",
+    "mis datos de entrenamiento",
+)
+
+
+def _looks_like_generic_refusal(text: str) -> bool:
+    """Detect generic refusal patterns that indicate model is not using web sources."""
+    if not text:
+        return False
+    lower = text.lower()
+    # Check explicit refusal patterns
+    for pattern in _GENERIC_REFUSAL_PATTERNS:
+        if pattern in lower:
+            return True
+    # Check for leak patterns indicating model is falling back to training
+    for pattern in _LEAK_WEB_PATTERNS:
+        if pattern in lower:
+            return True
+    return False
+
+
+def _is_web_query_context(user_message: str) -> bool:
+    """Detect if user message requires web/live sources."""
+    if not user_message:
+        return False
+    normalized = normalize_for_routing(strip_attachment_context(user_message)).lower()
+    # Check for explicit web intent
+    web_indicators = (
+        "latest",
+        "current",
+        "recent",
+        "today",
+        "news",
+        "update",
+        "version",
+        "release",
+        "search",
+        "buscar",
+        "reciente",
+        "último",
+        "ultimo",
+        "noticias",
+        "actualización",
+    )
+    return any(token in normalized for token in web_indicators)
 
 
 def _fold_accents(text: str) -> str:

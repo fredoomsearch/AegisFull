@@ -6,9 +6,12 @@ Lightweight JSON-backed conversation memory (fallback when DB is unavailable).
 - Keeps conversations in a dict[str, Conversation].
 - Persists to disk atomically (CONV_FILE).
 - Trims old messages and merges them into a summary.
+- Optional encryption at rest using Fernet (cryptography).
 """
 
+import base64
 import glob
+import hashlib
 import json
 import logging
 import os
@@ -23,6 +26,14 @@ from app.services.session_state import default_session_state, normalize_session_
 from app.utils.runtime_helpers import now_ms as _now_ms
 
 logger = logging.getLogger(__name__)
+
+# Try to import cryptography for encryption
+try:
+    from cryptography.fernet import Fernet
+    _ENCRYPTION_AVAILABLE = True
+except Exception:
+    _ENCRYPTION_AVAILABLE = False
+    Fernet = None
 
 # ============================================================
 # LOCAL CONFIG (decoupled from llm_client_offload)
@@ -42,6 +53,59 @@ MAX_HISTORY_TURNS: int = int(os.getenv("AEGIS_MAX_HISTORY_TURNS", "20"))
 MAX_SUMMARY_CHARS: int = int(os.getenv("AEGIS_MAX_SUMMARY_CHARS", "1400"))
 # Max chars per stored message to prevent runaway JSON growth
 MAX_MESSAGE_CHARS: int = int(os.getenv("AEGIS_MAX_MESSAGE_CHARS", "4000"))
+
+# Encryption key (32 bytes base64-encoded for Fernet)
+_ENCRYPTION_KEY: Optional[bytes] = None
+_fernet: Optional[Fernet] = None
+
+def _init_encryption() -> None:
+    """Initialize encryption if key is provided."""
+    global _ENCRYPTION_KEY, _fernet
+    
+    key_str = os.getenv("AEGIS_ENCRYPTION_KEY", "").strip()
+    if not key_str:
+        logger.debug("No encryption key provided; memory encryption disabled.")
+        return
+    
+    if not _ENCRYPTION_AVAILABLE:
+        logger.warning("cryptography not installed; memory encryption unavailable.")
+        return
+    
+    try:
+        # Accept raw 32-byte key or base64-encoded
+        if len(key_str) == 44 and key_str.endswith("="):  # Likely base64
+            _ENCRYPTION_KEY = key_str.encode()
+        else:
+            # Hash password to get 32 bytes
+            _ENCRYPTION_KEY = base64.urlsafe_b64encode(hashlib.sha256(key_str.encode()).digest())
+        
+        _fernet = Fernet(_ENCRYPTION_KEY)
+        logger.info("Memory encryption initialized.")
+    except Exception as e:
+        logger.warning(f"Failed to initialize encryption: {e}")
+        _ENCRYPTION_KEY = None
+        _fernet = None
+
+
+def _encrypt(data: str) -> str:
+    """Encrypt string data. Returns original if encryption unavailable."""
+    if not _fernet or not data:
+        return data
+    try:
+        return _fernet.encrypt(data.encode()).decode()
+    except Exception:
+        return data
+
+
+def _decrypt(data: str) -> str:
+    """Decrypt string data. Returns original if not encrypted or encryption unavailable."""
+    if not _fernet or not data:
+        return data
+    try:
+        return _fernet.decrypt(data.encode()).decode()
+    except Exception:
+        # Not encrypted or wrong key; return as-is
+        return data
 
 
 class Message(TypedDict):
@@ -104,16 +168,37 @@ def _safe_json_load(path: str) -> Dict[str, Conversation]:
         return {}
     try:
         with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
+            raw_str = f.read()
+        
+        # Decrypt if needed
+        if _fernet and raw_str.startswith("g"):
+            raw_str = _decrypt(raw_str)
+        
+        raw = json.loads(raw_str)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to load memory file %s: %s; using empty store.", path, exc)
         return {}
-    if not isinstance(raw, dict):
+    
+    # Handle new format with checksum
+    if "_checksum" in raw:
+        stored_checksum = raw.get("_checksum", "")
+        data = raw.get("conversations", {})
+    else:
+        data = raw
+        stored_checksum = ""
+    
+    # Verify checksum if present
+    if stored_checksum:
+        computed = _compute_checksum(data)
+        if computed != stored_checksum:
+            logger.warning("Memory integrity check failed for %s; data may be corrupted.", path)
+    
+    if not isinstance(data, dict):
         logger.warning("Memory file %s did not contain a dict root; using empty store.", path)
         return {}
 
     result: Dict[str, Conversation] = {}
-    for conv_id, conv in raw.items():
+    for conv_id, conv in data.items():
         if not isinstance(conv_id, str) or not isinstance(conv, dict):
             continue
         summary = conv.get("summary", "") if isinstance(conv.get("summary"), str) else ""
@@ -139,14 +224,34 @@ def _safe_json_load(path: str) -> Dict[str, Conversation]:
     return result
 
 
+def _compute_checksum(data: Dict[str, Conversation]) -> str:
+    """Compute SHA-256 checksum for integrity verification."""
+    try:
+        serialized = json.dumps(data, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(serialized.encode()).hexdigest()[:16]
+    except Exception:
+        return ""
+
+
 def _safe_json_write(path: str, data: Dict[str, Conversation]) -> bool:
     if not PERSIST_MEMORY:
         return True
     _ensure_data_dir()
     tmp_file = f"{path}.tmp"
     try:
+        # Add checksum for integrity verification
+        payload = {
+            "_checksum": _compute_checksum(data),
+            "conversations": data,
+        }
+        json_str = json.dumps(payload, ensure_ascii=False, indent=2)
+        
+        # Encrypt if enabled
+        if _fernet:
+            json_str = _encrypt(json_str)
+        
         with open(tmp_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write(json_str)
             f.flush()
             os.fsync(f.fileno())
         _backup_memory_file(path)
@@ -168,6 +273,9 @@ def save_conversations(data: Dict[str, Conversation]) -> bool:
 
 
 conversations = load_conversations() or {}
+
+# Initialize encryption at module load
+_init_encryption()
 
 
 def get_or_create_conversation(conversation_id: Optional[str] = None) -> str:

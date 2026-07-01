@@ -121,6 +121,7 @@ from app.services.project_introspection import (
     summarize_project_subtree,
 )
 from app.services.project_store import get_project
+from app.services.project_presenter import present_improvements, present_capabilities
 from app.services.session_state import (
     classify_conversational_act,
     default_session_state,
@@ -1317,6 +1318,11 @@ def _project_context_payload(session_state: Dict[str, Any] | None, lang: str) ->
     if not manifest:
         return {}
     architecture = manifest.get("architecture") if isinstance(manifest.get("architecture"), dict) else {}
+    
+    # NEW: Include panel intelligence (improvements and capabilities) for better context
+    improvements_text = present_improvements(manifest, lang=lang) if manifest else ""
+    capabilities_text = present_capabilities(manifest, lang=lang) if manifest else ""
+    
     return {
         "project_summary": summarize_manifest(manifest, lang=lang),
         "architecture_summary": summarize_architecture(architecture, lang=lang) if architecture else "",
@@ -1324,6 +1330,9 @@ def _project_context_payload(session_state: Dict[str, Any] | None, lang: str) ->
         "entrypoints": list((manifest.get("entrypoints") or [])[:12]),
         "dependencies": list((manifest.get("package_files") or [])[:12]),
         "configs": list((manifest.get("config_files") or [])[:12]),
+        # New fields for panel intelligence - connects panels to chat model
+        "project_improvements": improvements_text,
+        "project_capabilities": capabilities_text,
     }
 
 
@@ -1433,9 +1442,13 @@ def _decide_source_plan(
                 return "local_only"
             if attachment_local_only:
                 return "local_only"
-            if has_active_project and project_scope and not (asks_links or freshness):
-                return "local+web"
+        if has_active_project and project_scope and not (asks_links or freshness):
+            return "local+web"
         return forced_plan
+
+    # Issue #1 fix: Force web_only for geography/capital/time questions to avoid stale local facts
+    if (_looks_like_geography_question(routing_message) or _looks_like_capital_question(routing_message) or _looks_like_time_question(routing_message)):
+        return "web_only"
 
     explicit_web_mode = mode_norm == "web"
     if is_crypto_mode:
@@ -3379,6 +3392,37 @@ def _extract_capital_subject(message: str) -> str:
     return ""
 
 
+# Time question prefixes (for Issue #1 fix - route to web to avoid stale local time)
+_TIME_QUESTION_PREFIXES: tuple[str, ...] = (
+    "what time is it",
+    "what's the time",
+    "whats the time",
+    "what is the time",
+    "current time",
+    "que hora es",
+    "qué hora es",
+    "hora actual",
+    "dime la hora",
+    "hora tiene",
+    "current date",
+    "what date is it",
+    "fecha actual",
+    "que fecha es",
+)
+
+
+def _looks_like_time_question(message: str) -> bool:
+    """Detect time/date questions that should use web for live data."""
+    normalized = normalize_for_routing(message)
+    if not normalized:
+        return False
+    if _has_explicit_project_scope(message):
+        return False
+    if is_code_question(message) or is_market_question(message):
+        return False
+    return any(normalized.startswith(prefix) for prefix in _TIME_QUESTION_PREFIXES)
+
+
 def _looks_like_code_heavy_answer(text: str) -> bool:
     candidate = str(text or "")
     if not candidate.strip():
@@ -4770,6 +4814,29 @@ def _append_replan_turn_item(
     )
 
 
+def _get_panel_context_for_fallback(session_state: Dict[str, Any] | None, lang: str) -> str:
+    """Load panel intelligence (improvements/capabilities) for smarter fallback responses."""
+    try:
+        active_project_id = str((session_state or {}).get("active_project_id") or "").strip()
+        if not active_project_id:
+            return ""
+        # Use project_context_payload which now includes improvements/capabilities
+        panel = _project_context_payload(session_state, lang)
+        improvements = str(panel.get("project_improvements") or "").strip()
+        capabilities = str(panel.get("project_capabilities") or "").strip()
+        parts = []
+        if improvements:
+            parts.append(improvements)
+        if capabilities:
+            parts.append(capabilities)
+        if parts:
+            hint = "\n\n" + " ".join(parts) if lang.startswith("es") else "\n\n" + " ".join(parts)
+            return hint
+    except Exception:
+        pass
+    return ""
+
+
 def _maybe_missing_evidence_response(
     message: str,
     lang: str,
@@ -4822,6 +4889,7 @@ def _maybe_missing_evidence_response(
     )
 
     if "active_project" in missing and project_scoped:
+        panel_hint = _get_panel_context_for_fallback(session_state, lang)
         response = (
             "Necesito un proyecto activo o una ruta de archivo concreta para responder con evidencia local. "
             "Activa un proyecto, registra un root del workspace o indica un archivo específico."
@@ -4829,6 +4897,7 @@ def _maybe_missing_evidence_response(
             else "I need an active project or a concrete file path to answer from local evidence. "
                  "Activate a project, register a workspace root, or point me to a specific file."
         )
+        response += panel_hint
         return {
             "response": response,
             "tool_kind": "missing_evidence",
@@ -4836,6 +4905,7 @@ def _maybe_missing_evidence_response(
         }
 
     if "file_or_symbol_focus" in missing and project_scoped and str(state.get("active_project_id") or "").strip():
+        panel_hint = _get_panel_context_for_fallback(session_state, lang)
         response = (
             "Necesito un archivo o símbolo concreto para ubicar esa respuesta en el proyecto. "
             "Indica el archivo, función, clase o símbolo que quieres inspeccionar."
@@ -4843,6 +4913,7 @@ def _maybe_missing_evidence_response(
             else "I need a concrete file or symbol to locate that answer inside the project. "
                  "Tell me which file, function, class, or symbol you want to inspect."
         )
+        response += panel_hint
         return {
             "response": response,
             "tool_kind": "missing_evidence",
@@ -4916,6 +4987,8 @@ def _maybe_routing_clarification_response(
     ):
         return None
 
+    # Enhance with panel context for smarter routing guidance
+    panel_hint = _get_panel_context_for_fallback(session_state, lang)
     response = (
         "Tu mensaje no indica si quieres contexto del proyecto activo o respuesta general/web. "
         "Acláralo así: `project: ...` para usar el repo activo, o `web: ...` para buscar en internet."
@@ -4923,6 +4996,7 @@ def _maybe_routing_clarification_response(
         else "Your message does not specify whether you want active-project context or a general/web answer. "
              "Clarify like this: `project: ...` to use the active repo, or `web: ...` to search the internet."
     )
+    response += panel_hint
     return {
         "response": response,
         "tool_kind": "routing_clarification",
@@ -4956,6 +5030,8 @@ def _maybe_local_evidence_exhausted_response(
     symbol_focus = str(state.get("current_symbol_focus") or "").strip()
     next_tool = str(state.get("next_tool") or "").strip()
 
+# Enhance with panel context for smarter guidance
+    panel_hint = _get_panel_context_for_fallback(session_state, lang)
     if has_active_project:
         response = (
             "No encontré evidencia local suficiente para responder con precisión todavía. "
@@ -4970,6 +5046,7 @@ def _maybe_local_evidence_exhausted_response(
             response += (
                 f" {(lang.startswith('es') and 'Foco actual') or 'Current focus'}: {file_focus or symbol_focus}."
             )
+        response += panel_hint
         return {"response": response, "tool_kind": "local_evidence_exhausted", "used_local": True}
 
     response = (
@@ -4979,6 +5056,7 @@ def _maybe_local_evidence_exhausted_response(
         else "I need more local evidence before I can answer precisely. "
              "Activate a project, register a workspace folder, or point me to a concrete file."
     )
+    response += panel_hint
     return {"response": response, "tool_kind": "local_evidence_exhausted", "used_local": True}
 
 
@@ -5128,6 +5206,7 @@ def _validate_turn_inputs(
         return {"response": response, "tool_kind": "validation_web_query", "used_local": True}
 
     if mode == "url" and not looks_like_url_candidate(message):
+        # Return validation payload - not HTTPException since this is used in routing decisions
         response = (
             "Modo URL requiere un enlace válido. Ejemplo: `url: https://docs.python.org/3/`."
             if lang.startswith("es")

@@ -317,6 +317,61 @@ def _clean_query(q: str) -> str:
     return q.strip()
 
 
+def _modify_query_for_retry(query: str) -> str:
+    """
+    Modify query for retry when stale cache is used.
+    Strategies:
+    - Add "latest" if not present
+    - Use shorter core terms
+    - Remove modifiers and focus on key terms
+    """
+    q = (query or "").strip().lower()
+    if not q:
+        return query
+
+    # Strategy 1: Add "latest" or "current" if not present
+    if "latest" not in q and "current" not in q and "recent" not in q:
+        # Try adding latest
+        return f"{query} latest"
+
+    # Strategy 2: Extract core terms (remove adjectives, modifiers)
+    q = re.sub(r"\b(new|current|latest|recent|best|top|popular|how to|what is|why|when|where)\b", "", q)
+    q = re.sub(r"\s+", " ", q).strip()
+
+    # If core terms exist, try with them
+    if len(q) >= 3:
+        return q
+
+    # Strategy 3: Generic fallback
+    return query
+
+
+def _should_retry_with_modified_query(
+    original_query: str,
+    stale_cache_age_seconds: float,
+    meta: Dict[str, Any],
+) -> bool:
+    """
+    Decide whether to retry with modified query based on stale cache age.
+    Returns True if stale cache is too old (>5 minutes).
+    """
+    if not stale_cache_age_seconds:
+        return False
+
+    STALE_THRESHOLD_SECONDS = 300.0  # 5 minutes
+
+    # Retry if stale cache is old
+    if stale_cache_age_seconds > STALE_THRESHOLD_SECONDS:
+        return True
+
+    # Also check if the source metadata indicates problems
+    source = str(meta.get("source") or "").strip().lower()
+    if source == "stale-cache":
+        return True
+
+    return False
+
+
 def _decode_ddg_href(href: str) -> str:
     """
     DDG HTML results often use redirect links like:
@@ -564,13 +619,68 @@ def web_search_structured_with_meta(
             cleaned,
             providers_tried,
             providers_skipped,
-        )
+)
         stale = search_state.get_stale_cached_results(cleaned, n, lang=lang_code)
         if stale:
             try:
                 restored = [WebSearchResult(**item) for item in stale][:n]
                 stale_meta = search_state.get_cached_results_meta(cleaned, n, lang=lang_code, allow_stale=True) or {}
-                logger.info("Using stale cache for %r after provider exhaustion.", cleaned)
+                stale_fetched_at = float(stale_meta.get("fetched_at") or 0.0)
+                stale_age_seconds = time.time() - stale_fetched_at if stale_fetched_at > 0 else 0.0
+                
+                # Issue #4: Check if we should retry with modified query on stale cache
+                should_retry = _should_retry_with_modified_query(cleaned, stale_age_seconds, stale_meta)
+                
+                if should_retry:
+                    # Retry with modified query for fresh results
+                    modified_query = _modify_query_for_retry(cleaned)
+                    logger.info("Retrying with modified query %r (original: %r, stale_age: %.1fs)", modified_query, cleaned, stale_age_seconds)
+                    
+                    # Clear stale cache and retry search
+                    search_state.clear_cached_results(modified_query, n, lang=lang_code)
+                    
+                    # Attempt retry with modified query
+                    retry_providers_tried: list[str] = []
+                    retry_effective_order, retry_provider_rows = _resolve_provider_plan(modified_query, lang_code)
+                    
+                    for retry_provider in retry_effective_order:
+                        retry_cfg = _PROVIDERS.get(retry_provider)
+                        if not retry_cfg:
+                            continue
+                        retry_avail = _provider_availability(retry_provider)
+                        if not bool(retry_avail.get("available")):
+                            continue
+                        
+                        retry_providers_tried.append(retry_provider)
+                        try:
+                            retry_results = _call_provider(retry_provider, retry_cfg, modified_query, n, lang_code)
+                        except Exception:
+                            continue
+                        
+                        if retry_results:
+                            trimmed_retry = retry_results[:n]
+                            _persist_cache(modified_query, n, lang_code, retry_provider, trimmed_retry)
+                            logger.info("Retry succeeded with provider %s for query %r", retry_provider, modified_query)
+                            return trimmed_retry, _build_meta(
+                                cleaned_query=modified_query,
+                                num_results=n,
+                                lang=lang_code,
+                                status="live",
+                                source="live",
+                                provider=retry_provider,
+                                results=len(trimmed_retry),
+                                attempted=True,
+                                live_web_used=True,
+                                providers_tried=providers_tried + retry_providers_tried,
+                                providers_skipped=providers_skipped,
+                                effective_provider_order=effective_provider_order,
+                                rotation_mode=ROTATION_MODE,
+                            )
+                    
+                    # If retry failed, log and fall back to stale cache
+                    logger.warning("Retry failed for %r, falling back to stale cache", cleaned)
+                
+                logger.info("Using stale cache for %r (age: %.1fs) after provider exhaustion.", cleaned, stale_age_seconds)
                 return restored, _build_meta(
                     cleaned_query=cleaned,
                     num_results=n,
@@ -582,7 +692,7 @@ def web_search_structured_with_meta(
                     attempted=True,
                     cache_used=True,
                     stale_cache_used=True,
-                    fetched_at=float(stale_meta.get("fetched_at") or 0.0),
+                    fetched_at=stale_fetched_at,
                     expires_at=float(stale_meta.get("expires_at") or 0.0),
                     providers_tried=providers_tried,
                     providers_skipped=providers_skipped,

@@ -107,7 +107,6 @@ export AEGIS_START_CONTRACT_MODE=full
 export AEGIS_WEB_AUTO_DEFAULT_ON=0
 export AEGIS_WEB_AUTO_DEFAULT_ON=false
 
-
 export AEGIS_LLM_PROVIDER=groq
 export AEGIS_GROQ_API_KEY="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"
 export AEGIS_GROQ_MODEL="llama-3.1-8b-instant"

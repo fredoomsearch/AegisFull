@@ -1,0 +1,7 @@
+{
+  "stages": {
+    "spawn_ingest_subprocess": 100,
+    "load_manifest": 100,
+    "update_project_registry": 100
+  }
+}

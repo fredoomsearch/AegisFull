@@ -2,12 +2,12 @@ import os
 import sys
 from pathlib import Path
 
-import pytest
-from fastapi.testclient import TestClient
+# Ensure project root is importable FIRST (before any app imports)
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from app.services import crypto_prediction_log, project_store
-
-
+# Set env vars after path is ready
 os.environ["DATABASE_URL"] = "postgresql+psycopg2://postgres:postgres@localhost:5432/test_aegis"
 os.environ["AEGIS_SEARCH_WARMUP_ON_START"] = "0"
 os.environ["AEGIS_SEARCH_WARMUP_INTERVAL"] = "0"
@@ -18,10 +18,10 @@ os.environ["AEGIS_LLM_WARMUP"] = "0"
 os.environ["AEGIS_DISABLE_EMBEDDINGS"] = "1"
 os.environ["AEGIS_MEMORY_PERSIST"] = "0"
 
-# Ensure project root is importable
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+import pytest
+from fastapi.testclient import TestClient
+
+from app.services import crypto_prediction_log, project_store
 
 
 @pytest.fixture(scope="session")
