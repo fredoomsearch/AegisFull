@@ -25,17 +25,24 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------
 # Configuración de la base de datos
 # ---------------------------------------------------------
-
 def _build_database_url() -> str:
+    # 1. Read from environment variable first (Best Practice)
     raw = (os.getenv("DATABASE_URL") or settings.DB_URL or "").strip()
+    
     if raw:
+        # Auto-fix driver prefixes for SQLAlchemy + Psycopg2 compliance
+        if raw.startswith("postgres://"):
+            raw = raw.replace("postgres://", "postgresql+psycopg2://", 1)
+        elif raw.startswith("postgresql://"):
+            raw = raw.replace("postgresql://", "postgresql+psycopg2://", 1)
         return raw
 
-    host = os.getenv("POSTGRES_HOST") or os.getenv("PGHOST") or ""
-    db = os.getenv("POSTGRES_DB") or os.getenv("PGDATABASE") or ""
-    user = os.getenv("POSTGRES_USER") or os.getenv("PGUSER") or ""
-    password = os.getenv("POSTGRES_PASSWORD") or os.getenv("PGPASSWORD") or ""
-    port = os.getenv("POSTGRES_PORT") or os.getenv("PGPORT") or "5432"
+    # 2. Fallback to individual variables if DATABASE_URL isn't provided
+    host = os.getenv("POSTGRES_HOST") or ""
+    db = os.getenv("POSTGRES_DB") or "postgres"
+    user = os.getenv("POSTGRES_USER") or "postgres"
+    password = os.getenv("POSTGRES_PASSWORD") or ""
+    port = os.getenv("POSTGRES_PORT") or "6543"  # Default to Pooler Port
 
     if host and db:
         driver = os.getenv("POSTGRES_DRIVER", "psycopg2").strip() or "psycopg2"
