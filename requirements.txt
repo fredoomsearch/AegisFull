@@ -21,7 +21,7 @@ pysocks
 sentence-transformers
 faiss-cpu
 pandas
-pandas_ta
+pandas-ta-classic
 vaderSentiment
 sqlalchemy
 psycopg2-binary
