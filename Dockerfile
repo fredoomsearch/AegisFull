@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Evitar prompts interactivos
 ENV DEBIAN_FRONTEND=noninteractive
@@ -33,7 +33,7 @@ ENV AEGIS_MODEL_PATH=/app/models/wizardcoder-python-7b-v1.0.Q5_K_M.gguf
 ENV AEGIS_N_THREADS=4
 ENV AEGIS_N_CTX=2048
 ENV AEGIS_N_GPU_LAYERS=0
-ENV DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/aegis
+ENV DATABASE_URL=postgresql://db_1_gawz_user:dzKYtOGambgMqT2L1JCWN7q3UHZga20p@dpg-d8ot3fr7uimc739kvsjg-a/db_1_gawz
 
 # Uvicorn escuchando en 0.0.0.0:8000
 EXPOSE 8000
