@@ -108,7 +108,7 @@ export AEGIS_WEB_AUTO_DEFAULT_ON=0
 export AEGIS_WEB_AUTO_DEFAULT_ON=false
 
 export AEGIS_LLM_PROVIDER=groq
-export AEGIS_GROQ_API_KEY="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"
+export AEGIS_GROQ_API_KEY=""
 export AEGIS_GROQ_MODEL="llama-3.1-8b-instant"
 export AEGIS_GROQ_BASE_URL="https://api.groq.com/openai/v1"
 export AEGIS_GROQ_TIMEOUT_SECONDS=20
