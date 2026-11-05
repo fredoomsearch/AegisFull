@@ -1,8 +1,4 @@
-FALTA
-Crypto/demo/analysis: faltan 3-4%
-Crypto para testnet serio: faltan 10-12%
-Crypto para live real con Binance: faltan 15-20%
-Seguridad/auth actual del sistema: faltan 5-8%
+This served you can you leave a start or a comment i aprecciate it, thanks for your time!.
 
 
 # AegisChat
@@ -117,7 +113,7 @@ export AEGIS_API_KEY="aegis-demo-key-2026-strong"
 export FILES_API_KEY="aegis-demo-key-2026-strong"
 export ADMIN_API_KEY="aegis-demo-key-2026-strong"
 
-export DATABASE_URL="postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/aegis"
+export DATABASE_URL=""
 export AEGIS_IMAGE_ENDPOINT="http://127.0.0.1:8188/prompt"
 export AEGIS_IMAGE_CKPT="DreamShaper_8_pruned.safetensors"
 export AEGIS_IMAGE_TIMEOUT=90
